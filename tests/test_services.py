@@ -1,4 +1,4 @@
-from backend.config import DOWNLOAD_OUTPUT_DIR
+from backend.config import DOWNLOAD_OUTPUT_DIR, MONITOR_DIR
 from backend.services import (
     DownloadService,
     MonitorService,
@@ -13,8 +13,6 @@ from backend.services import (
     upsert_project_user,
 )
 from backend.tool_loader import load_module
-from pathlib import Path
-import os
 import pytest
 import time
 
@@ -38,10 +36,7 @@ def test_extract_douyin_urls_splits_adjacent_www_links():
 
 
 def test_monitor_settings_parse_labels_and_urls():
-    monitor_dir = os.getenv("DOUYIN_MONITOR_DIR")
-    if not monitor_dir:
-        pytest.skip("DOUYIN_MONITOR_DIR is not configured")
-    module = load_module("test_douyin_monitor_tool", Path(monitor_dir) / "main.py")
+    module = load_module("test_douyin_monitor_tool", MONITOR_DIR / "main.py")
 
     users = module.parse_settings()
 
@@ -150,7 +145,7 @@ def test_default_download_output_is_project_output():
 def test_download_job_runs_from_sync_context_and_records_logs():
     class FakeDownloader:
         @staticmethod
-        def download_douyin(url, output_dir, mode, fetch_comments=False):
+        def download_douyin(url, output_dir, mode, fetch_comments=False, selected_indices=None):
             return {"type": "video", "title": "demo", "url": url, "output_dir": output_dir, "mode": mode}
 
     service = DownloadService.__new__(DownloadService)

@@ -13,3 +13,9 @@ __pycache__/
 .pytest_cache/
 *.pyc
 *.log
+
+# 搜索登录态 profile（含用户凭证，勿入仓库）
+external/douyin-user-search/douyin_profile/
+external/douyin-user-search/results/
+app/*.lnk
+external/**/__pycache__/

@@ -1,0 +1,30 @@
+# 抖音用户信息监控 - 配置文件
+#
+# 格式: 注释行写用户昵称/别名，紧接下一行写主页地址
+# 匹配规则: 传入关键词会与注释行(去掉#号)做模糊匹配
+#
+# 用法:
+#   python main.py query 梦鱼          → 匹配到 "# 梦鱼" 下方的 URL
+#   python main.py query Whys 王浩宇    → 匹配到 "# 王浩宇Whys" 下方的 URL
+#   python main.py query               → 查询全部
+#   python main.py watch 梦鱼          → 只监控梦鱼
+#   python main.py watch "https://..."  → 直接用 URL
+#   python main.py watch secuid123      → 直接用 sec_uid
+
+# 梦鱼
+https://www.douyin.com/user/MS4wLjABAAAAF1fvQTwsB0eCG2XP-gjrY3mynjkbO34HcRR_QG-mldkasK42EnuA1zwByCF1RXkb?from_tab_name=main
+
+# 王浩宇Whys
+https://www.douyin.com/user/MS4wLjABAAAAKIvMlEhOmwIIXsmwhqMw4R9Grm2PLpO8L9PyDM1BzMY?from_tab_name=main
+
+# 科目一技巧
+https://www.douyin.com/user/MS4wLjABAAAAU-N9Pe0xUcihYL0o-TTdA5PYR7062n2vBRpWjeUsXLc?from_tab_name=main&vid=6844480773450517764
+
+# 陈泽
+https://www.douyin.com/user/MS4wLjABAAAA58AFQVygQ3MfiCpOXp-RTUqdyHY-oVSJQHsyWhg4S78?from_tab_name=main&vid=7640544941084609807
+
+# 随便
+https://www.douyin.com/user/MS4wLjABAAAAD1-0xPBzoBn4-8swk82gtmvSfHqpM-1oxryogiaUQzq7MDgGWOR_bK41Tg1YcD6u?from_tab_name=main&is_search=0&list_name=follow&nt=0
+
+#斩虎
+https://www.douyin.com/user/MS4wLjABAAAAXYORSc3ch16oQJrF5CmjtMtGiRZxbDJnYuzUhKxKdVc?from_tab_name=main

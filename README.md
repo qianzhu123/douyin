@@ -1,26 +1,17 @@
 # Douyin Web Dashboard
 
-This project wraps the local `douyin-monitor` and `douyin-downloader` tools in a web dashboard.
+This project bundles the `douyin-monitor`, `douyin-downloader`, and `douyin-user-search` tools (under `external/`) in a self-contained web dashboard. No external paths or environment variables are required.
 
 ## Paths
 
-- Monitor tool: configured by `DOUYIN_MONITOR_DIR`.
-- Downloader tool: configured by `DOUYIN_DOWNLOADER_DIR`.
-- Search tool: configured by `DOUYIN_SEARCH_DIR`.
-- Project accounts: `data/users.json`.
-- Runtime profile cache: `data/profile_cache.json`.
-- Default download output: `output`.
+- Monitor tool: `external/douyin-monitor`
+- Downloader tool: `external/douyin-downloader`
+- Search tool: `external/douyin-user-search`
+- Project accounts: `data/users.json`
+- Runtime profile cache: `data/profile_cache.json`
+- Default download output: `output`
 
-Override paths with environment variables:
-
-```powershell
-$env:DOUYIN_MONITOR_DIR="<path-to-douyin-monitor>"
-$env:DOUYIN_DOWNLOADER_DIR="<path-to-douyin-downloader>"
-$env:DOUYIN_SEARCH_DIR="<path-to-douyin-user-search>"
-$env:DOUYIN_DOWNLOAD_OUTPUT="<path-to-output-directory>"
-```
-
-For the Windows launcher, copy `scripts\local-env.example.ps1` to `scripts\local-env.ps1` and fill in the same paths. The local file is ignored by git.
+All tool locations are hard-coded relative to the project root in `backend/config.py`. **No environment variables are used or expected.**
 
 ## Run
 
@@ -47,7 +38,7 @@ If frontend dependencies are missing, the launcher runs `npm install` before sta
 - Run selected users as a one-time profile query.
 - Start/stop selected live polling with a refresh interval.
 - Search Douyin users from the web UI and save selected accounts to `data/users.json`.
-- Submit Douyin video/share URLs to the downloader as background jobs.
+- Submit Douyin video/share URLs to the downloader as background jobs. Aggregation-page URLs (发现页 `/jingxuan?modal_id=`, 搜索页 `/jingxuan/search/...?...&modal_id=`, 喜欢列表 `/user/self?...&modal_id=`) are auto-rewritten to the canonical `/video/{aweme_id}` detail page before parsing.
 
 ## Account Data
 

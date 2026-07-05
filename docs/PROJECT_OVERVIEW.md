@@ -26,16 +26,14 @@ The frontend is implemented with React and Vite. It renders a list-first dashboa
 
 ## Runtime Paths
 
-Runtime paths are configured through environment variables or project-relative defaults:
+The three helper utilities are bundled inside the project under `external/`, and their locations are hard-coded relative to the project root in `backend/config.py`. No environment variables are used.
 
-- Monitor utility: `DOUYIN_MONITOR_DIR`
-- Downloader utility: `DOUYIN_DOWNLOADER_DIR`
-- Search utility: `DOUYIN_SEARCH_DIR`
+- Monitor utility: `external/douyin-monitor`
+- Downloader utility: `external/douyin-downloader`
+- Search utility: `external/douyin-user-search`
 - Account data: `data/users.json`
 - Profile cache: `data/profile_cache.json`
 - Download output: `output`
-
-These paths can be overridden with environment variables when needed.
 
 ## Development
 

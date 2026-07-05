@@ -64,6 +64,7 @@ function App() {
   const [downloadMode, setDownloadMode] = React.useState(1);
   const [downloadPreview, setDownloadPreview] = React.useState(null);
   const [selectedDownloadUrls, setSelectedDownloadUrls] = React.useState(new Set());
+  const [selectedDownloadMedia, setSelectedDownloadMedia] = React.useState({});
   const [previewBusy, setPreviewBusy] = React.useState(false);
   const [draggedUid, setDraggedUid] = React.useState('');
   const [hiddenUids, setHiddenUids] = React.useState(() => {
@@ -395,6 +396,10 @@ function App() {
       return;
     }
     const selectedUrls = Array.from(selectedDownloadUrls);
+    const mediaPayload = {};
+    Object.entries(selectedDownloadMedia).forEach(([url, indices]) => {
+      if (indices && indices.length) mediaPayload[url] = indices;
+    });
     setBusy(true);
     try {
       await postJson('/api/downloads', {
@@ -402,13 +407,16 @@ function App() {
         mode: Number(downloadMode),
         comments: false,
         selected_urls: selectedUrls,
+        selected_media: mediaPayload,
       });
       setDownloadText('');
       setDownloadPreview(null);
       setSelectedDownloadUrls(new Set());
+      setSelectedDownloadMedia({});
       await loadDownloads();
       setMessage('下载任务已提交，默认输出到项目 output 文件夹');
-      appendLog('info', `下载任务已提交：${selectedUrls.length || '全部'} 个链接`, '下载');
+      const mediaCount = Object.values(mediaPayload).reduce((sum, arr) => sum + arr.length, 0);
+      appendLog('info', `下载任务已提交：${selectedUrls.length || '全部'} 个链接${mediaCount ? `，含 ${mediaCount} 张指定图片` : ''}`, '下载');
     } catch (error) {
       setMessage(error.message);
       appendLog('error', error.message, '下载');
@@ -428,6 +436,7 @@ function App() {
       const preview = data.preview || { items: [] };
       setDownloadPreview(preview);
       setSelectedDownloadUrls(new Set((preview.items || []).filter((item) => item.selected).map((item) => item.url)));
+      setSelectedDownloadMedia({});
       setMessage(`已解析 ${preview.items?.length || 0} 个下载链接`);
       appendLog('info', `下载预览已解析 ${preview.items?.length || 0} 个链接`, '下载');
     } catch (error) {
@@ -443,6 +452,27 @@ function App() {
       const next = new Set(current);
       if (next.has(url)) next.delete(url);
       else next.add(url);
+      return next;
+    });
+  }
+
+  function toggleDownloadMedia(url, index) {
+    setSelectedDownloadMedia((current) => {
+      const next = { ...current };
+      const set = new Set(next[url] || []);
+      if (set.has(index)) set.delete(index);
+      else set.add(index);
+      if (set.size) next[url] = Array.from(set).sort((a, b) => a - b);
+      else delete next[url];
+      return next;
+    });
+  }
+
+  function setDownloadMediaBulk(url, indices) {
+    setSelectedDownloadMedia((current) => {
+      const next = { ...current };
+      if (indices && indices.length) next[url] = indices;
+      else delete next[url];
       return next;
     });
   }
@@ -565,8 +595,6 @@ function App() {
               value={downloadText}
               onChange={(event) => {
                 setDownloadText(event.target.value);
-                setDownloadPreview(null);
-                setSelectedDownloadUrls(new Set());
               }}
               placeholder="粘贴 https://v.douyin.com/... 或完整分享文案"
             />
@@ -584,7 +612,10 @@ function App() {
             <DownloadPreview
               preview={downloadPreview}
               selectedUrls={selectedDownloadUrls}
+              selectedMedia={selectedDownloadMedia}
               onToggle={toggleDownloadUrl}
+              onToggleMedia={toggleDownloadMedia}
+              onToggleMediaBulk={setDownloadMediaBulk}
             />
           )}
           <div className="job-list">
@@ -753,10 +784,60 @@ function DetailPanel({ row, hidden }) {
   );
 }
 
-function DownloadPreview({ preview, selectedUrls, onToggle }) {
+function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onToggleMedia, onToggleMediaBulk }) {
+  const dragState = React.useRef({ active: false, url: '', mode: 'add', last: -1 });
+
+  const beginDrag = (event, item, firstIndex) => {
+    if (event.button !== 0) return;
+    const picked = new Set(selectedMedia[item.url] || []);
+    dragState.current = {
+      active: true,
+      url: item.url,
+      mode: picked.has(firstIndex) ? 'remove' : 'add',
+      last: firstIndex,
+    };
+    applyDrag(firstIndex);
+    event.preventDefault();
+  };
+
+  const applyDrag = (index) => {
+    const ds = dragState.current;
+    if (!ds.active) return;
+    if (ds.last === index) return;
+    ds.last = index;
+    const current = new Set(selectedMedia[ds.url] || []);
+    if (ds.mode === 'add') current.add(index);
+    else current.delete(index);
+    onToggleMediaBulk(ds.url, Array.from(current).sort((a, b) => a - b));
+  };
+
+  const endDrag = () => {
+    if (dragState.current.active) dragState.current.active = false;
+  };
+
+  React.useEffect(() => {
+    window.addEventListener('mouseup', endDrag);
+    return () => window.removeEventListener('mouseup', endDrag);
+  }, []);
+
   return (
     <div className="preview-list">
-      {(preview.items || []).map((item) => (
+      {(preview.items || []).map((item) => {
+        const isImageType = item.type === 'image' || item.type === 'slide';
+        const media = item.media || [];
+        const multiImage = isImageType && media.length > 1;
+        const picked = new Set(selectedMedia[item.url] || []);
+        const allPicked = multiImage && picked.size === media.length;
+        const nonePicked = multiImage && picked.size === 0;
+        const toggleAll = () => {
+          if (allPicked) {
+            media.forEach((m) => onToggleMedia(item.url, m.index));
+          } else {
+            const toAdd = media.filter((m) => !picked.has(m.index));
+            toAdd.forEach((m) => onToggleMedia(item.url, m.index));
+          }
+        };
+        return (
         <article className="preview-row" key={item.url}>
           <label className="select-cell">
             <input type="checkbox" checked={selectedUrls.has(item.url)} onChange={() => onToggle(item.url)} />
@@ -768,22 +849,42 @@ function DownloadPreview({ preview, selectedUrls, onToggle }) {
             <strong>{item.title || `链接 ${item.index}`}</strong>
             <small>{item.author || item.url}</small>
             <span>
-              {item.type || 'link'} · {item.duration ? formatDuration(item.duration) : '时长未知'} · {item.media?.length || 1} 个媒体项
+              {item.type || 'link'} · {item.duration ? formatDuration(item.duration) : '时长未知'} · {media.length || 1} 个媒体项
+              {multiImage && picked.size > 0 ? ` · 已选 ${picked.size} 张` : ''}
             </span>
             {item.error && <small className="error-text">{item.error}</small>}
-            {item.media?.length > 1 && (
-              <div className="media-strip">
-                {item.media.slice(0, 8).map((media) => (
-                  <div className="media-chip" key={`${item.url}-${media.index}`}>
-                    {media.cover_url ? <img src={media.cover_url} alt="" /> : <span>{media.type}</span>}
-                    <small>{media.index}</small>
-                  </div>
-                ))}
+            {multiImage && (
+              <div
+                className="media-strip"
+                onMouseLeave={endDrag}
+              >
+                <button className="secondary media-toggle-all" onClick={toggleAll} type="button">
+                  {allPicked ? '取消全选' : '全选'}
+                </button>
+                <small className="media-hint">提示：按住鼠标在图片上拖动可批量勾选/取消</small>
+                {media.map((m) => {
+                  const checked = picked.has(m.index);
+                  return (
+                    <div
+                      className={`media-chip${checked ? ' picked' : ''}`}
+                      key={`${item.url}-${m.index}`}
+                      title={`第 ${m.index} 张 · ${m.type}`}
+                      onMouseDown={(e) => beginDrag(e, item, m.index)}
+                      onMouseEnter={() => applyDrag(m.index)}
+                      onClick={(e) => { e.preventDefault(); onToggleMedia(item.url, m.index); }}
+                    >
+                      {m.cover_url ? <img src={m.cover_url} alt="" loading="lazy" draggable="false" /> : <span>{m.type}</span>}
+                      <small>{m.index}</small>
+                    </div>
+                  );
+                })}
+                {nonePicked && <small className="error-text">未勾选图片时将下载全部 {media.length} 张</small>}
               </div>
             )}
           </div>
         </article>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -98,7 +98,7 @@ async def stop_watch() -> dict:
 @app.post("/api/downloads")
 def create_download(payload: DownloadRequest) -> dict:
     try:
-        job = download_service.create_job(payload.text, payload.mode, payload.output_dir, payload.comments, payload.selected_urls)
+        job = download_service.create_job(payload.text, payload.mode, payload.output_dir, payload.comments, payload.selected_urls, payload.selected_media)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"job": job}

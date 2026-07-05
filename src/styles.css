@@ -503,6 +503,7 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
+  user-select: none;
 }
 
 .media-chip {
@@ -518,6 +519,15 @@ button:disabled {
   color: #1b6fc2;
   font-size: 11px;
   font-weight: 750;
+  cursor: pointer;
+  user-select: none;
+}
+
+.media-hint {
+  width: 100%;
+  color: #6b8299;
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .media-chip small {
@@ -533,6 +543,17 @@ button:disabled {
   background: rgba(23, 50, 77, .78);
   color: #fff;
   font-size: 10px;
+}
+
+.media-chip.picked {
+  outline: 2px solid #1b6fc2;
+  outline-offset: -2px;
+}
+
+.media-toggle-all {
+  height: 52px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .log-panel {

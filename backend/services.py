@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from .config import (
     DOWNLOAD_OUTPUT_DIR,
@@ -363,7 +363,7 @@ class DownloadService:
         self.jobs: dict[str, DownloadJob] = {}
         self._executor = ThreadPoolExecutor(max_workers=3)
 
-    def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None) -> DownloadJob:
+    def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None, selected_media: dict[str, list[int]] | None = None) -> DownloadJob:
         urls = extract_douyin_urls(text)
         if selected_urls:
             selected = set(selected_urls)
@@ -372,6 +372,12 @@ class DownloadService:
             raise ValueError("No Douyin URL found in input.")
 
         resolved_output = str(Path(output_dir) if output_dir else DOWNLOAD_OUTPUT_DIR)
+        normalized_media: dict[str, list[int]] = {}
+        if selected_media:
+            for url, indices in selected_media.items():
+                clean = [int(i) for i in indices if isinstance(i, int) or (isinstance(i, str) and i.isdigit())]
+                if clean:
+                    normalized_media[url] = sorted(set(clean))
         job = DownloadJob(
             id=str(uuid.uuid4()),
             status="queued",
@@ -382,6 +388,7 @@ class DownloadService:
             mode=mode,
             output_dir=resolved_output,
             comments=comments,
+            selected_media=normalized_media,
         )
         self.jobs[job.id] = job
         self._add_job_log(job.id, "info", f"Queued {len(urls)} URL(s).")
@@ -412,7 +419,8 @@ class DownloadService:
             for index, url in enumerate(job.urls, 1):
                 self._add_job_log(job_id, "info", f"[{index}/{len(job.urls)}] Processing {url}")
                 try:
-                    result = self.module.download_douyin(url, job.output_dir, job.mode, job.comments)
+                    wanted = job.selected_media.get(url) if job.selected_media else None
+                    result = self.module.download_douyin(url, job.output_dir, job.mode, job.comments, selected_indices=wanted)
                     result = result if isinstance(result, dict) else {"result": result}
                     result["url"] = url
                     result["ok"] = True
@@ -495,7 +503,38 @@ def infer_douyin_url_type(url: str) -> str:
         return "video"
     if "/jingxuan" in url:
         return "video"
+    if extract_aweme_id_from_url(url):
+        return "video"
     return "link"
+
+
+def extract_aweme_id_from_url(url: str) -> str:
+    """从抖音 URL 中提取 aweme_id（视频ID）。
+
+    覆盖三类聚合页 URL（它们共享同一个 modal_id 参数）：
+    - 发现页:  /jingxuan?modal_id=<id>
+    - 搜索页:  /jingxuan/search/xxx?...&modal_id=<id>
+    - 喜欢列表: /user/self?...&modal_id=<id>
+    也兼容标准详情页 /video/<id>、/note/<id> 与 ?aweme_id=<id>。
+    """
+    if not url:
+        return ""
+    path_match = re.search(r"/(?:video|note)/(\d+)", url)
+    if path_match:
+        return path_match.group(1)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("modal_id", "aweme_id", "awemeId", "video_id"):
+        values = query.get(key) or []
+        for value in values:
+            value = str(value).strip()
+            if value.isdigit():
+                return value
+    # v.douyin.com 短链等：路径段里第一个纯数字串
+    for segment in parsed.path.split("/"):
+        if segment.isdigit():
+            return segment
+    return ""
 
 
 def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
@@ -511,13 +550,44 @@ def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
         page = context.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            # 发现页/搜索页/喜欢列表等聚合页 SSR 里没有 videoDetail，
+            # 需要先规约到标准详情页才能拿到图集/视频数据。
+            # v.douyin.com 短链会 302 跳转到 /note/<id> 或 /video/<id>；用落地 URL 判断更准。
+            landed = page.evaluate("() => window.location.href") or url
+            resolved = landed
             try:
                 page.wait_for_selector("video, h1, [data-e2e='video-title'], [class*='note'], [class*='note-detail']", timeout=12000)
             except Exception:
                 pass
             page.wait_for_timeout(1500)
-            meta = module._extract_stats(page) or {}
+
             content_type = module._extract_content_type(page)
+            needs_resolve = "/video/" not in resolved and "/note/" not in resolved
+            # 聚合页 content_type 多为 unknown；详情页通常为 video/image/slide
+            if needs_resolve or content_type in ("unknown", ""):
+                aweme_id = extract_aweme_id_from_url(url) or extract_aweme_id_from_url(resolved)
+                if aweme_id:
+                    for candidate in (f"https://www.douyin.com/video/{aweme_id}",
+                                      f"https://www.douyin.com/note/{aweme_id}"):
+                        try:
+                            page.goto(candidate, wait_until="domcontentloaded", timeout=20000)
+                        except Exception:
+                            continue
+                        try:
+                            page.wait_for_selector("video, h1, [data-e2e='video-title'], [class*='note'], [class*='note-detail']", timeout=12000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(1500)
+                        resolved = candidate
+                        content_type = module._extract_content_type(page)
+                        if content_type not in ("unknown", ""):
+                            break
+
+            meta = module._extract_stats(page) or {}
+            # /note/ 纯图集在无头环境常拿不到 SSR，content_type 可能误判为 unknown；
+            # 这种情况下用 slides info（含 API 回退）兜底拿全部图片。
+            if content_type == "unknown" and "/note/" in resolved:
+                content_type = "image"
             cover_url = _extract_cover_url(page)
             details: dict[str, Any] = {
                 "type": content_type,
@@ -540,32 +610,50 @@ def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
                         "cover_url": cover_url,
                     }
                 ]
-            elif content_type == "slide":
+            elif content_type in ("slide", "image"):
+                # 优先 slides info（SSR→API→DOM 三级回退，能拿到完整图集元数据）
                 slide_info = module._extract_slides_info(page) or {}
-                details["title"] = slide_info.get("title") or details["title"]
-                details["author"] = slide_info.get("author") or details["author"]
                 slides = slide_info.get("slides") or []
-                details["media"] = [
-                    {
-                        "index": int(slide.get("index", index - 1)) + 1,
-                        "type": slide.get("media_type") or "image",
-                        "duration": _normalize_duration(slide.get("duration") or 0),
-                        "cover_url": slide.get("best_image_url") or (slide.get("image_urls") or [""])[0],
-                    }
-                    for index, slide in enumerate(slides, 1)
-                ]
-            elif content_type == "image":
-                images = _extract_image_previews(page)
-                details["media"] = [
-                    {"index": index, "type": "image", "duration": 0, "cover_url": image_url}
-                    for index, image_url in enumerate(images, 1)
-                ]
-                if images and not details["cover_url"]:
-                    details["cover_url"] = images[0]
+                if slides:
+                    details["title"] = slide_info.get("title") or details["title"]
+                    details["author"] = slide_info.get("author") or details["author"]
+                    details["media"] = [
+                        {
+                            "index": int(slide.get("index", index - 1)) + 1,
+                            "type": slide.get("media_type") or "image",
+                            "duration": _normalize_duration(slide.get("duration") or 0),
+                            "cover_url": slide.get("best_image_url") or (slide.get("image_urls") or [""])[0],
+                        }
+                        for index, slide in enumerate(slides, 1)
+                    ]
+                else:
+                    # 最后一道兜底：DOM 逐张滚动收集图集图片
+                    images = _collect_image_set(page, module)
+                    details["media"] = [
+                        {"index": index, "type": "image", "duration": 0, "cover_url": image_url}
+                        for index, image_url in enumerate(images, 1)
+                    ]
+                if not details["media"]:
+                    # slides 信息与 DOM 均无果，至少返回封面
+                    details["media"] = [{"index": 1, "type": "image", "duration": 0, "cover_url": cover_url}] if cover_url else []
+                if details["media"] and not details["cover_url"]:
+                    details["cover_url"] = details["media"][0].get("cover_url") or ""
             return details
         finally:
             context.close()
             browser.close()
+
+
+def _collect_image_set(page, module: Any) -> list[str]:
+    """优先复用 downloader 的逐张滚动收集；失败则退回 DOM img 选择器。"""
+    try:
+        images = module._scroll_and_collect_images(page) or []
+        if images:
+            return images
+    except Exception:
+        pass
+    return _extract_image_previews(page)
+
 
 
 def _normalize_duration(value: Any) -> int:

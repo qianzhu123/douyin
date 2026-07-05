@@ -113,6 +113,7 @@ class DownloadRequest(BaseModel):
     output_dir: str = ""
     comments: bool = False
     selected_urls: list[str] = Field(default_factory=list)
+    selected_media: dict[str, list[int]] = Field(default_factory=dict)
 
 
 class DownloadPreviewRequest(BaseModel):
@@ -130,6 +131,7 @@ class DownloadJob(BaseModel):
     mode: int
     output_dir: str
     comments: bool = False
+    selected_media: dict[str, list[int]] = Field(default_factory=dict)
     logs: list[dict[str, str]] = Field(default_factory=list)
     results: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""

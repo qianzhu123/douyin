@@ -1,11 +1,12 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $AppDir = Join-Path $ProjectRoot "app"
 $CompatIcon = Join-Path $AppDir "tiktok-compatible.ico"
 $OutputExe = Join-Path $AppDir "douyin.exe"
 $ProgramCs = Join-Path $ProjectRoot "launcher\Program.cs"
-$IconSource = if ($env:DOUYIN_LAUNCHER_ICON) { $env:DOUYIN_LAUNCHER_ICON } else { $CompatIcon }
+$IconSource = $CompatIcon
+
 $CscCommand = Get-Command csc.exe -ErrorAction SilentlyContinue
 if (-not $CscCommand) {
     throw "csc.exe was not found. Install Visual Studio Build Tools or .NET Framework developer tools, then rerun this script."
@@ -17,7 +18,7 @@ if (-not (Test-Path -LiteralPath $AppDir)) {
 }
 
 if (-not (Test-Path -LiteralPath $IconSource)) {
-    throw "Launcher icon was not found. Set DOUYIN_LAUNCHER_ICON or add app\tiktok-compatible.ico."
+    throw "Launcher icon was not found. Add app\tiktok-compatible.ico."
 }
 
 @"
