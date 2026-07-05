@@ -20,6 +20,8 @@ $env:DOUYIN_SEARCH_DIR="<path-to-douyin-user-search>"
 $env:DOUYIN_DOWNLOAD_OUTPUT="<path-to-output-directory>"
 ```
 
+For the Windows launcher, copy `scripts\local-env.example.ps1` to `scripts\local-env.ps1` and fill in the same paths. The local file is ignored by git.
+
 ## Run
 
 ```powershell
@@ -37,6 +39,7 @@ Open `http://127.0.0.1:5173`.
 - Rebuild launcher: `scripts\build-launcher.ps1`
 
 The launcher starts the backend on `127.0.0.1:8000`, starts the Vite UI on `127.0.0.1:5175`, then opens the browser.
+If frontend dependencies are missing, the launcher runs `npm install` before starting Vite.
 
 ## Features
 

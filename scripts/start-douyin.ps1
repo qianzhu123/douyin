@@ -6,6 +6,11 @@ $BackendErr = Join-Path $ProjectRoot "backend.err.log"
 $FrontendLog = Join-Path $ProjectRoot "frontend.log"
 $FrontendErr = Join-Path $ProjectRoot "frontend.err.log"
 $Url = "http://127.0.0.1:5175"
+$LocalEnv = Join-Path $PSScriptRoot "local-env.ps1"
+
+if (Test-Path -LiteralPath $LocalEnv) {
+    . $LocalEnv
+}
 
 function Test-PortListening {
     param([int]$Port)
@@ -39,6 +44,16 @@ if (-not (Test-PortListening -Port 8000)) {
 }
 
 if (-not (Test-PortListening -Port 5175)) {
+    $ViteCmd = Join-Path $ProjectRoot "node_modules\.bin\vite.cmd"
+    if (-not (Test-Path -LiteralPath $ViteCmd)) {
+        Start-Process `
+            -FilePath "npm.cmd" `
+            -ArgumentList @("install") `
+            -WorkingDirectory $ProjectRoot `
+            -Wait `
+            -WindowStyle Hidden
+    }
+
     Start-HiddenProcess `
         -FilePath "npm.cmd" `
         -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1", "--port", "5175", "--strictPort") `

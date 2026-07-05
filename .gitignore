@@ -8,6 +8,7 @@ data/users.json
 data/profile_cache.json
 .agents/
 skills-lock.json
+scripts/local-env.ps1
 __pycache__/
 .pytest_cache/
 *.pyc
