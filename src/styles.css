@@ -158,6 +158,9 @@ button:disabled {
 .account-list {
   display: grid;
   gap: 8px;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .account-header,

@@ -128,6 +128,13 @@ async def stop_watch_job(job_id: str) -> dict:
     return {"watch": await monitor_service.stop_watch(job_id)}
 
 
+@app.delete("/api/watch/{job_id}")
+async def delete_watch_job(job_id: str) -> dict:
+    await monitor_service.remove_watch_job(job_id)
+    return {"jobs": [job.model_dump() for job in monitor_service.list_watch_jobs()],
+            "current_id": monitor_service._watch_current_id}
+
+
 @app.post("/api/watch/stop")
 async def stop_watch(job_id: str = "") -> dict:
     return {"watch": await monitor_service.stop_watch(job_id)}

@@ -316,6 +316,15 @@ class MonitorService:
         job.add_event("info", "Stopped live polling.")
         job.stopped = True
 
+    async def remove_watch_job(self, job_id: str) -> None:
+        """Stop the job if running and drop it from the registry so the UI
+        can discard a finished/stopped polling task."""
+        async with self._watch_lock:
+            await self._stop_job(job_id)
+            self._watch_jobs.pop(job_id, None)
+            if self._watch_current_id == job_id:
+                self._watch_current_id = ""
+
     def adjust_watch(self, job_id: str, interval: int | None = None, duration_minutes: int | None = None, end_at: str | None = "") -> WatchJob:
         job = self._watch_jobs.get(job_id)
         if not job:

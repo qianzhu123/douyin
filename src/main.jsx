@@ -427,6 +427,24 @@ function App() {
     }
   }
 
+  async function removePollingJob(jobId) {
+    if (!jobId) return;
+    setBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/api/watch/${jobId}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(`删除轮询任务失败 (${resp.status})`);
+      await loadWatch();
+      setMessage('轮询任务已移除');
+      appendLog('info', '轮询任务已移除', '轮询');
+      await loadAccounts();
+    } catch (error) {
+      setMessage(error.message);
+      appendLog('error', error.message, '轮询');
+    } finally {
+      setBusy(false);
+    }
+  }
+
 
   async function submitDownload() {
     if (!downloadText.trim()) {
@@ -583,6 +601,7 @@ function App() {
                   busy={busy}
                   onStop={() => stopPollingJob(job.id)}
                   onAdjust={(patch) => adjustPollingJob(job.id, patch)}
+                  onRemove={() => removePollingJob(job.id)}
                 />
               ))}
             </div>
@@ -1098,7 +1117,7 @@ function AddAccountModal({ busy, setBusy, setMessage, onClose, onAdded }) {
   );
 }
 
-function WatchJobCard({ job, busy, onStop, onAdjust }) {
+function WatchJobCard({ job, busy, onStop, onAdjust, onRemove }) {
   const [editing, setEditing] = React.useState(false);
   const [interval, setIntervalValue] = React.useState(job.interval || 30);
   const [durationMinutes, setDurationMinutes] = React.useState(job.duration_minutes || 30);
@@ -1140,6 +1159,7 @@ function WatchJobCard({ job, busy, onStop, onAdjust }) {
       <div className="watch-job-actions">
         <button className="secondary" onClick={() => setEditing((value) => !value)} disabled={busy}>调整</button>
         <button className="secondary" onClick={onStop} disabled={busy || !job.running}>停止</button>
+        <button className="danger" onClick={onRemove} disabled={busy}>移除</button>
       </div>
     </div>
   );
