@@ -58,6 +58,7 @@ function App() {
   const [detectingUids, setDetectingUids] = React.useState(new Set());
   const [addOpen, setAddOpen] = React.useState(false);
   const [pollOpen, setPollOpen] = React.useState(false);
+  const [deleteTarget, setDeleteTarget] = React.useState(null);
   const [pollTargets, setPollTargets] = React.useState([]);
   const [downloadText, setDownloadText] = React.useState('');
   const [downloadMode, setDownloadMode] = React.useState(1);
@@ -317,6 +318,7 @@ function App() {
         return next;
       });
       setSelectedUid((current) => (current === row.sec_uid ? nextUsers[0]?.sec_uid || '' : current));
+      setDeleteTarget(null);
       setMessage('账户已删除');
       appendLog('info', `账户已删除：${row.label || row.profile?.nickname || row.sec_uid}`, '界面');
     } catch (error) {
@@ -541,7 +543,7 @@ function App() {
                 }}
                 onDetect={() => detectTargets([row.sec_uid])}
                 onPoll={() => openPollModal([row.sec_uid])}
-                onDelete={() => deleteAccount(row)}
+                onDelete={() => setDeleteTarget(row)}
               />
             ))}
             {rows.length === 0 && <div className="empty">暂无账户，请先添加账户</div>}
@@ -654,10 +656,16 @@ function App() {
           }}>
             <Copy size={14} /> 复制
           </button>
-          <button className="danger" onClick={() => deleteAccount(contextInfo.row)} disabled={busy}>
-            <Trash2 size={14} /> 删除账户
-          </button>
         </div>
+      )}
+
+      {deleteTarget && (
+        <DeleteAccountModal
+          row={deleteTarget}
+          busy={busy}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => deleteAccount(deleteTarget)}
+        />
       )}
     </main>
   );
@@ -808,6 +816,34 @@ function Info({ label, value }) {
     <div className="info-item">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function DeleteAccountModal({ row, busy, onClose, onConfirm }) {
+  const profile = row.profile || {};
+  const displayName = row.label || profile.nickname || row.nickname || row.sec_uid;
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <div className="modal compact-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>删除账户</h2>
+            <p>该操作会从本地账户列表中移除此账户。</p>
+          </div>
+          <Trash2 size={20} />
+        </div>
+        <div className="danger-summary">
+          <strong>{displayName}</strong>
+          <small>{row.sec_uid}</small>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" onClick={onClose} disabled={busy}>取消</button>
+          <button className="danger" onClick={onConfirm} disabled={busy}>
+            {busy ? '删除中' : '确认删除'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
