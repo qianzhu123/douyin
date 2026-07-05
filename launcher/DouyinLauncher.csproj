@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <AssemblyName>douyin</AssemblyName>
+    <ApplicationIcon>..\app\tiktok-compatible.ico</ApplicationIcon>
+    <Win32Icon>..\app\tiktok-compatible.ico</Win32Icon>
+  </PropertyGroup>
+</Project>

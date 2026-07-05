@@ -1,0 +1,14 @@
+node_modules/
+dist/
+downloads/
+app/*.exe
+output/*
+!output/.gitkeep
+data/users.json
+data/profile_cache.json
+.agents/
+skills-lock.json
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log

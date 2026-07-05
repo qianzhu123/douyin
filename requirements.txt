@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+pytest
+playwright
+httpx
+winotify
+
