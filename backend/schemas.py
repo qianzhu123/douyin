@@ -85,6 +85,14 @@ class WatchStartRequest(BaseModel):
     interval: int = 30
     end_at: str = ""
     duration_minutes: int = 30
+    id: str = ""
+    label: str = ""
+
+
+class WatchAdjustRequest(BaseModel):
+    interval: int | None = None
+    duration_minutes: int | None = None
+    end_at: str | None = None
 
 
 class WatchEvent(BaseModel):
@@ -105,6 +113,26 @@ class WatchStatus(BaseModel):
     targets: list[UserEntry] = Field(default_factory=list)
     profiles: list[ProfileResult] = Field(default_factory=list)
     events: list[WatchEvent] = Field(default_factory=list)
+
+
+class WatchJob(BaseModel):
+    id: str
+    label: str = ""
+    running: bool = False
+    interval: int = 30
+    duration_minutes: int = 30
+    round: int = 0
+    started_at: str = ""
+    end_at: str = ""
+    last_checked_at: str = ""
+    targets: list[UserEntry] = Field(default_factory=list)
+    profiles: list[ProfileResult] = Field(default_factory=list)
+    events: list[WatchEvent] = Field(default_factory=list)
+
+
+class WatchJobsResult(BaseModel):
+    jobs: list[WatchJob] = Field(default_factory=list)
+    current_id: str = ""
 
 
 class DownloadRequest(BaseModel):

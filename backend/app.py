@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AddUserRequest, DownloadPreviewRequest, DownloadRequest, QueryRequest, ReorderUsersRequest, SearchUsersRequest, WatchStartRequest
+from .schemas import AddUserRequest, DownloadPreviewRequest, DownloadRequest, QueryRequest, ReorderUsersRequest, SearchUsersRequest, WatchAdjustRequest, WatchStartRequest
 from .services import DownloadService, MonitorService
 
 
@@ -81,18 +81,56 @@ async def query_profiles(payload: QueryRequest) -> dict:
 
 
 @app.get("/api/watch")
-def watch_status() -> dict:
-    return {"watch": monitor_service.watch_status()}
+def watch_status(job_id: str = "") -> dict:
+    return {"watch": monitor_service.watch_status(job_id)}
+
+
+@app.get("/api/watch/jobs")
+def list_watch_jobs() -> dict:
+    return {"jobs": [job.model_dump() for job in monitor_service.list_watch_jobs()],
+            "current_id": monitor_service._watch_current_id}
 
 
 @app.post("/api/watch/start")
 async def start_watch(payload: WatchStartRequest) -> dict:
-    return {"watch": await monitor_service.start_watch(payload.targets, payload.interval, payload.duration_minutes)}
+    job_id = (payload.id or "").strip()
+    label = (payload.label or "").strip()
+    # Backward-compat: feed end_at + duration_minutes through to the service.
+    status = await monitor_service.start_watch(
+        payload.targets,
+        payload.interval,
+        payload.duration_minutes,
+        end_at=payload.end_at,
+        job_id=job_id,
+        label=label,
+    )
+    return {"watch": status}
+
+
+@app.post("/api/watch/{job_id}/adjust")
+def adjust_watch(job_id: str, payload: WatchAdjustRequest) -> dict:
+    job = monitor_service.adjust_watch(
+        job_id,
+        interval=payload.interval,
+        duration_minutes=payload.duration_minutes,
+        end_at=payload.end_at if payload.end_at is not None else "",
+    )
+    return {"job": job.model_dump()}
+
+
+@app.get("/api/watch/{job_id}/status")
+def watch_job_status(job_id: str) -> dict:
+    return {"watch": monitor_service.watch_status(job_id)}
+
+
+@app.post("/api/watch/{job_id}/stop")
+async def stop_watch_job(job_id: str) -> dict:
+    return {"watch": await monitor_service.stop_watch(job_id)}
 
 
 @app.post("/api/watch/stop")
-async def stop_watch() -> dict:
-    return {"watch": await monitor_service.stop_watch()}
+async def stop_watch(job_id: str = "") -> dict:
+    return {"watch": await monitor_service.stop_watch(job_id)}
 
 
 @app.post("/api/downloads")

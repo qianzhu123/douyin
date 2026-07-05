@@ -762,3 +762,95 @@ button:disabled {
     padding: 12px;
   }
 }
+
+.watch-jobs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.watch-job-card {
+  border: 1px solid var(--border, #d8e1ea);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(23, 50, 77, .04);
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.watch-job-card.running {
+  border-color: #2f8f46;
+  background: rgba(47, 143, 70, .08);
+}
+
+.watch-job-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.watch-job-label {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.watch-job-state {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+.watch-job-state.live {
+  background: #2f8f46;
+  color: #fff;
+}
+
+.watch-job-state.idle {
+  background: #9aa7b3;
+  color: #fff;
+}
+
+.watch-job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 11px;
+  color: #5a6b78;
+}
+
+.watch-job-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.watch-job-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.watch-job-edit input {
+  width: 70px;
+  padding: 3px 5px;
+  border: 1px solid #c4ced6;
+  border-radius: 4px;
+}
+
+.watch-job-event {
+  font-size: 11px;
+  color: #5a6b78;
+  border-left: 2px solid #c4ced6;
+  padding-left: 6px;
+}
+
+.watch-job-actions {
+  display: flex;
+  gap: 6px;
+}

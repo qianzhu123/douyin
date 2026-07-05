@@ -48,7 +48,8 @@ function mergeAccount(account, watch) {
 
 function App() {
   const [accounts, setAccounts] = React.useState([]);
-  const [watch, setWatch] = React.useState({ running: false, profiles: [], events: [], targets: [] });
+  const [watchJobs, setWatchJobs] = React.useState([]);
+  const [watchCurrentId, setWatchCurrentId] = React.useState('');
   const [downloadJobs, setDownloadJobs] = React.useState([]);
   const [selectedUid, setSelectedUid] = React.useState('');
   const [checkedUids, setCheckedUids] = React.useState(new Set());
@@ -83,6 +84,14 @@ function App() {
   });
   const accountsRef = React.useRef([]);
   const contextMenuRef = React.useRef(null);
+
+  // Backward-compat: synthesize a single `watch` object from the current job so
+  // mergeAccount / pollingLogs / toolbar (watch.running) keep working unchanged.
+  const watch = React.useMemo(() => {
+    if (!watchJobs.length) return { running: false, profiles: [], events: [], targets: [] };
+    const current = watchJobs.find((job) => job.id === watchCurrentId) || watchJobs[watchJobs.length - 1];
+    return current || { running: false, profiles: [], events: [], targets: [] };
+  }, [watchJobs, watchCurrentId]);
 
   const rows = React.useMemo(
     () => accounts.map((account) => mergeAccount(account, watch)),
@@ -167,10 +176,11 @@ function App() {
   }, []);
 
   const loadWatch = React.useCallback(async () => {
-    const response = await fetch(`${API_BASE}/api/watch`);
+    const response = await fetch(`${API_BASE}/api/watch/jobs`);
     if (!response.ok) return;
     const data = await response.json();
-    setWatch(data.watch || {});
+    setWatchJobs(data.jobs || []);
+    setWatchCurrentId(data.current_id || '');
   }, []);
 
   const loadDownloads = React.useCallback(async () => {
@@ -361,8 +371,14 @@ function App() {
   async function startPolling({ interval, durationMinutes }) {
     setBusy(true);
     try {
-      const data = await postJson('/api/watch/start', { targets: pollTargets, interval, duration_minutes: durationMinutes });
-      setWatch(data.watch);
+      const label = `轮询 ${new Date().toLocaleTimeString()}`;
+      await postJson('/api/watch/start', {
+        targets: pollTargets,
+        interval,
+        duration_minutes: durationMinutes,
+        label,
+      });
+      await loadWatch();
       setPollOpen(false);
       setMessage('轮询检测已启动');
       appendLog('info', `轮询检测已启动：${pollTargets.length} 个账户，间隔 ${interval}s，持续 ${durationMinutes} 分钟`, '轮询');
@@ -375,10 +391,20 @@ function App() {
   }
 
   async function stopPolling() {
+    const jobId = watchCurrentId || (watchJobs[watchJobs.length - 1] || {}).id;
+    if (!jobId) {
+      setMessage('当前没有运行中的轮询任务');
+      return;
+    }
+    await stopPollingJob(jobId);
+  }
+
+  async function stopPollingJob(jobId) {
+    if (!jobId) return;
     setBusy(true);
     try {
-      const data = await postJson('/api/watch/stop');
-      setWatch(data.watch);
+      await postJson(`/api/watch/${jobId}/stop`, {});
+      await loadWatch();
       setMessage('轮询检测已停止');
       appendLog('info', '轮询检测已停止', '轮询');
       await loadAccounts();
@@ -389,6 +415,18 @@ function App() {
       setBusy(false);
     }
   }
+
+  async function adjustPollingJob(jobId, patch) {
+    if (!jobId) return;
+    try {
+      await postJson(`/api/watch/${jobId}/adjust`, patch);
+      await loadWatch();
+    } catch (error) {
+      setMessage(error.message);
+      appendLog('error', error.message, '轮询');
+    }
+  }
+
 
   async function submitDownload() {
     if (!downloadText.trim()) {
@@ -494,17 +532,17 @@ function App() {
           >
             <RefreshCcw size={16} /> 检测选中
           </button>
-          <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watch.running}>
+          <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
             <Activity size={16} /> 轮询选中
           </button>
-          {watch.running && (
-            <button className="secondary" onClick={() => openPollModal([])} disabled={busy}>
+          {watchJobs.length > 0 && (
+            <button className="secondary" onClick={() => setPollOpen(true)} disabled={busy}>
               <Clock size={16} /> 调整轮询
             </button>
           )}
-          {watch.running && (
+          {watchJobs.length > 0 && (
             <button className="secondary" onClick={stopPolling} disabled={busy}>
-              <Square size={16} /> 停止轮询
+              <Square size={16} /> 停止当前
             </button>
           )}
           <button className="icon-button" onClick={() => { loadAccounts(); loadWatch(); loadDownloads(); }} title="刷新">
@@ -530,11 +568,25 @@ function App() {
               )}
               {watch.running && (
                 <button className="secondary" onClick={stopPolling} disabled={busy}>
-                  <Square size={16} /> 停止轮询
+                  <Square size={16} /> 停止当前
                 </button>
               )}
             </div>
           </div>
+
+          {watchJobs.length > 0 && (
+            <div className="watch-jobs">
+              {watchJobs.map((job) => (
+                <WatchJobCard
+                  key={job.id}
+                  job={job}
+                  busy={busy}
+                  onStop={() => stopPollingJob(job.id)}
+                  onAdjust={(patch) => adjustPollingJob(job.id, patch)}
+                />
+              ))}
+            </div>
+          )}
 
           <div className="account-list">
             <div className="account-header">
@@ -1041,6 +1093,53 @@ function AddAccountModal({ busy, setBusy, setMessage, onClose, onAdded }) {
           ))}
           {candidates.length === 0 && <div className="empty">搜索结果会显示在这里</div>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function WatchJobCard({ job, busy, onStop, onAdjust }) {
+  const [editing, setEditing] = React.useState(false);
+  const [interval, setIntervalValue] = React.useState(job.interval || 30);
+  const [durationMinutes, setDurationMinutes] = React.useState(job.duration_minutes || 30);
+  React.useEffect(() => {
+    setIntervalValue(job.interval || 30);
+    setDurationMinutes(job.duration_minutes || 30);
+  }, [job.interval, job.duration_minutes]);
+
+  const targetCount = (job.targets || []).length;
+  const lastEvent = (job.events || [])[0];
+  return (
+    <div className={`watch-job-card${job.running ? ' running' : ''}`}>
+      <div className="watch-job-head">
+        <span className="watch-job-label">{job.label || job.id.slice(0, 8)}</span>
+        <span className={`watch-job-state ${job.running ? 'live' : 'idle'}`}>
+          {job.running ? '运行中' : '已停止'}
+        </span>
+      </div>
+      <div className="watch-job-meta">
+        <span>目标 {targetCount}</span>
+        <span>第 {job.round || 0} 轮</span>
+        <span>间隔 {job.interval}s</span>
+        <span>持续 {job.duration_minutes || 30}m</span>
+        <span>上次 {formatTime(job.last_checked_at)}</span>
+      </div>
+      {editing && (
+        <div className="watch-job-edit">
+          <label>间隔(s)
+            <input type="number" min="5" value={interval} onChange={(event) => setIntervalValue(Number(event.target.value) || 5)} />
+          </label>
+          <label>持续(m)
+            <input type="number" min="1" value={durationMinutes} onChange={(event) => setDurationMinutes(Number(event.target.value) || 1)} />
+          </label>
+          <button className="secondary" onClick={() => { onAdjust({ interval, duration_minutes: durationMinutes }); setEditing(false); }}>应用</button>
+          <button className="secondary" onClick={() => setEditing(false)}>取消</button>
+        </div>
+      )}
+      {lastEvent && <div className="watch-job-event">{lastEvent.message}</div>}
+      <div className="watch-job-actions">
+        <button className="secondary" onClick={() => setEditing((value) => !value)} disabled={busy}>调整</button>
+        <button className="secondary" onClick={onStop} disabled={busy || !job.running}>停止</button>
       </div>
     </div>
   );

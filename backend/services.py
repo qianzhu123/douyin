@@ -6,6 +6,7 @@ import re
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from .config import (
     SEARCH_PROFILE_DIR,
     USERS_FILE,
 )
-from .schemas import AddUserResult, DownloadJob, ProfileResult, SearchCandidate, UserEntry, WatchEvent, WatchStatus, now_iso
+from .schemas import AddUserResult, DownloadJob, ProfileResult, SearchCandidate, UserEntry, WatchAdjustRequest, WatchEvent, WatchJob, WatchStatus, now_iso
 from .tool_loader import load_module
 
 try:
@@ -32,24 +33,41 @@ except ImportError:  # pragma: no cover - dependency is declared for runtime
     async_playwright = None
 
 
+@dataclass
+class _WatchJobState:
+    """Holds runtime state for a single live-polling job."""
+
+    id: str
+    label: str
+    targets: list[dict[str, Any]]
+    interval: int
+    duration_minutes: int
+    started_at: str
+    end_at: str
+    last_checked_at: str = ""
+    round: int = 0
+    stopped: bool = False
+    live_now: set[str] = field(default_factory=set)
+    profiles: dict[str, ProfileResult] = field(default_factory=dict)
+    events: deque[WatchEvent] = field(default_factory=lambda: deque(maxlen=400))
+    task: asyncio.Task | None = None
+
+    def is_running(self) -> bool:
+        return (self.task is not None) and (not self.task.done()) and not self.stopped
+
+    def add_event(self, level: str, message: str, sec_uid: str = "") -> None:
+        self.events.append(WatchEvent(time=now_iso(), level=level, message=message, sec_uid=sec_uid))
+
+
 class MonitorService:
     def __init__(self) -> None:
         self.module = load_module("douyin_monitor_tool", MONITOR_DIR / "main.py")
         self.search_module = load_module("douyin_user_search_tool", SEARCH_DIR / "douyin_search.py") if (SEARCH_DIR / "douyin_search.py").exists() else None
         self.raw_search_module = load_module("douyin_user_raw_search_tool", SEARCH_DIR / "raw.py") if (SEARCH_DIR / "raw.py").exists() else None
         ensure_project_users(USERS_FILE, self.module.parse_settings())
-        self._watch_task: asyncio.Task | None = None
+        self._watch_jobs: dict[str, "_WatchJobState"] = {}
+        self._watch_current_id: str = ""
         self._watch_lock = asyncio.Lock()
-        self._watch_targets: list[dict[str, Any]] = []
-        self._watch_profiles: dict[str, ProfileResult] = {}
-        self._watch_events: deque[WatchEvent] = deque(maxlen=100)
-        self._live_now: set[str] = set()
-        self._interval = 30
-        self._duration_minutes = 30
-        self._round = 0
-        self._started_at = ""
-        self._end_at = ""
-        self._last_checked_at = ""
         self._search_lock = asyncio.Lock()
 
     def list_users(self) -> list[UserEntry]:
@@ -242,94 +260,170 @@ class MonitorService:
         upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in profiles])
         return profiles
 
-    async def start_watch(self, target_ids: list[str], interval: int, duration_minutes: int = 30, end_at: str = "") -> WatchStatus:
+    async def start_watch(self, target_ids: list[str], interval: int, duration_minutes: int = 30, end_at: str = "", job_id: str = "", label: str = "") -> WatchStatus:
         async with self._watch_lock:
-            await self.stop_watch()
-            self._watch_targets = self.resolve_targets(target_ids)
-            self._interval = max(5, interval)
-            self._duration_minutes = max(1, duration_minutes)
-            self._round = 0
-            self._started_at = now_iso()
-            self._end_at = end_at or (datetime_from_iso(self._started_at) + timedelta(minutes=self._duration_minutes)).isoformat(timespec="seconds")
-            self._last_checked_at = ""
-            self._watch_profiles = {}
-            self._watch_events.clear()
-            self._live_now.clear()
-            self._add_event("info", f"Started live polling for {len(self._watch_targets)} user(s).")
-            self._watch_task = asyncio.create_task(self._watch_loop())
-            return self.watch_status()
+            job = await self._start_watch_job(target_ids, interval, duration_minutes, end_at, job_id, label)
+            self._watch_current_id = job.id
+            return self._job_to_status(job)
 
-    async def stop_watch(self) -> WatchStatus:
-        if self._watch_task and not self._watch_task.done():
-            self._watch_task.cancel()
+    async def _start_watch_job(self, target_ids: list[str], interval: int, duration_minutes: int, end_at: str, job_id: str, label: str) -> "_WatchJobState":
+        targets = self.resolve_targets(target_ids)
+        job_id = job_id or str(uuid.uuid4())
+        # allow same-id restart (replace), but different ids coexist
+        old = self._watch_jobs.get(job_id)
+        if old and old.task and not old.task.done():
+            old.task.cancel()
             try:
-                await self._watch_task
+                await old.task
             except asyncio.CancelledError:
                 pass
-            self._add_event("info", "Stopped live polling.")
-        self._watch_task = None
-        return self.watch_status()
+        started_at = now_iso()
+        end_at_resolved = end_at or (datetime_from_iso(started_at) + timedelta(minutes=max(1, duration_minutes))).isoformat(timespec="seconds")
+        job = _WatchJobState(
+            id=job_id,
+            label=label or f"轮询 {job_id[:8]}",
+            targets=targets,
+            interval=max(5, interval),
+            duration_minutes=max(1, duration_minutes),
+            end_at=end_at_resolved,
+            started_at=started_at,
+        )
+        job.add_event("info", f"Started live polling for {len(targets)} user(s).")
+        self._watch_jobs[job_id] = job
+        job.task = asyncio.create_task(self._watch_loop(job_id))
+        return job
 
-    def watch_status(self) -> WatchStatus:
-        running = self._watch_task is not None and not self._watch_task.done()
+    async def stop_watch(self, job_id: str = "") -> WatchStatus:
+        async with self._watch_lock:
+            if job_id:
+                await self._stop_job(job_id)
+            else:
+                # compat: stop the "current" job
+                if self._watch_current_id:
+                    await self._stop_job(self._watch_current_id)
+            return self._compat_status()
+
+    async def _stop_job(self, job_id: str) -> None:
+        job = self._watch_jobs.get(job_id)
+        if not job:
+            return
+        if job.task and not job.task.done():
+            job.task.cancel()
+            try:
+                await job.task
+            except asyncio.CancelledError:
+                pass
+        job.add_event("info", "Stopped live polling.")
+        job.stopped = True
+
+    def adjust_watch(self, job_id: str, interval: int | None = None, duration_minutes: int | None = None, end_at: str | None = "") -> WatchJob:
+        job = self._watch_jobs.get(job_id)
+        if not job:
+            raise ValueError("Watch job not found.")
+        if interval is not None:
+            job.interval = max(5, interval)
+        if duration_minutes is not None:
+            job.duration_minutes = max(1, duration_minutes)
+            job.end_at = (datetime_from_iso(job.started_at) + timedelta(minutes=job.duration_minutes)).isoformat(timespec="seconds")
+        if end_at:
+            job.end_at = end_at
+        job.add_event("info", f"Adjusted: interval={job.interval}s, duration={job.duration_minutes}m, end_at={job.end_at}")
+        return self._job_to_model(job)
+
+    def list_watch_jobs(self) -> list[WatchJob]:
+        return [self._job_to_model(job) for job in self._watch_jobs.values()]
+
+    def watch_status(self, job_id: str = "") -> WatchStatus:
+        if job_id:
+            job = self._watch_jobs.get(job_id)
+            return self._job_to_status(job) if job else WatchStatus(running=False)
+        return self._compat_status()
+
+    def _compat_status(self) -> WatchStatus:
+        job = self._watch_jobs.get(self._watch_current_id) if self._watch_current_id else None
+        return self._job_to_status(job) if job else WatchStatus(running=False)
+
+    def _job_to_status(self, job: "_WatchJobState | None") -> WatchStatus:
+        if not job:
+            return WatchStatus(running=False)
         return WatchStatus(
-            running=running,
-            interval=self._interval,
-            duration_minutes=self._duration_minutes,
-            round=self._round,
-            started_at=self._started_at,
-            end_at=self._end_at,
-            last_checked_at=self._last_checked_at,
-            targets=[UserEntry(**entry) for entry in self._watch_targets],
-            profiles=list(self._watch_profiles.values()),
-            events=list(self._watch_events),
+            running=job.is_running(),
+            interval=job.interval,
+            duration_minutes=job.duration_minutes,
+            round=job.round,
+            started_at=job.started_at,
+            end_at=job.end_at,
+            last_checked_at=job.last_checked_at,
+            targets=[UserEntry(**entry) for entry in job.targets],
+            profiles=list(job.profiles.values()),
+            events=list(job.events),
+        )
+
+    def _job_to_model(self, job: "_WatchJobState") -> WatchJob:
+        return WatchJob(
+            id=job.id,
+            label=job.label,
+            running=job.is_running(),
+            interval=job.interval,
+            duration_minutes=job.duration_minutes,
+            round=job.round,
+            started_at=job.started_at,
+            end_at=job.end_at,
+            last_checked_at=job.last_checked_at,
+            targets=[UserEntry(**entry) for entry in job.targets],
+            profiles=list(job.profiles.values()),
+            events=list(job.events),
         )
 
     async def shutdown(self) -> None:
-        await self.stop_watch()
+        for job_id in list(self._watch_jobs.keys()):
+            await self._stop_job(job_id)
         await self.module.close_browser()
 
-    async def _watch_loop(self) -> None:
+    async def _watch_loop(self, job_id: str) -> None:
+        job = self._watch_jobs.get(job_id)
+        if not job:
+            return
         while True:
-            if self._end_at and datetime_from_iso(self._end_at) <= datetime_from_iso(now_iso()):
-                self._add_event("info", "Polling stopped after configured duration.")
-                self._watch_task = None
+            if job.end_at and datetime_from_iso(job.end_at) <= datetime_from_iso(now_iso()):
+                job.add_event("info", "Polling stopped after configured duration.")
+                job.stopped = True
                 return
-            self._round += 1
-            self._last_checked_at = now_iso()
+            job.round += 1
+            job.last_checked_at = now_iso()
             try:
-                results = await self.module.fetch_profiles_parallel(self._watch_targets)
-                for entry, info in zip(self._watch_targets, results):
+                results = await self.module.fetch_profiles_parallel(job.targets)
+                for entry, info in zip(job.targets, results):
                     profile = self._to_profile_result(entry, info)
-                    self._watch_profiles[entry["sec_uid"]] = profile
-                    self._record_live_transition(entry, profile)
-                upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in self._watch_profiles.values()])
-                failed = sum(1 for profile in self._watch_profiles.values() if not profile.ok)
-                self._add_event("info", f"Round {self._round}: checked {len(self._watch_targets)} user(s), failed {failed}.")
+                    job.profiles[entry["sec_uid"]] = profile
+                    self._record_live_transition(job, entry, profile)
+                upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in job.profiles.values()])
+                failed = sum(1 for profile in job.profiles.values() if not profile.ok)
+                job.add_event("info", f"Round {job.round}: checked {len(job.targets)} user(s), failed {failed}.")
             except Exception as exc:
-                self._add_event("error", f"Polling failed: {exc}")
-            await asyncio.sleep(self._interval)
+                job.add_event("error", f"Polling failed: {exc}")
+            await asyncio.sleep(job.interval)
 
-    def _record_live_transition(self, entry: dict[str, Any], profile: ProfileResult) -> None:
+    def _record_live_transition(self, job: "_WatchJobState", entry: dict[str, Any], profile: ProfileResult) -> None:
         sec_uid = entry["sec_uid"]
         label = entry.get("label") or sec_uid[:16]
         if not profile.ok or not profile.profile:
-            self._add_event("error", f"{label}: query failed", sec_uid)
+            job.add_event("error", f"{label}: query failed", sec_uid)
             return
 
         info = profile.profile
         is_live = info.get("live_status") == 1
         nickname = info.get("nickname") or label
-        if is_live and sec_uid not in self._live_now:
-            self._live_now.add(sec_uid)
+        if is_live and sec_uid not in job.live_now:
+            job.live_now.add(sec_uid)
             viewers = info.get("live_viewers")
             suffix = f" ({viewers} viewers)" if viewers not in (None, "") else ""
             started = info.get("live_start_at")
             started_suffix = f", started at {started}" if started else ""
-            self._add_event("live", f"{nickname} is live{suffix}{started_suffix}.", sec_uid)
-        elif not is_live and sec_uid in self._live_now:
-            self._live_now.remove(sec_uid)
-            self._add_event("offline", f"{nickname} is offline.", sec_uid)
+            job.add_event("live", f"{nickname} is live{suffix}{started_suffix}.", sec_uid)
+        elif not is_live and sec_uid in job.live_now:
+            job.live_now.remove(sec_uid)
+            job.add_event("offline", f"{nickname} is offline.", sec_uid)
 
     def _to_profile_result(self, entry: dict[str, Any], info: dict[str, Any] | None) -> ProfileResult:
         if not info:
@@ -353,8 +447,6 @@ class MonitorService:
             profile=profile,
         )
 
-    def _add_event(self, level: str, message: str, sec_uid: str = "") -> None:
-        self._watch_events.append(WatchEvent(time=now_iso(), level=level, message=message, sec_uid=sec_uid))
 
 
 class DownloadService:
