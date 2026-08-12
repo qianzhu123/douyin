@@ -13,6 +13,11 @@ from playwright.sync_api import sync_playwright
 
 
 def extract_aweme_id_from_url(url: str) -> str:
+    ids = extract_aweme_ids_from_url(url)
+    return ids[0] if ids else ""
+
+
+def extract_aweme_ids_from_url(url: str) -> list[str]:
     """从抖音 URL 中提取 aweme_id（视频ID）。
 
     覆盖三类聚合页 URL（共享同一个 modal_id）以及标准详情页：
@@ -23,10 +28,18 @@ def extract_aweme_id_from_url(url: str) -> str:
     - 短链/其它: ?aweme_id=<id> 或路径中第一个纯数字段
     """
     if not url:
-        return ""
+        return []
+    ids: list[str] = []
+
+    def add(value) -> None:
+        text = str(value or "").strip()
+        if text.isdigit() and text not in ids:
+            ids.append(text)
+
     m = re.search(r"/(?:video|note)/(\d+)", url)
     if m:
-        return m.group(1)
+        add(m.group(1))
+        return ids
     qpos = url.find("?")
     if qpos != -1:
         for pair in url[qpos + 1:].split("&"):
@@ -35,12 +48,22 @@ def extract_aweme_id_from_url(url: str) -> str:
             key, _, value = pair.partition("=")
             key = key.strip()
             value = value.split("#", 1)[0].strip()
-            if key in ("modal_id", "aweme_id", "awemeId", "video_id") and value.isdigit():
-                return value
+            if key in ("modal_id", "aweme_id", "awemeId", "video_id", "vid"):
+                add(value)
     for seg in re.split(r"[/?#]", url):
-        if seg.isdigit():
-            return seg
-    return ""
+        add(seg)
+    return ids
+
+
+def _detail_url_candidates(url: str) -> list[str]:
+    return [
+        candidate
+        for aweme_id in extract_aweme_ids_from_url(url)
+        for candidate in (
+            f"https://www.douyin.com/video/{aweme_id}",
+            f"https://www.douyin.com/note/{aweme_id}",
+        )
+    ]
 
 # 中国时区 UTC+8
 _CST = timezone(timedelta(hours=8))
@@ -139,7 +162,8 @@ def _extract_content_type(page) -> str:
         if (videoEl) {
             const src = videoEl.currentSrc || videoEl.src || '';
             if (src.includes('.mp3') || src.includes('ies-music')) return { type: 'image', reason: 'DOM: video src is audio' };
-            if (src.includes('douyinvod') || src.includes('.mp4')) return { type: 'video', reason: 'DOM: video src is mp4/douyinvod' };
+            if (src.includes('douyinvod') || src.includes('.mp4')
+                || src.includes('/aweme/v1/play/')) return { type: 'video', reason: 'DOM: video src is play url/mp4/douyinvod' };
         }
         if (videoEl && videoEl.poster) return { type: 'video', reason: 'DOM: video element with poster' };
 
@@ -164,8 +188,13 @@ def _extract_slides_info(page) -> dict:
 
         const slides = vd.images.map((item, i) => {
             const v = item.video;
-            const clipType = item.clipType || 0;  // 2=图片, 4=视频
-            const isVideo = clipType === 4 && !!v;
+            const clipType = item.clipType || 0;  // 2=图片, 4=视频, 5=影集视频帧(带 mp4)
+            // 判定是否为视频页：以"有 item.video 且可下载直链"为准，不能只认 clipType===4。
+            // 抖音影集(mediaType=42/isSlides)每页常有 clipType=5 且带 mp4，按图片处理会全部漏下载。
+            const _playApi = v?.playApi || '';
+            const _bitRateHas = (v?.bitRateList || []).some(b => !b.playApi?.includes('/dash/'));
+            const hasRealVideo = !!(v && (_playApi || _bitRateHas));
+            const isVideo = hasRealVideo;
 
             // 视频地址: 优先 bitRateList 中非 dash 的最高画质，再 playApi
             let video_url = '';
@@ -181,9 +210,9 @@ def _extract_slides_info(page) -> dict:
                 }
             }
 
-            // 图片地址: 优先 jpeg 格式（最高画质），再取第一个 webp
-            const imageUrls = item.urlList || [];
-            const bestImage = imageUrls.find(u => u.includes('.jpeg')) || imageUrls[0] || '';
+            // 图片地址: 仅在非视频页时取；纯图集(clipType=2)兼容老逻辑
+            const imageUrls = (!isVideo ? (item.urlList || []) : []);
+            const bestImage = imageUrls.length ? (imageUrls.find(u => u.includes('.jpeg')) || imageUrls[0] || '') : '';
 
             return {
                 index: i,
@@ -257,8 +286,15 @@ def _extract_slides_from_api(page, aweme_id: str) -> dict:
 
             const slides = aweme.images.map((img, i) => {
                 const v = img.video;
-                const clipType = img.clip_type || 0;  // 2=图片, 4=视频
-                const isVideo = clipType === 4 && !!v;
+                const clipType = img.clip_type || 0;  // 2=图片, 4=视频, 5=影集视频帧(带 mp4)
+                // 判定是否为视频页：以"有 img.video 且 play_addr/bit_rate 里有可下载直链"为准。
+                // 不能只认 clipType===4 —— 抖音影集(Slides)的每页 clipType 常为 5，
+                // 每页是带 mp4 的短视频，若按图片处理会全部漏下载(mediaType=42/isSlides=true)。
+                const _videoUrl0 = (v && v.play_addr && (v.play_addr.url_list || [])[0]) || '';
+                const _bitRateUrl0 = v && (v.bit_rate || []).some(b =>
+                    !((b.play_addr && (b.play_addr.url_list || [])[0] || '').includes('/dash/')));
+                const hasRealVideo = !!(v && (_videoUrl0 || _bitRateUrl0));
+                const isVideo = hasRealVideo;
 
                 // 视频地址: 优先 bit_rate 中非 dash 的最高画质，再 play_addr
                 let video_url = '';
@@ -275,9 +311,10 @@ def _extract_slides_from_api(page, aweme_id: str) -> dict:
                     }
                 }
 
-                // 图片地址: 优先 jpeg 格式（最高画质），再取第一个
-                const imageUrls = img.url_list || [];
-                const bestImage = imageUrls.find(u => u.includes('.jpeg')) || imageUrls[0] || '';
+                // 图片地址: 仅在该页确实不是视频时才取(影集视频页无需图片地址);
+                // 兼容老逻辑: 纯图集(clipType=2)时取 url_list
+                const imageUrls = (!isVideo ? (img.url_list || []) : []);
+                const bestImage = imageUrls.length ? (imageUrls.find(u => u.includes('.jpeg')) || imageUrls[0] || '') : '';
 
                 return {
                     index: i,
@@ -458,7 +495,8 @@ def _extract_video_info(page) -> dict:
         if (!video_url) {
             const video = document.querySelector('video');
             const src = video ? (video.currentSrc || video.src) : '';
-            if (src.includes('douyinvod') || src.includes('.mp4')) video_url = src;
+            // 中转播放 URL(/aweme/v1/play/?...&a_bogus=...) 经 HTTP 跟随 302 即得 mp4，视同直链
+            if (src.includes('douyinvod') || src.includes('.mp4') || src.includes('/aweme/v1/play/')) video_url = src;
         }
         if (!title) {
             const el = document.querySelector('h1') || document.querySelector('[data-e2e="video-title"]') || document.querySelector('[class*="title"]');
@@ -748,25 +786,24 @@ def _save_json(output_dir: Path, meta: dict, comments: list) -> str:
 #  目录结构决策
 # ════════════════════════════════════════════════════════════════
 
-def _decide_output_dir(base_path: Path, mode: int, title: str, content_type: str) -> Path:
+def _decide_output_dir(base_path: Path, mode: int, title: str, content_type: str, wrap_folder: bool = False) -> Path:
     """
     决定输出目录策略:
-    - mode=1 (仅视频/图片): 单个视频文件直接放 base_path；图集/slide 始终用子文件夹
-    - mode=2 (仅评论+数据): 直接放 base_path（只有 JSON）
-    - mode=3 (全部): 始终用子文件夹包含视频 + JSON
+    - wrap_folder=False: 直接放入调用方传入的根目录
+    - wrap_folder=True: 在根目录下按标题创建子文件夹
     """
-    if mode == 3:
-        folder = base_path / _sanitize_filename(title)
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder
-    elif mode == 1:
-        if content_type in ("image", "slide"):
-            folder = base_path / _sanitize_filename(title)
-            folder.mkdir(parents=True, exist_ok=True)
-            return folder
+    if not wrap_folder:
         return base_path
-    else:  # mode == 2
-        return base_path
+    folder = base_path / _sanitize_filename(title)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _media_file_path(folder: Path, base_path: Path, title: str, index: int, ext: str, wrap_folder: bool = False, width: int = 3, prefix: str = "") -> Path:
+    if wrap_folder or folder != base_path:
+        return folder / f"{prefix}{index:0{width}d}{ext}"
+    marker = f"{prefix}{index:0{width}d}"
+    return folder / f"{_sanitize_filename(title)}_{marker}{ext}"
 
 
 # ════════════════════════════════════════════════════════════════
@@ -774,7 +811,8 @@ def _decide_output_dir(base_path: Path, mode: int, title: str, content_type: str
 # ════════════════════════════════════════════════════════════════
 
 def download_douyin(url: str, output_dir: str = "", mode: int = 1,
-                    fetch_comments: bool = False, selected_indices: list | None = None) -> dict:
+                    fetch_comments: bool = False, selected_indices: list | None = None,
+                    wrap_folder: bool = False) -> dict:
     """
     下载抖音视频/图集 + 互动数据（可选评论）
     每个 URL 用独立的浏览器实例，可多线程并行。
@@ -786,6 +824,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
         fetch_comments:  是否抓取评论（默认否，评论容易卡死）
         selected_indices: 图集/笔记类型时仅下载指定序号（1-based）的图片/视频；
                           None 表示全部下载。对单视频类型忽略。
+        wrap_folder:     是否在输出根目录下按标题创建子文件夹
         fetch_comments: 是否抓取评论（默认否，评论容易卡死）
 
     Returns:
@@ -801,16 +840,82 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
 
     _print("[*] 正在启动浏览器...")
 
+    # ── 登录态获取策略（三级回退）──
+    # 抖音对未登录访客不注入可下载直链(SSR videoDetail 缺失, <video> 多为 blob/MSE)，
+    # 必须用登录态 profile 才能在详情页拿到 <video> 的
+    #   /aweme/v1/play/?...&a_bogus=... 直链(其 HTTP 302 跳转到 douyinvod mp4)。
+    # profile 由 douyin-user-search 维护(含 sessionid/sid_guard 等 HttpOnly cookie)，
+    # 为避免与 user-search 抢同一 profile 的锁，优先连常驻调试 Chrome(9222)，
+    # 其自己独占 profile，downloader 只连不锁。
+    # 环境变量覆盖：
+    #   DOUYIN_CDP=http://127.0.0.1:9222   优先 CDP 连接(默认即此)；置空强制走 profile/裸启动
+    #   DOUYIN_PROFILE=/path/to/profile    CDP 连不上时回退用此 profile 启动
+    import os
+    _cdp = os.environ.get("DOUYIN_CDP", "http://127.0.0.1:9222")
+    _profile_env = os.environ.get("DOUYIN_PROFILE", "default")
+    user_data_dir = None
+    if _profile_env:
+        if _profile_env == "default":
+            _cand = Path(__file__).resolve().parent.parent / "douyin-user-search" / "douyin_profile"
+            user_data_dir = str(_cand) if _cand.exists() else None
+        else:
+            user_data_dir = _profile_env
+            if not Path(user_data_dir).exists():
+                _print(f"[!] 指定的 DOUYIN_PROFILE 不存在: {user_data_dir}")
+                user_data_dir = None
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1600, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
-        page = context.new_page()
+        browser = None
+        context = None
+        page = None
+        _owns_context = False  # True 表示本函数可安全 close context；CDP 复用常驻 context 时为 False
+        if _cdp:
+            try:
+                _print(f"[*] 尝试 CDP 连接常驻 Chrome: {_cdp}")
+                browser = p.chromium.connect_over_cdp(_cdp)
+                # CDP 模式下 browser.new_context() 会在常驻 Chrome 弹出一个可见窗口，
+                # 不符合"下载静默"的要求。改为复用常驻 Chrome 已有的默认 context，
+                # 仅在其上 new_page() —— 新页在常驻 Chrome 内打开但不弹独立窗口，
+                # 且本函数 finally 会把它 close 掉，不残留标签。
+                ctxs = browser.contexts
+                if ctxs:
+                    context = ctxs[0]
+                    _owns_context = False  # 复用常驻 Chrome 默认 context，不可关
+                else:
+                    context = browser.new_context(viewport={"width": 1600, "height": 900})
+                    _owns_context = True
+                page = context.new_page()
+                _print("[+] CDP 连接成功（复用常驻 context）")
+            except Exception as e:
+                _print(f"[!] CDP 连接失败({e})，回退 profile 启动")
+                browser = None
+        if page is None and user_data_dir:
+            try:
+                _print(f"[*] 复用登录态 profile: {user_data_dir}")
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir,
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                page = context.pages[0] if context.pages else context.new_page()
+                _owns_context = True  # persistent context 需自己关
+                _print("[+] profile 启动成功")
+            except Exception as e:
+                _print(f"[!] profile 启动失败({e})，回退裸启动")
+                context = None
+                page = None
+        if page is None:
+            _print("[*] 裸启动浏览器（无登录态，可能拿不到直链）")
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+            _owns_context = True  # 自有 context，需要关
 
         try:
             # 发现页/搜索页/喜欢列表等聚合页 SSR 里没有 videoDetail，
@@ -818,20 +923,20 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
             # v.douyin.com 短链会 302 跳转，让其自然落地后按落地页类型处理更为稳妥。
             is_short = "v.douyin.com" in url
             if "/video/" not in url and "/note/" not in url:
-                aweme_id_hint = extract_aweme_id_from_url(url)
-                if aweme_id_hint and not is_short:
-                    detail_url = f"https://www.douyin.com/note/{aweme_id_hint}"
+                candidates = _detail_url_candidates(url)
+                if candidates and not is_short:
+                    detail_url = candidates[0]
                     _print(f"[*] 聚合页，规约到详情页: {detail_url}")
                     url = detail_url
             _print(f"[*] 正在访问: {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
             # 短链落地后若既非 /video/ 也非 /note/（极少见），按 aweme_id 规约到 /note/
             if is_short:
-                landed = page.evaluate("() => window.location.href") or url
+                landed = page.url or url
                 if "/video/" not in landed and "/note/" not in landed:
-                    aid = extract_aweme_id_from_url(landed) or extract_aweme_id_from_url(url)
-                    if aid:
-                        detail_url = f"https://www.douyin.com/note/{aid}"
+                    candidates = _detail_url_candidates(landed) or _detail_url_candidates(url)
+                    if candidates:
+                        detail_url = candidates[0]
                         _print(f"[*] 短链落地异常，规约到详情页: {detail_url}")
                         page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
             # 等待页面加载：视频/图集/笔记页面
@@ -843,7 +948,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
             page.wait_for_timeout(3000)
 
             # ── 检测并处理 /video/ → /note/ 重定向 ──
-            current_url = page.evaluate("() => window.location.href")
+            current_url = page.url
             if "/video/" in url and "/note/" in current_url:
                 _print(f"[*] 页面从 /video/ 重定向到了 /note/（这是笔记/Slides 类型）")
 
@@ -859,7 +964,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
 
             # ── 精选页导航 ──
             aweme_id = meta.get("aweme_id", "")
-            current_url = page.evaluate("() => window.location.href")
+            current_url = page.url
             video_url_from_ssr = ""
 
             if "/jingxuan" in current_url and aweme_id:
@@ -909,7 +1014,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                     _print(f"[+] 作者: {author}")
 
                 # ── 决定输出目录 ──
-                out_dir = _decide_output_dir(base_path, mode, title, "video")
+                out_dir = _decide_output_dir(base_path, mode, title, "video", wrap_folder)
 
                 result = {
                     "type": "video",
@@ -981,9 +1086,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                 if author:
                     _print(f"[+] 作者: {author}")
 
-                # 笔记始终用子文件夹
-                folder = base_path / _sanitize_filename(title)
-                folder.mkdir(parents=True, exist_ok=True)
+                folder = _decide_output_dir(base_path, mode, title, "slide", wrap_folder)
 
                 result = {
                     "type": "slide",
@@ -1070,7 +1173,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                                 ext = ".jpg"
                             elif ".png" in img_url:
                                 ext = ".png"
-                            file_path = folder / f"S{idx:02d}{ext}"
+                            file_path = _media_file_path(folder, base_path, title, idx, ext, wrap_folder, width=2, prefix="S")
                             _print(f"  [{idx}/{len(slides)}] 下载图片: {file_path.name}")
                             try:
                                 total_size += _download_image_via_playwright(page, img_url, file_path)
@@ -1099,9 +1202,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                 if author:
                     _print(f"[+] 作者: {author}")
 
-                # 图集始终用子文件夹（多个文件）
-                folder = base_path / _sanitize_filename(title)
-                folder.mkdir(parents=True, exist_ok=True)
+                folder = _decide_output_dir(base_path, mode, title, "image", wrap_folder)
 
                 result = {
                     "type": "image",
@@ -1158,7 +1259,7 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                         ext = ".webp"
                         if ".jpeg" in img_url or ".jpg" in img_url: ext = ".jpg"
                         elif ".png" in img_url: ext = ".png"
-                        file_path = folder / f"{i:03d}{ext}"
+                        file_path = _media_file_path(folder, base_path, title, i, ext, wrap_folder, width=3)
                         if file_path.exists() and file_path.stat().st_size > 0:
                             ok_count += 1; continue
                         _print(f"  [{i}/{len(image_urls)}] 下载: {file_path.name}")
@@ -1178,12 +1279,37 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                 raise RuntimeError("无法判断页面内容类型。请确认链接有效。")
 
         finally:
-            browser.close()
+            # CDP 复用常驻 Chrome context 时：只关本次新建的 page，
+            # 绝不关 context/browser（那会关掉用户常驻 Chrome）。
+            # 自有浏览器（profile/裸启动）才 close context + browser。
+            if not _owns_context:
+                try:
+                    if page is not None:
+                        page.close()
+                except Exception:
+                    pass
+                # browser 在 CDP 模式表示 CDP 连接句柄:close 仅断连,不杀常驻 Chrome
+                try:
+                    if browser is not None:
+                        browser.close()
+                except Exception:
+                    pass
+            else:
+                try:
+                    if context is not None:
+                        context.close()
+                except Exception:
+                    pass
+                try:
+                    if browser is not None:
+                        browser.close()
+                except Exception:
+                    pass
 
 
 # ── 向后兼容 ──
-def download_douyin_video(url: str, output_dir: str = "") -> dict:
-    return download_douyin(url, output_dir)
+def download_douyin_video(url: str, output_dir: str = "", wrap_folder: bool = False) -> dict:
+    return download_douyin(url, output_dir, wrap_folder=wrap_folder)
 
 
 if __name__ == "__main__":

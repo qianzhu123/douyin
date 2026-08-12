@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import uuid
 from collections import deque
@@ -14,16 +15,21 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .config import (
     DOWNLOAD_OUTPUT_DIR,
+    DOWNLOAD_TIMEOUT,
     DOWNLOADER_DIR,
     MONITOR_DIR,
     PROFILE_CACHE_FILE,
+    PROJECT_ROOT,
     SEARCH_DIR,
     SEARCH_HEADLESS,
     SEARCH_PROFILE_DIR,
+    SETTINGS_FILE,
     USERS_FILE,
 )
-from .schemas import AddUserResult, DownloadJob, ProfileResult, SearchCandidate, UserEntry, WatchAdjustRequest, WatchEvent, WatchJob, WatchStatus, now_iso
+from .schemas import AddUserResult, AppSettings, DownloadJob, ProfileResult, SearchCandidate, UserEntry, WatchAdjustRequest, WatchEvent, WatchJob, WatchStatus, now_iso
 from .tool_loader import load_module
+from .live_room import LiveRoomService
+from .download_runner import run_download_subprocess
 
 try:
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -69,6 +75,8 @@ class MonitorService:
         self._watch_current_id: str = ""
         self._watch_lock = asyncio.Lock()
         self._search_lock = asyncio.Lock()
+        self.live_room = LiveRoomService()
+        self._live_room_sem = asyncio.Semaphore(3)
 
     def list_users(self) -> list[UserEntry]:
         cache = read_profile_cache(PROFILE_CACHE_FILE)
@@ -257,6 +265,8 @@ class MonitorService:
 
         results = await self.module.fetch_profiles_parallel(targets)
         profiles = [self._to_profile_result(entry, info) for entry, info in zip(targets, results)]
+        # 对直播中的 profile 并发补直播间详情（信号量内部限并发；未直播/失败置 None）
+        await asyncio.gather(*(self._enrich_live_room(p) for p in profiles))
         upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in profiles])
         return profiles
 
@@ -273,9 +283,12 @@ class MonitorService:
         old = self._watch_jobs.get(job_id)
         if old and old.task and not old.task.done():
             old.task.cancel()
+            # 与 _stop_job 同理:cancel 后最多等 1s 收尾，避免长 playwright 调用卡死整个 start
             try:
-                await old.task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(old.task), timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
                 pass
         started_at = now_iso()
         end_at_resolved = end_at or (datetime_from_iso(started_at) + timedelta(minutes=max(1, duration_minutes))).isoformat(timespec="seconds")
@@ -309,9 +322,16 @@ class MonitorService:
             return
         if job.task and not job.task.done():
             job.task.cancel()
+            # 只短暂等待收尸。_watch_loop 跑在 fetch_profiles_parallel(long playwright
+            # 调用)里时 cancel 未必能立刻进得去；这里若 await 卡到那一轮跑完(可能数十秒)，
+            # 上层 remove_watch_job 会一直持有 _watch_lock → 其它 watch 操作(stop/start/
+            # adjust/再 delete)全部死锁，UI 表现为"轮询任务完全无法移除"。
+            # 故:cancel 后最多等 1s 收不到就弃，留给事件循环后台自然消退(job 已从注册表 pop)。
             try:
-                await job.task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(job.task), timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
                 pass
         job.add_event("info", "Stopped live polling.")
         job.stopped = True
@@ -388,6 +408,60 @@ class MonitorService:
         for job_id in list(self._watch_jobs.keys()):
             await self._stop_job(job_id)
         await self.module.close_browser()
+        await self.live_room.close()
+
+    async def _enrich_live_room(self, profile: ProfileResult) -> None:
+        """对 live_status==1 的 profile 补直播间详情；未直播/失败置 live_room=None。
+
+        信号量≤3 限并发浏览器数；失败一律降级 return（不改写已 None）。
+        """
+        if not profile.ok or not isinstance(profile.profile, dict):
+            return
+        info = profile.profile
+        if info.get("live_status") != 1:
+            info["live_room"] = None
+            return
+        room_id_str = str(info.get("room_id") or "")
+        web_rid = str(info.get("web_rid") or "")
+        if not room_id_str and not web_rid:
+            # 主页接口未带房间号则跳过（靠 sec_uid 兜底回主页也拿不到正在直播的房间）
+            info["live_room"] = None
+            return
+        async with self._live_room_sem:
+            try:
+                room = await self.live_room.fetch_overview(
+                    web_rid=web_rid,
+                    room_id_str=room_id_str,
+                    sec_uid=profile.sec_uid,
+                )
+            except Exception:
+                room = None
+        info["live_room"] = room
+
+    async def fetch_live_room(self, *, sec_uid: str = "", web_rid: str = "",
+                              room_id_str: str = "") -> dict[str, Any] | None:
+        """手动再探测一次直播间（供 /api/live-room 端点）。
+
+        优先用入参 web_rid / room_id_str；否则按 sec_uid 从 profile_cache.json
+        取 cached profile.room_id。未直播/无房间号/探测失败 → None。
+        """
+        if not web_rid and not room_id_str:
+            if sec_uid:
+                cached = read_profile_cache(PROFILE_CACHE_FILE).get(sec_uid, {}).get("profile")
+                if isinstance(cached, dict):
+                    if cached.get("live_status") != 1:
+                        return None
+                    room_id_str = str(cached.get("room_id") or "")
+                    web_rid = str(cached.get("web_rid") or "")
+            if not web_rid and not room_id_str and not sec_uid:
+                return None
+        async with self._live_room_sem:
+            try:
+                return await self.live_room.fetch_overview(
+                    web_rid=web_rid, room_id_str=room_id_str, sec_uid=sec_uid
+                )
+            except Exception:
+                return None
 
     async def _watch_loop(self, job_id: str) -> None:
         job = self._watch_jobs.get(job_id)
@@ -406,6 +480,8 @@ class MonitorService:
                     profile = self._to_profile_result(entry, info)
                     job.profiles[entry["sec_uid"]] = profile
                     self._record_live_transition(job, entry, profile)
+                # 对直播中的 profile 并发补直播间详情
+                await asyncio.gather(*(self._enrich_live_room(p) for p in job.profiles.values()))
                 upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in job.profiles.values()])
                 failed = sum(1 for profile in job.profiles.values() if not profile.ok)
                 job.add_event("info", f"Round {job.round}: checked {len(job.targets)} user(s), failed {failed}.")
@@ -458,13 +534,57 @@ class MonitorService:
 
 
 
+def normalize_download_dir(value: str | Path | None = None) -> str:
+    raw = str(value or "").strip()
+    path = Path(raw).expanduser() if raw else DOWNLOAD_OUTPUT_DIR
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    return str(path)
+
+
+def load_app_settings() -> AppSettings:
+    settings = AppSettings(
+        download_output_dir=normalize_download_dir(DOWNLOAD_OUTPUT_DIR),
+        wrap_download_folder=False,
+    )
+    if not SETTINGS_FILE.exists():
+        return settings
+    try:
+        raw = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return settings
+
+    return AppSettings(
+        download_output_dir=normalize_download_dir(raw.get("download_output_dir") or settings.download_output_dir),
+        wrap_download_folder=bool(raw.get("wrap_download_folder", settings.wrap_download_folder)),
+    )
+
+
+def save_app_settings(download_output_dir: str, wrap_download_folder: bool) -> AppSettings:
+    settings = AppSettings(
+        download_output_dir=normalize_download_dir(download_output_dir),
+        wrap_download_folder=bool(wrap_download_folder),
+    )
+    path = Path(settings.download_output_dir)
+    if path.exists() and not path.is_dir():
+        raise ValueError("Download output path exists but is not a directory.")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"Cannot create download output directory: {exc}") from exc
+
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+    return settings
+
+
 class DownloadService:
     def __init__(self) -> None:
         self.module = load_module("douyin_downloader_tool", DOWNLOADER_DIR / "downloader.py")
         self.jobs: dict[str, DownloadJob] = {}
         self._executor = ThreadPoolExecutor(max_workers=3)
 
-    def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None, selected_media: dict[str, list[int]] | None = None) -> DownloadJob:
+    def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None, selected_media: dict[str, list[int]] | None = None, wrap_folder: bool = False) -> DownloadJob:
         urls = extract_douyin_urls(text)
         if selected_urls:
             selected = set(selected_urls)
@@ -472,7 +592,7 @@ class DownloadService:
         if not urls:
             raise ValueError("No Douyin URL found in input.")
 
-        resolved_output = str(Path(output_dir) if output_dir else DOWNLOAD_OUTPUT_DIR)
+        resolved_output = normalize_download_dir(output_dir or load_app_settings().download_output_dir)
         normalized_media: dict[str, list[int]] = {}
         if selected_media:
             for url, indices in selected_media.items():
@@ -488,6 +608,7 @@ class DownloadService:
             urls=urls,
             mode=mode,
             output_dir=resolved_output,
+            wrap_folder=wrap_folder,
             comments=comments,
             selected_media=normalized_media,
         )
@@ -519,9 +640,33 @@ class DownloadService:
             failed = 0
             for index, url in enumerate(job.urls, 1):
                 self._add_job_log(job_id, "info", f"[{index}/{len(job.urls)}] Processing {url}")
+                job.updated_at = now_iso()  # 心跳：每个 url 开始前刷新，前端可见进度
                 try:
                     wanted = job.selected_media.get(url) if job.selected_media else None
-                    result = self.module.download_douyin(url, job.output_dir, job.mode, job.comments, selected_indices=wanted)
+                    # 走子进程隔离 + 硬超时(download_runner)。打包 download_douyin 到独立进程，
+                    # CDP 常驻 Chrome 死亡导致 sync_playwright 无限挂起时，超时 kill 子进程，
+                    # job 不再永久卡在 running。直接同进程调用 module.download_douyin 在那种
+                    # 情况下线程无法 interrupt、try/except 也接不到。
+                    try:
+                        result = run_download_subprocess(
+                            url,
+                            job.output_dir,
+                            job.mode,
+                            job.comments,
+                            wanted,
+                            job.wrap_folder,
+                            timeout=DOWNLOAD_TIMEOUT,
+                        )
+                    except TimeoutError as exc:
+                        # subprocess.run 超时抛 subprocess.TimeoutExpired(它是 TimeoutError 子类)
+                        result = {"url": url, "ok": False,
+                                  "error": f"下载超时({DOWNLOAD_TIMEOUT}s)已终止: {exc}"}
+                        self._add_job_log(job_id, "error",
+                                          f"[{index}/{len(job.urls)}] 下载超时({DOWNLOAD_TIMEOUT}s)已终止")
+                        failed += 1
+                        results.append(result)
+                        job.updated_at = now_iso()
+                        continue
                     result = result if isinstance(result, dict) else {"result": result}
                     result["url"] = url
                     result["ok"] = True
@@ -531,6 +676,7 @@ class DownloadService:
                     failed += 1
                     results.append({"url": url, "ok": False, "error": str(exc)})
                     self._add_job_log(job_id, "error", f"[{index}/{len(job.urls)}] Failed: {exc}")
+                job.updated_at = now_iso()  # 心跳：每个 url 处理完刷新
             job.results = results
             job.status = "error" if failed else "done"
             if failed:
@@ -585,6 +731,14 @@ class DownloadService:
 def extract_douyin_urls(text: str) -> list[str]:
     seen: set[str] = set()
     urls: list[str] = []
+    # 允许用户漏填协议：把裸 www.douyin.com / v.douyin.com / iesdouyin.com
+    # 开头的链接自动补上 https://，再走统一正则。
+    if text:
+        text = re.sub(
+            r"(?<![\w./:-])(www\.douyin\.com|v\.douyin\.com|(?:www\.)?iesdouyin\.com)",
+            r"https://\1",
+            text,
+        )
     pattern = re.compile(
         r"https?://(?:v\.douyin\.com/|www\.douyin\.com/|(?:www\.)?iesdouyin\.com/).+?"
         r"(?=https?://(?:v\.douyin\.com/|www\.douyin\.com/|(?:www\.)?iesdouyin\.com/)|[\s\"'<>，。；、)）]|$)"
@@ -610,6 +764,11 @@ def infer_douyin_url_type(url: str) -> str:
 
 
 def extract_aweme_id_from_url(url: str) -> str:
+    ids = extract_aweme_ids_from_url(url)
+    return ids[0] if ids else ""
+
+
+def extract_aweme_ids_from_url(url: str) -> list[str]:
     """从抖音 URL 中提取 aweme_id（视频ID）。
 
     覆盖三类聚合页 URL（它们共享同一个 modal_id 参数）：
@@ -619,42 +778,85 @@ def extract_aweme_id_from_url(url: str) -> str:
     也兼容标准详情页 /video/<id>、/note/<id> 与 ?aweme_id=<id>。
     """
     if not url:
-        return ""
+        return []
+    ids: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text.isdigit() and text not in ids:
+            ids.append(text)
+
     path_match = re.search(r"/(?:video|note)/(\d+)", url)
     if path_match:
-        return path_match.group(1)
+        add(path_match.group(1))
+        return ids
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
-    for key in ("modal_id", "aweme_id", "awemeId", "video_id"):
+    for key in ("modal_id", "aweme_id", "awemeId", "video_id", "vid"):
         values = query.get(key) or []
         for value in values:
-            value = str(value).strip()
-            if value.isdigit():
-                return value
+            add(value)
     # v.douyin.com 短链等：路径段里第一个纯数字串
     for segment in parsed.path.split("/"):
-        if segment.isdigit():
-            return segment
-    return ""
+        add(segment)
+    return ids
 
 
 def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
-    with module.sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1600, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
-        page = context.new_page()
+    # 与 downloader.download_douyin 同源的三级登录态回退(CDP→profile→裸启动)，
+    # 复用常驻 Chrome 默认 context 实现"预览静默、不弹可见窗口"。
+    import os as _os
+    _cdp = _os.environ.get("DOUYIN_CDP", "http://127.0.0.1:9222")
+    _profile = str(SEARCH_PROFILE_DIR) if SEARCH_PROFILE_DIR.exists() else ""
+    browser = None
+    context = None
+    page = None
+    owns_context = False
+    playwright = module.sync_playwright().start()
+    try:
+        if _cdp:
+            try:
+                browser = playwright.chromium.connect_over_cdp(_cdp)
+                ctxs = browser.contexts
+                if ctxs:
+                    context = ctxs[0]
+                    owns_context = False
+                else:
+                    context = browser.new_context(viewport={"width": 1600, "height": 900})
+                    owns_context = True
+                page = context.new_page()
+            except Exception:
+                browser = None
+        if page is None and _profile:
+            try:
+                context = playwright.chromium.launch_persistent_context(
+                    _profile,
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                page = context.pages[0] if context.pages else context.new_page()
+                owns_context = True
+            except Exception:
+                context = None
+                page = None
+        if page is None:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                viewport={"width": 1600, "height": 900},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+            owns_context = True
+
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
             # 发现页/搜索页/喜欢列表等聚合页 SSR 里没有 videoDetail，
             # 需要先规约到标准详情页才能拿到图集/视频数据。
             # v.douyin.com 短链会 302 跳转到 /note/<id> 或 /video/<id>；用落地 URL 判断更准。
-            landed = page.evaluate("() => window.location.href") or url
+            landed = page.url or url
             resolved = landed
             try:
                 page.wait_for_selector("video, h1, [data-e2e='video-title'], [class*='note'], [class*='note-detail']", timeout=12000)
@@ -666,10 +868,17 @@ def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
             needs_resolve = "/video/" not in resolved and "/note/" not in resolved
             # 聚合页 content_type 多为 unknown；详情页通常为 video/image/slide
             if needs_resolve or content_type in ("unknown", ""):
-                aweme_id = extract_aweme_id_from_url(url) or extract_aweme_id_from_url(resolved)
-                if aweme_id:
-                    for candidate in (f"https://www.douyin.com/video/{aweme_id}",
-                                      f"https://www.douyin.com/note/{aweme_id}"):
+                aweme_ids = extract_aweme_ids_from_url(url) or extract_aweme_ids_from_url(resolved)
+                if aweme_ids:
+                    candidates = [
+                        candidate
+                        for aweme_id in aweme_ids
+                        for candidate in (
+                            f"https://www.douyin.com/video/{aweme_id}",
+                            f"https://www.douyin.com/note/{aweme_id}",
+                        )
+                    ]
+                    for candidate in candidates:
                         try:
                             page.goto(candidate, wait_until="domcontentloaded", timeout=20000)
                         except Exception:
@@ -702,7 +911,9 @@ def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
                 info = module._extract_video_info(page)
                 details["title"] = info.get("title") or details["title"]
                 details["author"] = info.get("author") or details["author"]
-                details["duration"] = _normalize_duration(_extract_video_duration(page))
+                aweme_ids = extract_aweme_ids_from_url(url) or extract_aweme_ids_from_url(resolved)
+                aweme_ids = aweme_ids or [meta.get("aweme_id", "")]
+                details["duration"] = _extract_preview_video_duration(page, aweme_ids)
                 details["media"] = [
                     {
                         "index": 1,
@@ -741,8 +952,35 @@ def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
                     details["cover_url"] = details["media"][0].get("cover_url") or ""
             return details
         finally:
-            context.close()
-            browser.close()
+            # 与 downloader 一致：CDP 复用常驻 context 时只关 page，
+            # 自有浏览器(profile/裸启动)才关 context+browser。
+            if not owns_context:
+                try:
+                    if page is not None:
+                        page.close()
+                except Exception:
+                    pass
+                try:
+                    if browser is not None:
+                        browser.close()
+                except Exception:
+                    pass
+            else:
+                try:
+                    if context is not None:
+                        context.close()
+                except Exception:
+                    pass
+                try:
+                    if browser is not None:
+                        browser.close()
+                except Exception:
+                    pass
+    finally:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
 
 
 def _collect_image_set(page, module: Any) -> list[str]:
@@ -762,21 +1000,106 @@ def _normalize_duration(value: Any) -> int:
         duration = float(value)
     except (TypeError, ValueError):
         return 0
+    if not math.isfinite(duration) or duration < 0:
+        return 0
     if duration > 1000:
         duration = duration / 1000
     return int(duration)
 
 
-def _extract_video_duration(page) -> int:
-    return page.evaluate(
+def _normalize_duration_seconds(value: Any) -> int:
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(duration) or duration < 0:
+        return 0
+    return int(duration)
+
+
+def _extract_duration_from_payload(payload: Any, aweme_id: str | list[str] = "") -> int:
+    targets = [str(value).strip() for value in (aweme_id if isinstance(aweme_id, list) else [aweme_id]) if str(value or "").strip()]
+    best_any = 0
+
+    def duration_from_record(record: dict[str, Any]) -> int:
+        video = record.get("video") if isinstance(record.get("video"), dict) else {}
+        for value in (
+            video.get("duration"),
+            record.get("duration"),
+            record.get("durationSec"),
+            record.get("videoDuration"),
+        ):
+            duration = _normalize_duration(value)
+            if duration:
+                return duration
+        return 0
+
+    def record_matches(record: dict[str, Any]) -> bool:
+        if not targets:
+            return False
+        for key in ("aweme_id", "awemeId", "awemeIdStr", "id", "itemId", "group_id", "groupId"):
+            value = record.get(key)
+            if value is not None and str(value) in targets:
+                return True
+        return False
+
+    def walk(node: Any) -> int:
+        nonlocal best_any
+        if isinstance(node, dict):
+            duration = duration_from_record(node)
+            if duration and not best_any:
+                best_any = duration
+            if duration and record_matches(node):
+                return duration
+            for value in node.values():
+                found = walk(value)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = walk(value)
+                if found:
+                    return found
+        return 0
+
+    matched = walk(payload)
+    return matched or (0 if targets else best_any)
+
+
+def _extract_preview_video_duration(page, aweme_id: str | list[str] = "") -> int:
+    return _extract_video_duration(page, aweme_id)
+
+
+def _extract_video_duration(page, aweme_id: str | list[str] = "") -> int:
+    snapshot = page.evaluate(
         """() => {
             const vd = window.SSR_RENDER_DATA?.app?.videoDetail;
             const raw = vd?.video?.duration || vd?.duration || 0;
-            if (raw) return raw;
             const video = document.querySelector('video');
-            return video && Number.isFinite(video.duration) ? Math.round(video.duration) : 0;
+            return {
+                direct: raw,
+                videoDuration: video && Number.isFinite(video.duration) ? Math.round(video.duration) : 0,
+                ssr: window.SSR_RENDER_DATA || null,
+            };
         }"""
     )
+    duration = _extract_duration_from_payload(snapshot.get("ssr"), aweme_id)
+    if duration:
+        return duration
+    duration = _normalize_duration(snapshot.get("direct"))
+    if duration:
+        return duration
+    initial_video_duration = _normalize_duration_seconds(snapshot.get("videoDuration"))
+    if initial_video_duration > 1:
+        return initial_video_duration
+    try:
+        page.wait_for_function(
+            "() => { const video = document.querySelector('video'); return video && Number.isFinite(video.duration) && video.duration > 2; }",
+            timeout=5000,
+        )
+        return _normalize_duration_seconds(page.evaluate("() => Math.round(document.querySelector('video')?.duration || 0)"))
+    except Exception:
+        return initial_video_duration
 
 
 def _extract_cover_url(page) -> str:

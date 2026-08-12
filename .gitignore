@@ -19,3 +19,8 @@ external/douyin-user-search/douyin_profile/
 external/douyin-user-search/results/
 app/*.lnk
 external/**/__pycache__/
+
+# 本地临时测试脚本 / 备份 / 本地设置：勿入仓库
+_test_*.py
+external/douyin-downloader/*.bak-*
+data/settings.json
