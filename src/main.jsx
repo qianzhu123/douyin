@@ -1,6 +1,8 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Clock, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, GripVertical, Plus, RefreshCcw, Search, Square, Trash2 } from 'lucide-react';
+import { Activity, Clock, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Plus, RefreshCcw, Search, Square, Trash2 } from 'lucide-react';
+import { formatDuration } from './duration.js';
+import { buildDownloadInputText, mergeDownloadPreviews, removeDownloadPreviewItem } from './downloadPreviewState.js';
 import './styles.css';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -17,16 +19,6 @@ function formatNumber(value) {
 function formatTime(value) {
   if (!value) return '-';
   return String(value).replace('T', ' ');
-}
-
-function formatDuration(seconds) {
-  if (!seconds && seconds !== 0) return '-';
-  const total = Number(seconds);
-  if (!Number.isFinite(total)) return '-';
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  if (hours > 0) return `${hours}小时${minutes}分`;
-  return `${minutes}分钟`;
 }
 
 function localNowIso() {
@@ -63,6 +55,8 @@ function App() {
   const [pollTargets, setPollTargets] = React.useState([]);
   const [downloadText, setDownloadText] = React.useState('');
   const [downloadMode, setDownloadMode] = React.useState(1);
+  const [downloadOutputDir, setDownloadOutputDir] = React.useState('');
+  const [downloadWrapFolder, setDownloadWrapFolder] = React.useState(false);
   const [downloadPreview, setDownloadPreview] = React.useState(null);
   const [selectedDownloadUrls, setSelectedDownloadUrls] = React.useState(new Set());
   const [selectedDownloadMedia, setSelectedDownloadMedia] = React.useState({});
@@ -190,11 +184,21 @@ function App() {
     setDownloadJobs(data.jobs || []);
   }, []);
 
+  const loadSettings = React.useCallback(async () => {
+    const response = await fetch(`${API_BASE}/api/settings`);
+    if (!response.ok) return;
+    const data = await response.json();
+    const settings = data.settings || {};
+    setDownloadOutputDir(settings.download_output_dir || '');
+    setDownloadWrapFolder(Boolean(settings.wrap_download_folder));
+  }, []);
+
   React.useEffect(() => {
     loadAccounts().catch((error) => setMessage(error.message));
     loadWatch().catch(() => {});
     loadDownloads().catch(() => {});
-  }, [loadAccounts, loadWatch, loadDownloads]);
+    loadSettings().catch(() => {});
+  }, [loadAccounts, loadWatch, loadDownloads, loadSettings]);
 
   React.useEffect(() => {
     const timer = window.setInterval(() => {
@@ -447,7 +451,8 @@ function App() {
 
 
   async function submitDownload() {
-    if (!downloadText.trim()) {
+    const downloadInputText = buildDownloadInputText(downloadText, downloadPreview);
+    if (!downloadInputText.trim()) {
       setMessage('请输入抖音视频、图集链接或分享文案');
       return;
     }
@@ -458,21 +463,27 @@ function App() {
     });
     setBusy(true);
     try {
+      const settingsData = await postJson('/api/settings', {
+        download_output_dir: downloadOutputDir,
+        wrap_download_folder: downloadWrapFolder,
+      });
+      const actualSettings = settingsData.settings || {};
+      const actualOutputDir = actualSettings.download_output_dir || downloadOutputDir;
+      setDownloadOutputDir(actualOutputDir);
       await postJson('/api/downloads', {
-        text: downloadText,
+        text: downloadInputText,
         mode: Number(downloadMode),
+        output_dir: actualOutputDir,
+        wrap_folder: downloadWrapFolder,
         comments: false,
         selected_urls: selectedUrls,
         selected_media: mediaPayload,
       });
       setDownloadText('');
-      setDownloadPreview(null);
-      setSelectedDownloadUrls(new Set());
-      setSelectedDownloadMedia({});
       await loadDownloads();
-      setMessage('下载任务已提交，默认输出到项目 output 文件夹');
+      setMessage(`下载任务已提交，输出到 ${actualOutputDir}`);
       const mediaCount = Object.values(mediaPayload).reduce((sum, arr) => sum + arr.length, 0);
-      appendLog('info', `下载任务已提交：${selectedUrls.length || '全部'} 个链接${mediaCount ? `，含 ${mediaCount} 张指定图片` : ''}`, '下载');
+      appendLog('info', `下载任务已提交：${selectedUrls.length || '全部'} 个链接${mediaCount ? `，含 ${mediaCount} 张指定图片` : ''}${downloadWrapFolder ? '，按标题创建文件夹' : '，直接保存到根目录'}`, '下载');
     } catch (error) {
       setMessage(error.message);
       appendLog('error', error.message, '下载');
@@ -481,26 +492,56 @@ function App() {
     }
   }
 
-  async function previewDownload() {
-    if (!downloadText.trim()) {
+  async function saveDownloadSettings() {
+    setBusy(true);
+    try {
+      const data = await postJson('/api/settings', {
+        download_output_dir: downloadOutputDir,
+        wrap_download_folder: downloadWrapFolder,
+      });
+      const settings = data.settings || {};
+      setDownloadOutputDir(settings.download_output_dir || '');
+      setDownloadWrapFolder(Boolean(settings.wrap_download_folder));
+      setMessage('下载设置已保存');
+      appendLog('info', `下载设置已保存：${settings.download_output_dir || ''}${settings.wrap_download_folder ? '，按标题创建文件夹' : '，直接保存到根目录'}`, '下载');
+    } catch (error) {
+      setMessage(error.message);
+      appendLog('error', error.message, '下载');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewDownload(overrideText) {
+    // onClick 直接绑本函数时，React 会把事件对象作为第一个参数传入；
+    // 此时取到的不是字符串，必须忽略并回退到 downloadText，否则 text.trim 报错
+    // 导致"解析预览"按钮点了完全没反应、也没有预览内容渲染。
+    const raw = (typeof overrideText === 'string') ? overrideText : downloadText;
+    const text = raw || '';
+    if (!text.trim()) {
       setMessage('请输入抖音视频、图集链接或分享文案');
       return;
     }
     setPreviewBusy(true);
     try {
-      const data = await postJson('/api/downloads/preview', { text: downloadText, deep: true });
+      const data = await postJson('/api/downloads/preview', { text, deep: true });
       const preview = data.preview || { items: [] };
-      setDownloadPreview(preview);
-      setSelectedDownloadUrls(new Set((preview.items || []).filter((item) => item.selected).map((item) => item.url)));
-      setSelectedDownloadMedia({});
+      const merged = mergeDownloadPreviews(downloadPreview, preview, selectedDownloadUrls);
+      setDownloadPreview(merged.preview);
+      setSelectedDownloadUrls(merged.selectedUrls);
       setMessage(`已解析 ${preview.items?.length || 0} 个下载链接`);
-      appendLog('info', `下载预览已解析 ${preview.items?.length || 0} 个链接`, '下载');
+      appendLog('info', `下载预览已解析 ${preview.items?.length || 0} 个链接，当前共 ${merged.preview.items.length} 个`, '下载');
     } catch (error) {
       setMessage(error.message);
       appendLog('error', error.message, '下载');
     } finally {
       setPreviewBusy(false);
     }
+  }
+
+  // alias used by the file-upload auto-preview path
+  function previewDownloadWithText(text) {
+    previewDownload(text);
   }
 
   function toggleDownloadUrl(url) {
@@ -510,6 +551,63 @@ function App() {
       else next.add(url);
       return next;
     });
+  }
+
+  // Read a .txt file of links (one per line), append to downloadText, and
+  // optionally auto-trigger batch preview. Supports both plaintext link lists
+  // and Douyin share text where URLs are embedded after "复制此链接".
+  async function handleLinkFileUpload(event, { autoPreview = false } = {}) {
+    const file = event.target.files && event.target.files[0];
+    // reset the input so the same file can be re-selected later
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > 1024 * 1024) {
+      setMessage('文件过大 (>1MB)，请仅上传包含链接的文本文件');
+      return;
+    }
+    let raw = '';
+    try {
+      raw = await file.text();
+    } catch (err) {
+      setMessage(`读取文件失败：${err.message}`);
+      return;
+    }
+    const urls = extractDouyinUrlsFromText(raw);
+    if (!urls.length) {
+      setMessage('文件中未识别到抖音链接');
+      return;
+    }
+    setDownloadText((cur) => {
+      const existing = cur.trim();
+      const combined = existing ? `${existing}\n${urls.join('\n')}` : urls.join('\n');
+      return combined;
+    });
+    setMessage(`从文件 ${file.name} 中加载 ${urls.length} 个链接`);
+    appendLog('info', `从文件 ${file.name} 中加载 ${urls.length} 个链接`, '下载');
+    if (autoPreview) {
+      // give setDownloadText a tick, then preview
+      setTimeout(() => previewDownloadWithText(urls.join('\n')), 30);
+    }
+  }
+
+  // Resolve links that may live in a given text string (used by both the
+  // textarea preview and the file upload). Mirrors backend's URL extraction so
+  // the client can show accurate counts.
+  function extractDouyinUrlsFromText(text) {
+    const seen = new Set();
+    const out = [];
+    // mirror backend extract_douyin_urls (backend/services.py) so client counts
+    // match what the server will actually resolve.
+    const re = /https?:\/\/(?:v\.douyin\.com\/|www\.douyin\.com\/|(?:www\.)?iesdouyin\.com\/).+?(?=https?:\/\/(?:v\.douyin\.com\/|www\.douyin\.com\/|(?:www\.)?iesdouyin\.com\/)|[\s"'<>,。；、)）]|$)/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const cleaned = m[0].replace(/[.,;!?]+$/, '');
+      if ((cleaned.includes('douyin.com') || cleaned.includes('iesdouyin.com')) && !seen.has(cleaned)) {
+        seen.add(cleaned);
+        out.push(cleaned);
+      }
+    }
+    return out;
   }
 
   function toggleDownloadMedia(url, index) {
@@ -531,6 +629,13 @@ function App() {
       else delete next[url];
       return next;
     });
+  }
+
+  function removeDownloadPreview(url) {
+    const next = removeDownloadPreviewItem(downloadPreview, selectedDownloadUrls, selectedDownloadMedia, url);
+    setDownloadPreview(next.preview);
+    setSelectedDownloadUrls(next.selectedUrls);
+    setSelectedDownloadMedia(next.selectedMedia);
   }
 
   return (
@@ -657,7 +762,7 @@ function App() {
           <div className="panel-head">
             <div>
               <h2>视频下载</h2>
-              <p>默认输出目录：output</p>
+              <p>默认输出目录：{downloadOutputDir || 'Downloads'}</p>
             </div>
             <Download size={18} />
           </div>
@@ -667,17 +772,57 @@ function App() {
               onChange={(event) => {
                 setDownloadText(event.target.value);
               }}
-              placeholder="粘贴 https://v.douyin.com/... 或完整分享文案"
+              placeholder={"可粘贴一个或多个抖音链接（每行一个），或完整分享文案。也可上传 .txt 文件，见下方按钮。"}
             />
             <select value={downloadMode} onChange={(event) => setDownloadMode(event.target.value)}>
               <option value={1}>仅下载媒体</option>
               <option value={2}>仅保存互动数据</option>
               <option value={3}>媒体 + 数据</option>
             </select>
-            <button className="secondary" onClick={previewDownload} disabled={busy || previewBusy}>
+            <button className={`secondary${previewBusy ? ' btn-busy' : ''}`} onClick={() => previewDownload()} disabled={busy || previewBusy}>
               <FileSearch size={16} /> {previewBusy ? '解析中' : '解析预览'}
             </button>
-            <button onClick={submitDownload} disabled={busy || previewBusy || (downloadPreview && selectedDownloadUrls.size === 0)}>提交下载</button>
+            <button className={busy ? 'btn-busy' : ''} onClick={submitDownload} disabled={busy || previewBusy || (downloadPreview && selectedDownloadUrls.size === 0)}>提交下载</button>
+          </div>
+          <div className="download-upload-row">
+            <label className="file-upload-btn secondary" title="选择 .txt 文件（每行一个链接），加载后自动解析">
+              <FileUp size={16} />
+              <span>上传链接文件 (.txt)</span>
+              <input
+                type="file"
+                accept=".txt,text/plain"
+                onChange={(e) => handleLinkFileUpload(e, { autoPreview: true })}
+                style={{ display: 'none' }}
+              />
+            </label>
+            <button className="secondary" onClick={() => {
+              const urls = extractDouyinUrlsFromText(downloadText);
+              setDownloadText(urls.join('\n'));
+              setMessage(urls.length ? `已整理为 ${urls.length} 个链接` : '当前文本未识别到链接');
+            }} disabled={busy || previewBusy} title="将当前文本框中的所有链接整理成每行一个">
+              整理链接
+            </button>
+            {downloadText.trim() && (
+              <button className="secondary" onClick={() => setDownloadText('')} disabled={busy || previewBusy}>
+                清空
+              </button>
+            )}
+          </div>
+          <div className="download-options">
+            <input
+              value={downloadOutputDir}
+              onChange={(event) => setDownloadOutputDir(event.target.value)}
+              placeholder="C:\Users\Light\Downloads"
+            />
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={downloadWrapFolder}
+                onChange={(event) => setDownloadWrapFolder(event.target.checked)}
+              />
+              按作品标题创建文件夹
+            </label>
+            <button className="secondary" onClick={saveDownloadSettings} disabled={busy}>保存下载设置</button>
           </div>
           {downloadPreview && (
             <DownloadPreview
@@ -687,6 +832,7 @@ function App() {
               onToggle={toggleDownloadUrl}
               onToggleMedia={toggleDownloadMedia}
               onToggleMediaBulk={setDownloadMediaBulk}
+              onRemove={removeDownloadPreview}
             />
           )}
           <div className="job-list">
@@ -696,6 +842,7 @@ function App() {
                   <span className={`job-status ${job.status}`}>{job.status}</span>
                   <span>{job.urls.length} 个链接</span>
                   <small>{job.output_dir}</small>
+                  <small>{job.wrap_folder ? '按标题文件夹保存' : '直接保存到根目录'}</small>
                   {job.error && <strong>{job.error}</strong>}
                 </div>
                 <div className="job-detail">
@@ -851,11 +998,83 @@ function DetailPanel({ row, hidden }) {
         <Info label="持续时间" value={display(formatDuration(profile.live_duration_seconds))} />
         <Info label="上次检测" value={display(formatTime(row.last_checked_at))} />
       </div>
+      {profile.live_room && profile.live_status === 1 && !hidden && (
+        <LiveRoomCard data={profile.live_room} />
+      )}
     </section>
   );
 }
 
-function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onToggleMedia, onToggleMediaBulk }) {
+function LiveRoomCard({ data }) {
+  const partition = data.partition || {};
+  const similar = data.similar_rooms || [];
+  const audience = data.audience_rank_top || [];
+  const meta = data.audience_rank_meta || {};
+  const stream = data.stream_url || {};
+  const anchor = data.anchor || {};
+  return (
+    <div className="live-room-card">
+      <div className="live-room-card-head">
+        <span className="live-dot" />
+        <h3>{data.title || '直播间详情'}</h3>
+        <a className="live-room-link" href={`https://live.douyin.com/${data.web_rid}`} target="_blank" rel="noreferrer">
+          打开直播间
+        </a>
+      </div>
+      <div className="live-room-grid">
+        <Info label="在线观看" value={formatNumber(data.viewers) !== '-' ? formatNumber(data.viewers) : (data.user_count_str || '-')} />
+        <Info label="累计观看" value={formatNumber(data.total_user_str)} />
+        <Info label="本场点赞" value={formatNumber(data.like_count)} />
+        <Info label="分区" value={partition.title || '-'} />
+      </div>
+      {similar.length > 0 && (
+        <div className="live-room-tags">
+          <span className="live-room-tags-label">同推房：</span>
+          {similar.map((room, index) => (
+            <a key={index} className="live-room-tag" href={`https://live.douyin.com/${room.web_rid}`} target="_blank" rel="noreferrer">
+              {room.title || room.web_rid} · {room.user_count_str}
+            </a>
+          ))}
+        </div>
+      )}
+      {audience.length > 0 && (
+        <div className="audience-rank">
+          <div className="audience-rank-head">
+            <h4>观众榜 Top{audience.length}</h4>
+            <span className="audience-rank-meta">{meta.user_count_desc || ''}</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>昵称</th>
+                <th>付费等级</th>
+                <th>粉丝团</th>
+              </tr>
+            </thead>
+            <tbody>
+              {audience.map((u) => (
+                <tr key={u.sec_uid || u.rank}>
+                  <td>{u.rank}</td>
+                  <td>{u.nickname || '-'}</td>
+                  <td>{u.pay_grade_level ?? '-'}</td>
+                  <td>{u.fans_club_level ?? '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="live-room-foot">
+        <span className="live-room-anchor">主播：{anchor.nickname || '-'}</span>
+        {data.qrcode_url && <img className="live-room-qr" src={data.qrcode_url} alt="直播间二维码" />}
+      </div>
+      <p className="live-room-stream">流地址：{stream.hls_pull_url || stream.flv_pull_url || '未开放'}</p>
+    </div>
+  );
+}
+
+function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onToggleMedia, onToggleMediaBulk, onRemove }) {
   const dragState = React.useRef({ active: false, url: '', mode: 'add', last: -1 });
 
   const beginDrag = (event, item, firstIndex) => {
@@ -953,6 +1172,9 @@ function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onTog
               </div>
             )}
           </div>
+          <button className="icon-button preview-remove" onClick={() => onRemove(item.url)} title="删除该预览" type="button">
+            <Trash2 size={16} />
+          </button>
         </article>
         );
       })}

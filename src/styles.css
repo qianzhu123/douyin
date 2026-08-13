@@ -34,6 +34,53 @@ button {
   font-size: 14px;
   font-weight: 650;
   white-space: nowrap;
+  transition: transform .08s ease, box-shadow .15s ease, filter .15s ease;
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(1.04);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px) scale(.985);
+}
+
+button:focus-visible {
+  outline: 2px solid #2f8cff;
+  outline-offset: 2px;
+}
+
+/* 解析预览/提交下载等长操作进行中的按钮：一圈微脉冲环，提示正在处理 */
+button.btn-busy:not(:disabled) {
+  position: relative;
+  color: transparent;
+}
+
+button.btn-busy:not(:disabled)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .35);
+  border-top-color: #fff;
+  animation: btnSpin .7s linear infinite;
+}
+
+button.secondary.btn-busy:not(:disabled)::after {
+  border-color: rgba(27, 111, 194, .25);
+  border-top-color: #1b6fc2;
+}
+
+button.danger.btn-busy:not(:disabled)::after {
+  border-color: rgba(186, 26, 26, .25);
+  border-top-color: #ba1a1a;
+}
+
+@keyframes btnSpin {
+  to { transform: rotate(360deg); }
 }
 
 button.secondary {
@@ -392,6 +439,7 @@ button:disabled {
 
 .download-form textarea,
 .download-form select,
+.download-options input,
 .search-form input,
 .field input {
   border: 1px solid #c9dff1;
@@ -399,6 +447,44 @@ button:disabled {
   padding: 10px 12px;
   min-width: 0;
   background: #fff;
+}
+
+.download-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.download-upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.download-upload-row .file-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.download-upload-row button.secondary {
+  font-size: 13px;
+}
+
+.checkbox-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #24364a;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .job-list {
@@ -453,7 +539,7 @@ button:disabled {
 
 .preview-row {
   display: grid;
-  grid-template-columns: 28px 86px minmax(0, 1fr);
+  grid-template-columns: 28px 86px minmax(0, 1fr) 36px;
   gap: 12px;
   align-items: start;
   border: 1px solid #dcecf8;
@@ -499,6 +585,11 @@ button:disabled {
   color: #1b6fc2;
   font-size: 12px;
   font-weight: 750;
+}
+
+.preview-remove {
+  align-self: start;
+  color: #8a3143;
 }
 
 .media-strip {
@@ -740,6 +831,7 @@ button:disabled {
 
   .top-actions,
   .download-form,
+  .download-options,
   .search-form,
   .candidate-row,
   .job-summary,
@@ -857,3 +949,48 @@ button:disabled {
   display: flex;
   gap: 6px;
 }
+
+/* 直播间详情卡（DetailPanel 内，仅 live_status==1 且 live_room 非空时渲染） */
+.live-room-card {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 10px;
+  background: var(--surface-2, #f8fafc);
+}
+.live-room-card .live-room-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.live-room-card .live-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #ef4444; box-shadow: 0 0 0 0 rgba(239,68,68,.6);
+  animation: livePulse 1.4s infinite;
+}
+@keyframes livePulse {
+  0% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); }
+  70% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+  100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+}
+.live-room-card .live-room-card-head h3 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
+.live-room-card .live-room-link { font-size: 12px; color: #2563eb; text-decoration: none; }
+.live-room-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px;
+}
+.live-room-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; font-size: 12px; }
+.live-room-tags-label { color: var(--muted, #64748b); }
+.live-room-tag { padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; text-decoration: none; }
+.audience-rank { margin-top: 10px; border-top: 1px dashed var(--border, #e2e8f0); padding-top: 10px; }
+.audience-rank-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.audience-rank-head h4 { margin: 0; font-size: 13px; }
+.audience-rank-meta { font-size: 11px; color: var(--muted, #64748b); }
+.audience-rank table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.audience-rank th, .audience-rank td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border, #edf2f7); }
+.audience-rank th { font-weight: 600; color: var(--muted, #64748b); }
+.live-room-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12px; }
+.live-room-qr { width: 64px; height: 64px; object-fit: contain; }
+.live-room-stream { margin: 8px 0 0; font-size: 11px; color: var(--muted, #94a3b8); word-break: break-all; }
+
+@media (max-width: 720px) { .live-room-grid { grid-template-columns: repeat(2, 1fr); } }
