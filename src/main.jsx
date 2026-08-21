@@ -512,6 +512,33 @@ function App() {
     }
   }
 
+  async function cancelDownloadJob(jobId) {
+    if (!jobId) return;
+    try {
+      await postJson(`/api/downloads/${jobId}/cancel`, {});
+      await loadDownloads();
+      setMessage('已请求取消下载任务');
+      appendLog('warning', '已请求取消下载任务（正在运行的链接完成后停止后续）', '下载');
+    } catch (error) {
+      setMessage(error.message);
+      appendLog('error', error.message, '下载');
+    }
+  }
+
+  async function deleteDownloadJob(jobId) {
+    if (!jobId) return;
+    try {
+      const resp = await fetch(`${API_BASE}/api/downloads/${jobId}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(`删除下载任务失败 (${resp.status})`);
+      await loadDownloads();
+      setMessage('下载任务已删除');
+      appendLog('info', '下载任务已删除', '下载');
+    } catch (error) {
+      setMessage(error.message);
+      appendLog('error', error.message, '下载');
+    }
+  }
+
   async function previewDownload(overrideText) {
     // onClick 直接绑本函数时，React 会把事件对象作为第一个参数传入；
     // 此时取到的不是字符串，必须忽略并回退到 downloadText，否则 text.trim 报错
@@ -844,6 +871,16 @@ function App() {
                   <small>{job.output_dir}</small>
                   <small>{job.wrap_folder ? '按标题文件夹保存' : '直接保存到根目录'}</small>
                   {job.error && <strong>{job.error}</strong>}
+                  <span className="job-actions">
+                    {(job.status === 'queued' || job.status === 'running') && (
+                      <button className="secondary small-icon" onClick={() => cancelDownloadJob(job.id)} title="取消下载（正在运行的链接完成后停止后续）">
+                        <Square size={14} /> 取消
+                      </button>
+                    )}
+                    <button className="danger icon-button small-icon" onClick={() => deleteDownloadJob(job.id)} title="删除下载任务">
+                      <Trash2 size={15} />
+                    </button>
+                  </span>
                 </div>
                 <div className="job-detail">
                   {(job.results || []).map((result, index) => (
