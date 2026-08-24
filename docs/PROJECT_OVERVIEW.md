@@ -33,7 +33,9 @@ The three helper utilities are bundled inside the project under `external/`, and
 - Search utility: `external/douyin-user-search`
 - Account data: `data/users.json`
 - Profile cache: `data/profile_cache.json`
-- Download output: `output`
+- Download settings: `data/settings.json`
+- Default download output: `C:\Users\Light\Downloads`
+- Browser extensions: `tools/douyin_extensions/{downloader,live-overlay}`
 
 ## Development
 

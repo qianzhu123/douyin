@@ -1,0 +1,123 @@
+/* Douyin Downloader Helper — page-side floating button styles.
+   与 popup.css 中的浮窗样式保持一致，圆形按钮 + 弹出面板。 */
+
+.dy-dlh-fab {
+  position: fixed;
+  top: 96px;
+  right: 24px;
+  z-index: 2147483600;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #fe2c55, #ff5b8a);
+  color: #fff;
+  border: none;
+  box-shadow: 0 6px 18px rgba(254, 44, 85, 0.35);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.dy-dlh-fab:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(254, 44, 85, 0.45);
+}
+
+.dy-dlh-fab.dy-dlh-busy {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+.dy-dlh-fab svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+.dy-dlh-panel {
+  position: fixed;
+  top: 152px;
+  right: 24px;
+  z-index: 2147483600;
+  width: 280px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(20, 22, 28, 0.92);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.dy-dlh-panel h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.dy-dlh-panel .dy-dlh-url {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #c7c9d1;
+  word-break: break-all;
+  margin-bottom: 10px;
+  max-height: 48px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dy-dlh-panel button.dy-dlh-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: none;
+  background: #fe2c55;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.dy-dlh-panel button.dy-dlh-btn:hover {
+  background: #ff4477;
+}
+
+.dy-dlh-panel button.dy-dlh-btn:disabled {
+  background: #555;
+  cursor: not-allowed;
+}
+
+.dy-dlh-panel button.dy-dlh-btn.secondary {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dy-dlh-panel button.dy-dlh-btn.secondary:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.dy-dlh-panel .dy-dlh-status {
+  margin-top: 10px;
+  min-height: 16px;
+  font-size: 12px;
+  color: #c7c9d1;
+}
+
+.dy-dlh-panel .dy-dlh-status.error {
+  color: #ff7c8a;
+}
+
+.dy-dlh-panel .dy-dlh-status.ok {
+  color: #8de4a3;
+}
+
+.dy-dlh-hidden {
+  display: none !important;
+}

@@ -15,7 +15,7 @@
 ## 安装
 
 ```powershell
-cd C:\Users\Light\Desktop\temp\douyin-user-search
+cd external/douyin-user-search
 pip install -r requirements.txt
 python -m playwright install chromium
 ```
@@ -73,8 +73,8 @@ douyin-user-search/
 ├── cli.py             提炼版 CLI
 ├── requirements.txt
 ├── README.md
-├── douyin_profile\    (登录后生成，存登录态)
-└── results\           (搜索后生成，存 JSON)
+├── douyin_profile/    (登录后生成，存登录态)
+└── results/           (搜索后生成，存 JSON)
 ```
 
 ## 风控提示
