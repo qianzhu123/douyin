@@ -32,6 +32,12 @@ class SearchUsersRequest(BaseModel):
     keyword: str
 
 
+class LiveRoomRequest(BaseModel):
+    sec_uid: str = ""
+    web_rid: str = ""
+    room_id_str: str = ""
+
+
 class SearchCandidate(BaseModel):
     nickname: str = ""
     unique_id: str = ""
@@ -139,6 +145,7 @@ class DownloadRequest(BaseModel):
     text: str
     mode: int = Field(default=1, ge=1, le=3)
     output_dir: str = ""
+    wrap_folder: bool = False
     comments: bool = False
     selected_urls: list[str] = Field(default_factory=list)
     selected_media: dict[str, list[int]] = Field(default_factory=dict)
@@ -151,18 +158,31 @@ class DownloadPreviewRequest(BaseModel):
 
 class DownloadJob(BaseModel):
     id: str
-    status: Literal["queued", "running", "done", "error"]
+    # cancelled: 用户手动取消；运行中被 cancel 后尽快停止后续 URL，已完成的保留。
+    status: Literal["queued", "running", "done", "error", "cancelled"]
     created_at: str
     updated_at: str
     input: str
     urls: list[str]
     mode: int
     output_dir: str
+    wrap_folder: bool = False
     comments: bool = False
     selected_media: dict[str, list[int]] = Field(default_factory=dict)
+    cancel_requested: bool = False
     logs: list[dict[str, str]] = Field(default_factory=list)
     results: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
+
+
+class AppSettings(BaseModel):
+    download_output_dir: str = ""
+    wrap_download_folder: bool = False
+
+
+class AppSettingsRequest(BaseModel):
+    download_output_dir: str = ""
+    wrap_download_folder: bool = False
 
 
 def now_iso() -> str:

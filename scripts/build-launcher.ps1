@@ -8,10 +8,19 @@ $ProgramCs = Join-Path $ProjectRoot "launcher\Program.cs"
 $IconSource = $CompatIcon
 
 $CscCommand = Get-Command csc.exe -ErrorAction SilentlyContinue
-if (-not $CscCommand) {
+$Csc = if ($CscCommand) { $CscCommand.Source } else { "" }
+if (-not $Csc) {
+    $FrameworkCsc = @(
+        "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($FrameworkCsc) {
+        $Csc = $FrameworkCsc
+    }
+}
+if (-not $Csc) {
     throw "csc.exe was not found. Install Visual Studio Build Tools or .NET Framework developer tools, then rerun this script."
 }
-$Csc = $CscCommand.Source
 
 if (-not (Test-Path -LiteralPath $AppDir)) {
     New-Item -ItemType Directory -Path $AppDir | Out-Null

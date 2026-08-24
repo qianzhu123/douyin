@@ -24,3 +24,9 @@ external/**/__pycache__/
 _test_*.py
 external/douyin-downloader/*.bak-*
 data/settings.json
+
+# 后端写入运行时日志（uvicorn 输出）已被 *.log 兜住；这里只兜底后端特意命名的日志
+backend/backend.log
+backend/backend.err.log
+backend/frontend.log
+backend/frontend.err.log

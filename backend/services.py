@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import re
+import threading
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -582,7 +583,13 @@ class DownloadService:
     def __init__(self) -> None:
         self.module = load_module("douyin_downloader_tool", DOWNLOADER_DIR / "downloader.py")
         self.jobs: dict[str, DownloadJob] = {}
-        self._executor = ThreadPoolExecutor(max_workers=3)
+        # 全局最多 4 个工作线程：1 个给 job 调度(_dispatch_job)，其余跑 URL 子进程。
+        # 即同一 job 内多 URL 并发上限 3，多 job 之间共享这个池。
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        # 正在排队的 URL 计数(交由 _executor 调度；用于判断当前 job 是否还有 URL
+        # 在跑)。cancel/delete 时据此等待或放弃。job_id -> 剩余未完成 URL 数。
+        self._pending: dict[str, int] = {}
+        self._state_lock = threading.Lock()
 
     def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None, selected_media: dict[str, list[int]] | None = None, wrap_folder: bool = False) -> DownloadJob:
         urls = extract_douyin_urls(text)
@@ -614,7 +621,7 @@ class DownloadService:
         )
         self.jobs[job.id] = job
         self._add_job_log(job.id, "info", f"Queued {len(urls)} URL(s).")
-        self._ensure_executor().submit(self._run_job, job.id)
+        self._ensure_executor().submit(self._dispatch_job, job.id)
         return job
 
     def preview(self, text: str, deep: bool = False) -> dict[str, Any]:
@@ -630,70 +637,155 @@ class DownloadService:
     def get_job(self, job_id: str) -> DownloadJob | None:
         return self.jobs.get(job_id)
 
-    def _run_job(self, job_id: str) -> None:
+    def _dispatch_job(self, job_id: str) -> None:
+        """调度一个 job：多 URL 并发提交到共享线程池并等所有完成。
+
+        不再串行逐个跑——以前一个卡 240s 后面全排队。现在同一 job 内 up to 3 个
+        URL 子进程并行，任一卡住不阻塞其余。仍在跑的子进程撞 240s 超时由子进程
+        兜底回收。cancel_requested 被检查：发起后不再提交新 URL，已开的会跑完。
+        """
+        from concurrent.futures import as_completed
+
         job = self.jobs[job_id]
+        # 启动前再检查一次取消(可能在排队期间就被取消了)。
+        with self._state_lock:
+            if job.cancel_requested:
+                job.status = "cancelled"
+                job.updated_at = now_iso()
+                self._add_job_log(job_id, "info", "Job cancelled before start.")
+                self._pending.pop(job_id, None)
+                return
         job.status = "running"
         job.updated_at = now_iso()
         self._add_job_log(job_id, "info", "Started download job.")
+
+        results: list[dict[str, Any]] = []
+        results_lock = threading.Lock()
+        failed = 0
+        index_of = {url: i for i, url in enumerate(job.urls, 1)}
+        total = len(job.urls)
+        with self._state_lock:
+            self._pending[job_id] = total
+
+        executor = self._ensure_executor()
+        futures = {}
+        for url in job.urls:
+            with self._state_lock:
+                if job.cancel_requested:
+                    break
+            futures[executor.submit(self._download_one_subprocess, job_id, url, index_of[url], total)] = url
+
         try:
-            results: list[dict[str, Any]] = []
-            failed = 0
-            for index, url in enumerate(job.urls, 1):
-                self._add_job_log(job_id, "info", f"[{index}/{len(job.urls)}] Processing {url}")
-                job.updated_at = now_iso()  # 心跳：每个 url 开始前刷新，前端可见进度
+            for future in as_completed(futures):
+                url = futures[future]
                 try:
-                    wanted = job.selected_media.get(url) if job.selected_media else None
-                    # 走子进程隔离 + 硬超时(download_runner)。打包 download_douyin 到独立进程，
-                    # CDP 常驻 Chrome 死亡导致 sync_playwright 无限挂起时，超时 kill 子进程，
-                    # job 不再永久卡在 running。直接同进程调用 module.download_douyin 在那种
-                    # 情况下线程无法 interrupt、try/except 也接不到。
-                    try:
-                        result = run_download_subprocess(
-                            url,
-                            job.output_dir,
-                            job.mode,
-                            job.comments,
-                            wanted,
-                            job.wrap_folder,
-                            timeout=DOWNLOAD_TIMEOUT,
-                        )
-                    except TimeoutError as exc:
-                        # subprocess.run 超时抛 subprocess.TimeoutExpired(它是 TimeoutError 子类)
-                        result = {"url": url, "ok": False,
-                                  "error": f"下载超时({DOWNLOAD_TIMEOUT}s)已终止: {exc}"}
-                        self._add_job_log(job_id, "error",
-                                          f"[{index}/{len(job.urls)}] 下载超时({DOWNLOAD_TIMEOUT}s)已终止")
+                    outcome = future.result()
+                except Exception as exc:  # 兜底：子工作线程自身异常
+                    outcome = {"url": url, "ok": False, "error": f"调度失败: {exc}"}
+                with results_lock:
+                    results.append(outcome)
+                    if not outcome.get("ok", False):
                         failed += 1
-                        results.append(result)
-                        job.updated_at = now_iso()
-                        continue
-                    result = result if isinstance(result, dict) else {"result": result}
-                    result["url"] = url
-                    result["ok"] = True
-                    results.append(result)
-                    self._add_job_log(job_id, "info", f"[{index}/{len(job.urls)}] Finished {result.get('title') or url}")
-                except Exception as exc:
-                    failed += 1
-                    results.append({"url": url, "ok": False, "error": str(exc)})
-                    self._add_job_log(job_id, "error", f"[{index}/{len(job.urls)}] Failed: {exc}")
-                job.updated_at = now_iso()  # 心跳：每个 url 处理完刷新
-            job.results = results
-            job.status = "error" if failed else "done"
-            if failed:
-                job.error = f"{failed} of {len(job.urls)} URL(s) failed."
-            else:
-                self._add_job_log(job_id, "info", "Finished all downloads.")
-        except Exception as exc:
-            job.status = "error"
-            job.error = str(exc)
-            self._add_job_log(job_id, "error", str(exc))
+                job.updated_at = now_iso()
+                with self._state_lock:
+                    self._pending[job_id] = max(0, int(self._pending.get(job_id, 0)) - 1)
         finally:
-            job.updated_at = now_iso()
+            with self._state_lock:
+                self._pending.pop(job_id, None)
+
+        with self._state_lock:
+            cancelled = job.cancel_requested
+        job.results = results
+        if cancelled:
+            job.status = "cancelled"
+            job.error = f"已取消：{failed} 个失败/未完成，已完成 {len(results) - failed}。"
+            self._add_job_log(job_id, "warning", "Job cancelled.")
+        elif failed:
+            job.status = "error"
+            job.error = f"{failed} of {total} URL(s) failed."
+        else:
+            job.status = "done"
+            self._add_job_log(job_id, "info", "Finished all downloads.")
+        job.updated_at = now_iso()
+
+    def _download_one_subprocess(self, job_id: str, url: str, index: int, total: int) -> dict[str, Any]:
+        """单 URL 下载：子进程隔离 + 240s 硬超时。在共享线程池的工作线程里跑。"""
+        job = self.jobs.get(job_id)
+        if job is None:
+            return {"url": url, "ok": False, "error": "Job not found."}
+        # 开始前检查取消：未开跑的直接标记跳过，不浪费子进程。
+        with self._state_lock:
+            if job.cancel_requested:
+                self._add_job_log(job_id, "warning", f"[{index}/{total}] Skipped (cancelled): {url}")
+                return {"url": url, "ok": False, "error": "cancelled", "cancelled": True}
+        wanted = job.selected_media.get(url) if job.selected_media else None
+        self._add_job_log(job_id, "info", f"[{index}/{total}] Processing {url}")
+        job.updated_at = now_iso()
+        # download_douyin 跑在独立子进程；CDP 死亡致 sync_playwright 无限挂时，
+        # subprocess.run(timeout=DOWNLOAD_TIMEOUT) 会 kill 子进程兜底回收。
+        try:
+            result = run_download_subprocess(
+                url,
+                job.output_dir,
+                job.mode,
+                job.comments,
+                wanted,
+                job.wrap_folder,
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+        except TimeoutError as exc:
+            self._add_job_log(job_id, "error", f"[{index}/{total}] 下载超时({DOWNLOAD_TIMEOUT}s)已终止")
+            return {"url": url, "ok": False, "error": f"下载超时({DOWNLOAD_TIMEOUT}s)已终止: {exc}"}
+        except Exception as exc:
+            self._add_job_log(job_id, "error", f"[{index}/{total}] Failed: {exc}")
+            return {"url": url, "ok": False, "error": str(exc)}
+        result = result if isinstance(result, dict) else {"result": result}
+        result["url"] = url
+        result["ok"] = True
+        self._add_job_log(job_id, "info", f"[{index}/{total}] Finished {result.get('title') or url}")
+        return result
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
         if not hasattr(self, "_executor"):
-            self._executor = ThreadPoolExecutor(max_workers=3)
+            self._executor = ThreadPoolExecutor(max_workers=4)
         return self._executor
+
+    def cancel_job(self, job_id: str) -> bool:
+        """请求取消一个下载 job。
+
+        设置 cancel_requested 标志位；_dispatch_job 在每个 URL 开始前会检查，
+        已在子进程里跑的 URL 仍要等它走完(或撞 240s 超时)——这是 sync_playwright
+        挂死时同进程无法 interrupt 的固有限制，UI 上立即把状态置 cancelled 即可。
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        if job.status in {"done", "error", "cancelled"}:
+            return False
+        with self._state_lock:
+            job.cancel_requested = True
+        # 已经排队但还没开跑的 URL 不会被 submit(因为调度器会先看到标志)；
+        # 把状态先置 cancelled 让前端立刻反馈，跑完的收尾在 _dispatch_job 里覆盖。
+        if job.status != "running":
+            job.status = "cancelled"
+            self._add_job_log(job_id, "info", "Cancelled before start.")
+        else:
+            self._add_job_log(job_id, "warning", "取消请求已记录，正在运行的链接完成后停止后续。")
+        job.updated_at = now_iso()
+        return True
+
+    def delete_job(self, job_id: str) -> bool:
+        """删除一个下载 job 的记录。运行中的先置取消标志再清理。"""
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        # 运行中也允许删除：置 cancel 标志(尽力让后续 URL 跳过)。
+        with self._state_lock:
+            job.cancel_requested = True
+        self._add_job_log(job_id, "info", "Job deleted.")
+        self.jobs.pop(job_id, None)
+        self._pending.pop(job_id, None)
+        return True
 
     def _add_job_log(self, job_id: str, level: str, message: str) -> None:
         job = self.jobs.get(job_id)
@@ -748,7 +840,37 @@ def extract_douyin_urls(text: str) -> list[str]:
         if ("douyin.com" in cleaned or "iesdouyin.com" in cleaned) and cleaned not in seen:
             seen.add(cleaned)
             urls.append(cleaned)
-    return urls
+    return expand_aggregation_urls(urls)
+
+
+# 聚合页(用户主页/喜欢/发现/搜索)用 modal_id 指向某条作品。直接 goto 聚合页 SSR
+# 里没有 videoDetail，downloader 会卡在等不到直链直至 240s 超时——这是下载频繁报
+# "超时已终止"的直接诱因。这里在入队阶段就规约成 /video/<id> 直链，省得每条白等。
+_MODAL_ID_RE = re.compile(r"modal_id=(\d+)")
+
+
+def expand_aggregation_urls(urls: list[str]) -> list[str]:
+    """把带 modal_id 的聚合页 URL 规约成 `/video/<id>` 直链，其余原样保留。
+
+    仅对尚未指向 /video/ /note/ 的聚合页(/user/、/jingxuan 等)做转换，且 modal_id
+    必须是纯数字作品 id。v.douyin.com 短链交给 downloader 自然落地，不动。
+    """
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        converted = False
+        if "/video/" not in url and "/note/" not in url and "v.douyin.com" not in url:
+            m = _MODAL_ID_RE.search(url)
+            if m and ("/user/" in url or "/jingxuan" in url):
+                direct = f"https://www.douyin.com/video/{m.group(1)}"
+                if direct not in seen:
+                    seen.add(direct)
+                    expanded.append(direct)
+                converted = True
+        if not converted and url not in seen:
+            seen.add(url)
+            expanded.append(url)
+    return expanded
 
 
 def infer_douyin_url_type(url: str) -> str:

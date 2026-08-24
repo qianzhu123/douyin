@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AddUserRequest, DownloadPreviewRequest, DownloadRequest, QueryRequest, ReorderUsersRequest, SearchUsersRequest, WatchAdjustRequest, WatchStartRequest
-from .services import DownloadService, MonitorService
+from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, LiveRoomRequest, QueryRequest, ReorderUsersRequest, SearchUsersRequest, WatchAdjustRequest, WatchStartRequest
+from .services import DownloadService, MonitorService, load_app_settings, save_app_settings
 
 
 app = FastAPI(title="Douyin Monitor Dashboard")
@@ -35,6 +35,20 @@ async def on_shutdown() -> None:
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
+
+
+@app.get("/api/settings")
+def settings() -> dict:
+    return {"settings": load_app_settings()}
+
+
+@app.post("/api/settings")
+def update_settings(payload: AppSettingsRequest) -> dict:
+    try:
+        settings = save_app_settings(payload.download_output_dir, payload.wrap_download_folder)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"settings": settings}
 
 
 @app.get("/api/users")
@@ -78,6 +92,17 @@ def delete_user(sec_uid: str) -> dict:
 @app.post("/api/query")
 async def query_profiles(payload: QueryRequest) -> dict:
     return {"results": await monitor_service.query_profiles(payload.targets)}
+
+
+@app.post("/api/live-room")
+async def live_room(payload: LiveRoomRequest) -> dict:
+    """手动再探测一次直播间详情（供前端"刷新直播间"按钮）。"""
+    room = await monitor_service.fetch_live_room(
+        sec_uid=payload.sec_uid.strip(),
+        web_rid=payload.web_rid.strip(),
+        room_id_str=payload.room_id_str.strip(),
+    )
+    return {"live_room": room}
 
 
 @app.get("/api/watch")
@@ -143,10 +168,34 @@ async def stop_watch(job_id: str = "") -> dict:
 @app.post("/api/downloads")
 def create_download(payload: DownloadRequest) -> dict:
     try:
-        job = download_service.create_job(payload.text, payload.mode, payload.output_dir, payload.comments, payload.selected_urls, payload.selected_media)
+        job = download_service.create_job(
+            payload.text,
+            payload.mode,
+            payload.output_dir,
+            payload.comments,
+            payload.selected_urls,
+            payload.selected_media,
+            payload.wrap_folder,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"job": job}
+
+
+@app.post("/api/downloads/{job_id}/cancel")
+def cancel_download(job_id: str) -> dict:
+    ok = download_service.cancel_job(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Download job not found or already finished.")
+    return {"job": download_service.get_job(job_id)}
+
+
+@app.delete("/api/downloads/{job_id}")
+def delete_download(job_id: str) -> dict:
+    ok = download_service.delete_job(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Download job not found.")
+    return {"deleted": job_id, "jobs": download_service.list_jobs()}
 
 
 @app.post("/api/downloads/preview")
