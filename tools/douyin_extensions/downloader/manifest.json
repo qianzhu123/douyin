@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Douyin Downloader Helper",
   "description": "在抖音视频/笔记/主页右上角显示悬浮按钮,点击即可提交到本地下载面板,自动兼容推荐/搜索/喜欢/关注/个人主页/短链等多种页面场景。",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -25,6 +25,9 @@
     "https://v.douyin.com/*",
     "http://127.0.0.1:8000/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [

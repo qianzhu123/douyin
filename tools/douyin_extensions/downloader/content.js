@@ -6,7 +6,7 @@
 //   - 不再依赖用户去 chrome://extensions 点 popup 触发,降低使用门槛。
 //   - 与 popup.html 共用 popup_core.js 的解析逻辑(URL → 可下载/可导入)。
 //
-// 页面场景覆盖(详见 popup_core.js::canDownload):
+// 页面场景覆盖(详见下方 _dyDlhCore 内联片段,对应原 popup_core.js::canDownload):
 //   - /video/<id>  详情页(主页点击进入)
 //   - /note/<id>   图集笔记(搜索点击进入)
 //   - /user/<sec_uid>?modal_id=<id>  个人主页 modal 弹窗(主页推荐、关注 modal)
@@ -16,13 +16,77 @@
 //   - /jingxuan/search/...&modal_id=<id>  搜索结果
 //   - /discover?...&modal_id=<id>    发现页 modal(同 /jingxuan,后端已支持)
 //   - v.douyin.com/...               短链(交给后端 302)
+//
+// 注:MV3 content_script 不支持 import/export,原 popup_core.js 必须内联在此。
+//     popup.html 端不再需要这套函数(已退化为纯说明页),所以无副作用。
+const _dyDlhCore = (() => {
+  function parseSecUid(url) {
+    try {
+      const parsed = new URL(url);
+      const match = parsed.pathname.match(/\/user\/([^/?#]+)/);
+      return match ? decodeURIComponent(match[1]) : '';
+    } catch (error) {
+      return '';
+    }
+  }
 
-import {
-  canDownload,
-  canonicalDetailUrl,
-  isProfilePage,
-  parseSecUid,
-} from './popup_core.js';
+  function extractAwemeIds(url) {
+    if (!url) return [];
+    const ids = [];
+    const seen = new Set();
+    const add = (v) => {
+      const t = String(v || '').trim();
+      if (/^\d{10,}$/.test(t) && !seen.has(t)) {
+        seen.add(t);
+        ids.push(t);
+      }
+    };
+    const pathMatch = url.match(/\/(?:video|note)\/(\d+)/);
+    if (pathMatch) {
+      add(pathMatch[1]);
+      return ids;
+    }
+    try {
+      const parsed = new URL(url);
+      const queryKeys = ['modal_id', 'aweme_id', 'awemeId', 'video_id', 'vid'];
+      for (const key of queryKeys) {
+        const values = parsed.searchParams.getAll(key);
+        for (const v of values) add(v);
+      }
+      for (const seg of parsed.pathname.split('/')) add(seg);
+    } catch (error) {
+      const m = url.match(/modal_id=(\d+)/);
+      if (m) add(m[1]);
+    }
+    return ids;
+  }
+
+  function canonicalDetailUrl(url) {
+    if (!url) return '';
+    if (url.includes('v.douyin.com/')) return url;
+    if (/\/(?:video|note)\/\d+/.test(url)) return url;
+    const ids = extractAwemeIds(url);
+    if (!ids.length) return url;
+    return `https://www.douyin.com/video/${ids[0]}`;
+  }
+
+  function canDownload(url) {
+    if (!url) return false;
+    if (!/douyin\.com/.test(url)) return false;
+    if (/^https:\/\/v\.douyin\.com\//.test(url)) return true;
+    if (/\/(?:video|note)\/\d+/.test(url)) return true;
+    if (/[?&]modal_id=/.test(url)) return true;
+    if (/[?&](?:aweme_id|awemeId|video_id|vid)=/.test(url)) return true;
+    return false;
+  }
+
+  function isProfilePage(url) {
+    return Boolean(parseSecUid(url || ''));
+  }
+
+  return { parseSecUid, canonicalDetailUrl, canDownload, isProfilePage };
+})();
+const { canDownload, canonicalDetailUrl, isProfilePage, parseSecUid } = _dyDlhCore;
 
 const API_BASE = 'http://127.0.0.1:8000';
 const DASHBOARD_URL = 'http://127.0.0.1:5175';
@@ -43,6 +107,7 @@ const ICON_DOWNLOAD_SVG = `
   let busy = false;
 
   function getApiBase() {
+    // 仅用于展示/调试;真正发请求走 background service worker。
     try {
       return window.localStorage.getItem('dy_dlh_api_base') || API_BASE;
     } catch (e) {
@@ -136,30 +201,43 @@ const ICON_DOWNLOAD_SVG = `
     }
   }
 
-  async function apiPost(path, body) {
-    const response = await fetch(`${getApiBase()}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+  // 所有本地后端调用走 background service worker,避开 HTTPS 页面的 mixed-content 限制。
+  function apiCall(method, path, body) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(
+          { type: 'dy_dlh_request', method, path, body },
+          (response) => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              reject(new Error(`扩展后台通信失败:${err.message || err}`));
+              return;
+            }
+            if (!response) {
+              reject(new Error('扩展后台无响应'));
+              return;
+            }
+            if (!response.ok) {
+              const error = new Error(response.error || '本地后端请求失败');
+              error.status = response.status;
+              reject(error);
+              return;
+            }
+            resolve(response.data);
+          },
+        );
+      } catch (error) {
+        reject(new Error(`扩展后台调用异常:${error.message || error}`));
+      }
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data.detail || `本地后端请求失败:${response.status}`);
-      error.status = response.status;
-      throw error;
-    }
-    return data;
+  }
+
+  async function apiPost(path, body) {
+    return apiCall('POST', path, body);
   }
 
   async function apiGet(path) {
-    const response = await fetch(`${getApiBase()}${path}`);
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data.detail || `本地后端请求失败:${response.status}`);
-      error.status = response.status;
-      throw error;
-    }
-    return data;
+    return apiCall('GET', path);
   }
 
   async function getSettings() {
