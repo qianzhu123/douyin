@@ -264,12 +264,41 @@ class MonitorService:
         if not targets:
             return []
 
-        results = await self.module.fetch_profiles_parallel(targets)
+        # chromium 进程级池被抖音侧掐断后会永久毒化（_CONTEXT 指死对象 / new_page 抛
+        # TargetClosedError）。init_browser() 现在加了心跳重建，但**只在下一次调用时**生效。
+        # 这里再做一次同请求内的兜底：第一次 fetch_profiles_parallel 抛 TargetClosedError
+        # → close_browser() 强制清池 → 重试一次。第二轮 init_browser() 走"心跳查死 → 重建"
+        # 路径拉新 chromium。让用户点一次"检测"就能成，多等 5-7s 即可。
+        try:
+            results = await self.module.fetch_profiles_parallel(targets)
+        except Exception as exc:
+            if not _is_pool_death(exc):
+                raise
+            await self._reset_monitor_pool()
+            results = await self.module.fetch_profiles_parallel(targets)
         profiles = [self._to_profile_result(entry, info) for entry, info in zip(targets, results)]
         # 对直播中的 profile 并发补直播间详情（信号量内部限并发；未直播/失败置 None）
         await asyncio.gather(*(self._enrich_live_room(p) for p in profiles))
         upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in profiles])
         return profiles
+
+    async def _reset_monitor_pool(self) -> None:
+        """主动把 monitor 模块的 chromium 池置 None；下一次 init_browser() 会重建。"""
+        close_fn = getattr(self.module, "close_browser", None)
+        if close_fn is None:
+            return
+        try:
+            await close_fn()
+        except Exception:
+            # 死池上 close 也会抛,清掉全局兜底
+            try:
+                self.module._CONTEXT = None
+                self.module._BROWSER = None
+                self.module._PLAYWRIGHT = None
+                if hasattr(self.module, "_page_pool"):
+                    self.module._page_pool.clear()
+            except Exception:
+                pass
 
     async def start_watch(self, target_ids: list[str], interval: int, duration_minutes: int = 30, end_at: str = "", job_id: str = "", label: str = "") -> WatchStatus:
         async with self._watch_lock:
@@ -533,6 +562,24 @@ class MonitorService:
             profile=profile,
         )
 
+
+
+def _is_pool_death(exc: BaseException) -> bool:
+    """判断异常是不是 chromium 池毒化(playwright WS / context 死)。
+
+    触发链路:`context.new_page()` 抛 `playwright._impl._errors.TargetClosedError`;
+    或 playwright 内部 connection 抛 `ConnectionError`/`Error` (playwright driver 失联)。
+    """
+    name = type(exc).__name__
+    if name in {"TargetClosedError", "ConnectionError", "Error"}:
+        return True
+    # playwright 把 "Error" 暴露成顶层类 + 子类,但某些版本内部抛 ConnectionResetError 等
+    msg = str(exc) or ""
+    if any(s in msg for s in ("Target page, context or browser has been closed",
+                              "Connection closed", "Browser has been closed",
+                              "Connection reset", "Broken pipe")):
+        return True
+    return False
 
 
 def normalize_download_dir(value: str | Path | None = None) -> str:

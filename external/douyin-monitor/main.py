@@ -173,10 +173,33 @@ _page_pool: dict[str, Page] = {}
 
 
 async def init_browser():
-    """初始化浏览器（只启动一次，context 复用）"""
+    """初始化浏览器（只启动一次，context 复用）。
+
+    进程级池偶尔会因抖音侧通道掐断/页面崩溃导致 _CONTEXT 被关闭、底层
+    chromium 进程死亡，而 _BROWSER/_CONTEXT 仍指向旧对象。下一次调用
+    `context.new_page()` 会抛 `TargetClosedError` 并把池永久毒化。
+    这里每次都检查底层连接是否还活着，死了就 `close_browser()` 后重建。
+    """
     global _PLAYWRIGHT, _BROWSER, _CONTEXT
+
+    if _CONTEXT is not None:
+        try:
+            # browser.connected / context.closed 不存在稳定属性，靠发起一次
+            # `pages` 元数据调用作为心跳；底层 WS 已断时这一行会抛 ConnectionError。
+            await asyncio.wait_for(_CONTEXT.pages, timeout=2.0)
+        except Exception:
+            # 池死了 — 静默清空,落到下面的重建分支
+            try:
+                await close_browser()
+            except Exception:
+                _BROWSER = None
+                _CONTEXT = None
+                _PLAYWRIGHT = None
+                _page_pool.clear()
+
     if _CONTEXT is not None:
         return _CONTEXT
+
     _PLAYWRIGHT = await async_playwright().start()
     _BROWSER = await _PLAYWRIGHT.chromium.launch(
         headless=True,

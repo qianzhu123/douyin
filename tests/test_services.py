@@ -431,3 +431,97 @@ def test_profile_result_preserves_simplified_live_viewers():
     assert result.ok is True
     assert result.profile["live_viewers"] == 4567
     assert result.profile["live_start_at"]
+
+
+def test_query_profiles_recovers_from_target_closed_error(monkeypatch):
+    """第一次 fetch_profiles_parallel 抛 TargetClosedError,query_profiles 应自动重试一次并成功。
+
+    模拟用户场景：进程内 chromium 池被抖音侧掐断后,_CONTEXT 指死对象。
+    query_profiles 要做到"一次点击就恢复",靠同请求内的 close_browser + 重试。
+    """
+    import asyncio
+
+    from backend.services import MonitorService
+
+    service = MonitorService.__new__(MonitorService)
+
+    class FakeMonitor:
+        # 标志:close_browser 是否被调过;fetch 计数
+        close_called = 0
+        fetch_calls = 0
+
+        @staticmethod
+        async def close_browser():
+            FakeMonitor.close_called += 1
+
+        @staticmethod
+        async def fetch_profiles_parallel(targets):
+            FakeMonitor.fetch_calls += 1
+            if FakeMonitor.fetch_calls == 1:
+                raise TargetClosedError("BrowserContext.new_page: Target page, context or browser has been closed")
+            # 第二次正常返回 — 带 live_viewers 走 profile_from_monitor_info 的 early-return 分支,避免依赖 simplify
+            return [{"sec_uid": t["sec_uid"], "nickname": "ok", "live_viewers": 0} for t in targets]
+
+        @staticmethod
+        def simplify(info):
+            return info
+
+    service.module = FakeMonitor()
+    sec_uid = "MS4wLjABAAAAFakeUID"
+    # resolve_targets 需要 list_users,我们 stub 掉
+    service._watch_jobs = {}
+    monkeypatch.setattr(service, "resolve_targets", lambda ids: [{"sec_uid": sec_uid, "label": "fake", "url": "https://www.douyin.com/user/" + sec_uid}])
+    # 避免触发真实缓存写入
+    monkeypatch.setattr("backend.services.upsert_profile_cache", lambda *a, **k: None)
+    # _enrich_live_room 用信号量,这里给 profile 一个非直播状态让它跳过
+    async def _no_live_enrich(p):
+        return None
+    monkeypatch.setattr(service, "_enrich_live_room", _no_live_enrich)
+
+    profiles = asyncio.run(service.query_profiles([sec_uid]))
+
+    assert len(profiles) == 1
+    assert profiles[0].ok is True
+    assert profiles[0].sec_uid == sec_uid
+    assert FakeMonitor.close_called == 1
+    assert FakeMonitor.fetch_calls == 2  # 第一次抛、第二次成功
+
+
+def test_query_profiles_does_not_retry_on_unrelated_error(monkeypatch):
+    """非池毒化异常(比如 ValueError)不应触发重试 — 保持原错误抛出。"""
+    import asyncio
+
+    from backend.services import MonitorService
+
+    service = MonitorService.__new__(MonitorService)
+
+    class FakeMonitor:
+        close_called = 0
+        fetch_calls = 0
+
+        @staticmethod
+        async def close_browser():
+            FakeMonitor.close_called += 1
+
+        @staticmethod
+        async def fetch_profiles_parallel(targets):
+            FakeMonitor.fetch_calls += 1
+            raise ValueError("not a pool issue")
+
+    service.module = FakeMonitor()
+    monkeypatch.setattr(service, "resolve_targets", lambda ids: [{"sec_uid": "x", "label": "x", "url": "x"}])
+    monkeypatch.setattr("backend.services.upsert_profile_cache", lambda *a, **k: None)
+    async def _no_live_enrich(p):
+        return None
+    monkeypatch.setattr(service, "_enrich_live_room", _no_live_enrich)
+
+    import pytest
+    with pytest.raises(ValueError):
+        asyncio.run(service.query_profiles(["x"]))
+
+    assert FakeMonitor.close_called == 0  # 没触发 close_browser
+    assert FakeMonitor.fetch_calls == 1   # 没重试
+
+
+class TargetClosedError(Exception):
+    """轻量替身,不引入 playwright 真实类(避免测试依赖)。"""
