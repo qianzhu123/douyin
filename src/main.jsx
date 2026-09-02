@@ -1421,7 +1421,7 @@ function PollModal({ targetCount, initialInterval, initialDurationMinutes, onClo
             <h2>轮询检测</h2>
             <p>将检测 {targetCount} 个账户。</p>
           </div>
-          <Clock size={20} />
+          <Activity size={20} />
         </div>
         <label className="field">
           间隔秒数
