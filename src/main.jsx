@@ -53,6 +53,20 @@ function App() {
   const [pollOpen, setPollOpen] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState(null);
   const [pollTargets, setPollTargets] = React.useState([]);
+  const [pollDefaults, setPollDefaults] = React.useState(() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem('douyinPollDefaults') || 'null');
+      if (stored && Number.isFinite(stored.interval) && Number.isFinite(stored.durationMinutes)) {
+        return {
+          interval: Math.max(5, Math.min(3600, stored.interval)),
+          durationMinutes: Math.max(1, Math.min(1440, stored.durationMinutes)),
+        };
+      }
+    } catch (error) {
+      // fall through to defaults
+    }
+    return { interval: 30, durationMinutes: 100 };
+  });
   const [downloadText, setDownloadText] = React.useState('');
   const [downloadMode, setDownloadMode] = React.useState(1);
   const [downloadOutputDir, setDownloadOutputDir] = React.useState('');
@@ -131,6 +145,10 @@ function App() {
   React.useEffect(() => {
     window.localStorage.setItem('douyinActivityLogs', JSON.stringify(activityLogs.slice(0, 80)));
   }, [activityLogs]);
+
+  React.useEffect(() => {
+    window.localStorage.setItem('douyinPollDefaults', JSON.stringify(pollDefaults));
+  }, [pollDefaults]);
 
   React.useEffect(() => {
     window.localStorage.setItem('douyinHiddenUids', JSON.stringify(Array.from(hiddenUids)));
@@ -381,6 +399,11 @@ function App() {
         interval,
         duration_minutes: durationMinutes,
         label,
+      });
+      // remember the last-used values so the next modal opens with them
+      setPollDefaults({
+        interval: Math.max(5, Math.min(3600, Number(interval) || 30)),
+        durationMinutes: Math.max(1, Math.min(1440, Number(durationMinutes) || 100)),
       });
       await loadWatch();
       setPollOpen(false);
@@ -906,8 +929,8 @@ function App() {
       {pollOpen && (
         <PollModal
           targetCount={pollTargets.length}
-          initialInterval={watch.interval || 30}
-          initialDurationMinutes={watch.duration_minutes || 30}
+          initialInterval={pollDefaults.interval}
+          initialDurationMinutes={pollDefaults.durationMinutes}
           onClose={() => setPollOpen(false)}
           onStart={startPolling}
         />
