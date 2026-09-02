@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Clock, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Plus, RefreshCcw, Search, Square, Trash2 } from 'lucide-react';
+import { Activity, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Plus, RefreshCcw, Search, Trash2 } from 'lucide-react';
 import { formatDuration } from './duration.js';
 import { buildDownloadInputText, mergeDownloadPreviews, removeDownloadPreviewItem } from './downloadPreviewState.js';
 import './styles.css';
@@ -685,16 +685,6 @@ function App() {
           <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
             <Activity size={16} /> 轮询选中
           </button>
-          {watchJobs.length > 0 && (
-            <button className="secondary" onClick={() => setPollOpen(true)} disabled={busy}>
-              <Clock size={16} /> 调整轮询
-            </button>
-          )}
-          {watchJobs.length > 0 && (
-            <button className="secondary" onClick={stopPolling} disabled={busy}>
-              <Square size={16} /> 停止当前
-            </button>
-          )}
           <button className="icon-button" onClick={() => { loadAccounts(); loadWatch(); loadDownloads(); }} title="刷新">
             <RefreshCcw size={18} />
           </button>
@@ -714,11 +704,6 @@ function App() {
               {hiddenUids.size > 0 && (
                 <button className="secondary" onClick={() => setHiddenUids(new Set())}>
                   <Eye size={16} /> 恢复信息 {hiddenUids.size}
-                </button>
-              )}
-              {watch.running && (
-                <button className="secondary" onClick={stopPolling} disabled={busy}>
-                  <Square size={16} /> 停止当前
                 </button>
               )}
             </div>
