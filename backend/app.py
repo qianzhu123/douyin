@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, LiveRoomRequest, QueryRequest, ReorderUsersRequest, SearchUsersRequest, WatchAdjustRequest, WatchStartRequest
+from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, FansclubRequest, LiveRoomRequest, PaygradeRequest, QueryRequest, ReorderUsersRequest, SearchUsersRequest, WatchAdjustRequest, WatchStartRequest
 from .services import DownloadService, MonitorService, load_app_settings, save_app_settings
 
 
@@ -103,6 +103,19 @@ async def live_room(payload: LiveRoomRequest) -> dict:
         room_id_str=payload.room_id_str.strip(),
     )
     return {"live_room": room}
+
+
+@app.post("/api/fansclub")
+async def fansclub(payload: FansclubRequest) -> dict:
+    """手动探测 anchor 粉丝团元数据（团等级/成员数），需要 cache 里有 web_rid。"""
+    return {"fansclub": await monitor_service.fetch_fansclub(payload.sec_uid.strip())}
+
+
+@app.post("/api/anchor-paygrade")
+async def anchor_paygrade(payload: PaygradeRequest) -> dict:
+    """手动探测 anchor 本人 paygrade（hover popup 解析），需要 cache 里有 web_rid。"""
+    level = await monitor_service.fetch_anchor_paygrade(payload.sec_uid.strip())
+    return {"paygrade_level": level}
 
 
 @app.get("/api/watch")

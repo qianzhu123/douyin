@@ -38,6 +38,14 @@ class LiveRoomRequest(BaseModel):
     room_id_str: str = ""
 
 
+class FansclubRequest(BaseModel):
+    sec_uid: str
+
+
+class PaygradeRequest(BaseModel):
+    sec_uid: str
+
+
 class SearchCandidate(BaseModel):
     nickname: str = ""
     unique_id: str = ""

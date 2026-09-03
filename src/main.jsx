@@ -249,7 +249,7 @@ function App() {
     if (pendingTargets.length === 0) return;
 
     setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在检测 ${pendingTargets.length} 个账户的信息和直播状态...`);
+    setMessage(`正在检测 ${pendingTargets.length} 个账户的基本信息...`);
     try {
       const data = await postJson('/api/query', { targets: pendingTargets });
       await loadAccounts();
@@ -257,7 +257,7 @@ function App() {
       const failures = results.filter((result) => !result.ok);
       results.forEach((result) => {
         const label = result.label || result.sec_uid;
-        appendLog(result.ok ? 'info' : 'error', result.ok ? `${label} 检测完成` : `${label} 检测失败：${result.error || '可能触发风控或接口暂无数据'}`, '检测');
+        appendLog(result.ok ? 'info' : 'error', result.ok ? `${label} 基本信息已刷新` : `${label} 基本信息检测失败：${result.error || '可能触发风控或接口暂无数据'}`, '检测');
       });
       setMessage(failures.length ? `已检测 ${results.length} 个账户，${failures.length} 个失败` : `已检测 ${results.length} 个账户`);
     } catch (error) {
@@ -270,6 +270,62 @@ function App() {
         return next;
       });
     }
+  }
+
+  async function detectLiveRoom(targets = []) {
+    const pendingTargets = targets.filter((uid) => !detectingUids.has(uid));
+    if (pendingTargets.length === 0) return;
+    setDetectingUids((current) => new Set([...current, ...pendingTargets]));
+    setMessage(`正在检测 ${pendingTargets.length} 个账户的直播间详情...`);
+    const results = [];
+    for (const uid of pendingTargets) {
+      try {
+        const data = await postJson('/api/live-room', { sec_uid: uid, web_rid: '', room_id_str: '' });
+        results.push({ sec_uid: uid, ok: !!data.live_room });
+        appendLog(data.live_room ? 'info' : 'error',
+          data.live_room ? `${uid.slice(0, 16)}... 直播间详情已刷新（含 paygrade ${data.live_room.anchor?.paygrade_level ?? '-'}）` : `${uid.slice(0, 16)}... 直播间详情失败（需先有 web_rid）`,
+          '直播间');
+      } catch (error) {
+        results.push({ sec_uid: uid, ok: false });
+        appendLog('error', `${uid.slice(0, 16)}... 直播间检测失败：${error.message}`, '直播间');
+      }
+    }
+    await loadAccounts();
+    const failures = results.filter((r) => !r.ok).length;
+    setMessage(failures ? `${results.length - failures} 个直播间详情已刷新，${failures} 个失败` : `${results.length} 个直播间详情已刷新`);
+    setDetectingUids((current) => {
+      const next = new Set(current);
+      pendingTargets.forEach((uid) => next.delete(uid));
+      return next;
+    });
+  }
+
+  async function detectFansclub(targets = []) {
+    const pendingTargets = targets.filter((uid) => !detectingUids.has(uid));
+    if (pendingTargets.length === 0) return;
+    setDetectingUids((current) => new Set([...current, ...pendingTargets]));
+    setMessage(`正在检测 ${pendingTargets.length} 个账户的粉丝团数据...`);
+    const results = [];
+    for (const uid of pendingTargets) {
+      try {
+        const data = await postJson('/api/fansclub', { sec_uid: uid });
+        results.push({ sec_uid: uid, ok: !!data.fansclub });
+        appendLog(data.fansclub ? 'info' : 'error',
+          data.fansclub ? `${uid.slice(0, 16)}... 粉丝团已刷新（团 ${data.fansclub.total_fans_count} 人）` : `${uid.slice(0, 16)}... 粉丝团失败（需先有 web_rid + 登录态）`,
+          '粉丝团');
+      } catch (error) {
+        results.push({ sec_uid: uid, ok: false });
+        appendLog('error', `${uid.slice(0, 16)}... 粉丝团失败：${error.message}`, '粉丝团');
+      }
+    }
+    await loadAccounts();
+    const failures = results.filter((r) => !r.ok).length;
+    setMessage(failures ? `${results.length - failures} 个粉丝团已刷新，${failures} 个失败` : `${results.length} 个粉丝团已刷新`);
+    setDetectingUids((current) => {
+      const next = new Set(current);
+      pendingTargets.forEach((uid) => next.delete(uid));
+      return next;
+    });
   }
 
   function openPollModal(targets) {
@@ -702,8 +758,25 @@ function App() {
           <button
             onClick={() => detectTargets(checkedTargets)}
             disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
+            title="刷新选中账户的基本信息"
           >
-            <RefreshCcw size={16} /> 检测选中
+            <RefreshCcw size={16} /> 刷基本
+          </button>
+          <button
+            className="secondary"
+            onClick={() => detectLiveRoom(checkedTargets)}
+            disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
+            title="刷新选中账户的直播间详情（含 anchor 等级）"
+          >
+            刷直播
+          </button>
+          <button
+            className="secondary"
+            onClick={() => detectFansclub(checkedTargets)}
+            disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
+            title="刷新选中账户的粉丝团数据"
+          >
+            刷团
           </button>
           <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
             <Activity size={16} /> 轮询选中
@@ -783,6 +856,8 @@ function App() {
                   setContextInfo({ row, x: event.clientX, y: event.clientY });
                 }}
                 onDetect={() => detectTargets([row.sec_uid])}
+                onDetectLiveRoom={() => detectLiveRoom([row.sec_uid])}
+                onDetectFansclub={() => detectFansclub([row.sec_uid])}
                 onPoll={() => openPollModal([row.sec_uid])}
                 onDelete={() => setDeleteTarget(row)}
               />
@@ -965,7 +1040,7 @@ function App() {
   );
 }
 
-function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onPoll, onDelete }) {
+function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onDetectLiveRoom, onDetectFansclub, onPoll, onDelete }) {
   const profile = row.profile || {};
   const live = profile.live_status === 1;
   const failed = row.last_ok === false;
@@ -1004,7 +1079,9 @@ function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging,
       <span>{hidden ? masked : live ? formatNumber(profile.live_viewers) : '-'}</span>
       <span>{hidden ? masked : formatTime(row.last_checked_at)}</span>
       <span className="row-actions" onClick={(event) => event.stopPropagation()}>
-        <button onClick={onDetect} disabled={detecting}>{detecting ? '检测中' : '检测'}</button>
+        <button onClick={onDetect} disabled={detecting} title="刷新基本信息（昵称/粉丝/直播状态）">基本</button>
+        <button className="secondary" onClick={onDetectLiveRoom} disabled={detecting} title="刷新直播间详情（enter/ranklist/anchor等级）">直播</button>
+        <button className="secondary" onClick={onDetectFansclub} disabled={detecting} title="刷新粉丝团数据（团等级/成员数）">团</button>
         <button className="secondary" onClick={onPoll} disabled={busy}>轮询</button>
         <button className="secondary icon-button small-icon" onClick={onHide} title={hidden ? '恢复信息' : '隐藏信息'}>
           {hidden ? <Eye size={15} /> : <EyeOff size={15} />}
@@ -1024,6 +1101,8 @@ function DetailPanel({ row, hidden }) {
   const profile = row.profile || {};
   const masked = '******';
   const display = (value) => (hidden ? masked : value);
+  const anchorPaygrade = profile.live_room?.anchor?.paygrade_level;
+  const fansclub = profile.live_room?.fansclub || null;
   return (
     <section className="panel detail-panel">
       <div className="panel-head">
@@ -1041,10 +1120,29 @@ function DetailPanel({ row, hidden }) {
         <Info label="直播间人数" value={display(formatNumber(profile.live_viewers))} />
         <Info label="开播时间" value={display(formatTime(profile.live_start_at))} />
         <Info label="持续时间" value={display(formatDuration(profile.live_duration_seconds))} />
+        <Info label="主播等级" value={display(anchorPaygrade ? `Lv ${anchorPaygrade}` : (profile.web_rid ? '未探测' : '需 web_rid'))} />
         <Info label="上次检测" value={display(formatTime(row.last_checked_at))} />
       </div>
+      {fansclub && Object.keys(fansclub).length > 0 && !hidden && (
+        <div className="fansclub-summary">
+          <h4>粉丝团</h4>
+          <div className="detail-grid">
+            <Info label="团名" value={fansclub.club_name || '-'} />
+            <Info label="团等级" value={fansclub.max_level ? `满 ${fansclub.max_level} 级` : (fansclub.club_level ? `Lv ${fansclub.club_level}` : '-')} />
+            <Info label="活跃粉丝" value={formatNumber(fansclub.active_fans_count)} />
+            <Info label="总粉丝" value={formatNumber(fansclub.total_fans_count)} />
+          </div>
+        </div>
+      )}
       {profile.live_room && profile.live_status === 1 && !hidden && (
         <LiveRoomCard data={profile.live_room} />
+      )}
+      {profile.live_room && profile.live_status !== 1 && !hidden && profile.web_rid && (
+        <div className="live-room-card offline">
+          <div className="live-room-card-head">
+            <span>已下播（web_rid 已知，可继续探测等级/直播间）</span>
+          </div>
+        </div>
       )}
     </section>
   );
@@ -1103,7 +1201,7 @@ function LiveRoomCard({ data }) {
                   <td>{u.rank}</td>
                   <td>{u.nickname || '-'}</td>
                   <td>{u.pay_grade_level ?? '-'}</td>
-                  <td>{u.fans_club_level ?? '-'}</td>
+                  <td>{u.fans_club_level ?? '-'}{u.guard_status > 0 ? ` (守${u.guard_status})` : ''}</td>
                 </tr>
               ))}
             </tbody>
@@ -1111,7 +1209,7 @@ function LiveRoomCard({ data }) {
         </div>
       )}
       <div className="live-room-foot">
-        <span className="live-room-anchor">主播：{anchor.nickname || '-'}</span>
+        <span className="live-room-anchor">主播：{anchor.nickname || '-'}{anchor.paygrade_level ? ` · Lv ${anchor.paygrade_level}` : ''}</span>
         {data.qrcode_url && <img className="live-room-qr" src={data.qrcode_url} alt="直播间二维码" />}
       </div>
       <p className="live-room-stream">流地址：{stream.hls_pull_url || stream.flv_pull_url || '未开放'}</p>

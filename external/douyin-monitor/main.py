@@ -372,12 +372,21 @@ def simplify(user: dict) -> dict:
         room_id = int(room_id) if room_id.isdigit() else 0
 
     live_viewers = None
+    web_rid = ""
     if room_data_str and isinstance(room_data_str, str) and room_data_str.startswith("{"):
         try:
             rd = json.loads(room_data_str)
             live_viewers = rd.get("user_count")
             if rd.get("status") in (2, 4):
                 live_status = 1
+            # 从 room_data 抽 web_rid (anchor 直播时 profile/other 才会带此字段)；
+            # 一旦落库就永久跟随 profile，anchor 不直播也能用 web_rid 进直播间拿 paygrade。
+            web_rid = (
+                rd.get("web_rid")
+                or rd.get("webRid")
+                or rd.get("web_rid_str")
+                or ""
+            )
         except Exception:
             pass
 
@@ -397,6 +406,7 @@ def simplify(user: dict) -> dict:
         "aweme_count": aweme_count,
         "live_status": live_status,
         "room_id": room_id,
+        "web_rid": web_rid,
         "live_viewers": live_viewers,
         "signature": user.get("signature", ""),
         "ip_location": user.get("ip_location", ""),

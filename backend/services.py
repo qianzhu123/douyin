@@ -441,22 +441,22 @@ class MonitorService:
         await self.live_room.close()
 
     async def _enrich_live_room(self, profile: ProfileResult) -> None:
-        """对 live_status==1 的 profile 补直播间详情；未直播/失败置 live_room=None。
+        """对有 web_rid 的 profile 补直播间详情（含 paygrade + fansclub）。
 
-        信号量≤3 限并发浏览器数；失败一律降级 return（不改写已 None）。
+        触发条件：profile.web_rid 已知（monitor 抓到过直播后写库）。
+        不再受 live_status==1 限制——web_rid 永久稳定，anchor 离线时也能开
+        live.douyin.com/<web_rid> 看回放 + hover 拿 paygrade。
+        信号量≤3 限并发浏览器数；失败一律降级（不改写已 None 的 live_room）。
         """
         if not profile.ok or not isinstance(profile.profile, dict):
             return
         info = profile.profile
-        if info.get("live_status") != 1:
-            info["live_room"] = None
-            return
-        room_id_str = str(info.get("room_id") or "")
         web_rid = str(info.get("web_rid") or "")
-        if not room_id_str and not web_rid:
-            # 主页接口未带房间号则跳过（靠 sec_uid 兜底回主页也拿不到正在直播的房间）
+        room_id_str = str(info.get("room_id") or "")
+        if not web_rid and not room_id_str:
             info["live_room"] = None
             return
+        # 不抹掉已有 live_room.web_rid (有的话) —— 避免被 None 覆盖后丢失。
         async with self._live_room_sem:
             try:
                 room = await self.live_room.fetch_overview(
@@ -466,23 +466,24 @@ class MonitorService:
                 )
             except Exception:
                 room = None
-        info["live_room"] = room
+        if room is not None:
+            info["live_room"] = room
+        elif "live_room" not in info:
+            info["live_room"] = None
 
     async def fetch_live_room(self, *, sec_uid: str = "", web_rid: str = "",
                               room_id_str: str = "") -> dict[str, Any] | None:
         """手动再探测一次直播间（供 /api/live-room 端点）。
 
         优先用入参 web_rid / room_id_str；否则按 sec_uid 从 profile_cache.json
-        取 cached profile.room_id。未直播/无房间号/探测失败 → None。
+        取 cached profile.web_rid（web_rid 已知即可触发，不依赖 live_status）。
         """
         if not web_rid and not room_id_str:
             if sec_uid:
                 cached = read_profile_cache(PROFILE_CACHE_FILE).get(sec_uid, {}).get("profile")
                 if isinstance(cached, dict):
-                    if cached.get("live_status") != 1:
-                        return None
-                    room_id_str = str(cached.get("room_id") or "")
                     web_rid = str(cached.get("web_rid") or "")
+                    room_id_str = str(cached.get("room_id") or "")
             if not web_rid and not room_id_str and not sec_uid:
                 return None
         async with self._live_room_sem:
@@ -490,6 +491,47 @@ class MonitorService:
                 return await self.live_room.fetch_overview(
                     web_rid=web_rid, room_id_str=room_id_str, sec_uid=sec_uid
                 )
+            except Exception:
+                return None
+
+    async def fetch_fansclub(self, sec_uid: str) -> dict[str, Any] | None:
+        """手动探测 anchor 粉丝团元数据（供前端"刷粉丝团"按钮）。
+
+        需要 cache 中已存 web_rid；未登录态返 20003 → 静默 None。
+        """
+        if not sec_uid:
+            return None
+        cached = read_profile_cache(PROFILE_CACHE_FILE).get(sec_uid, {}).get("profile")
+        web_rid = ""
+        anchor_id = ""
+        if isinstance(cached, dict):
+            web_rid = str(cached.get("web_rid") or "")
+            room = cached.get("live_room") or {}
+            anchor_id = str((room.get("anchor") or {}).get("uid") or "")
+        if not web_rid:
+            return None
+        async with self._live_room_sem:
+            try:
+                return await self.live_room.fetch_fansclub(
+                    anchor_id=anchor_id, web_rid=web_rid,
+                )
+            except Exception:
+                return None
+
+    async def fetch_anchor_paygrade(self, sec_uid: str) -> int | None:
+        """手动探测 anchor 本人 paygrade（hover popup），供前端"刷等级"按钮。
+
+        需要 cache 中已存 web_rid；失败 → None。
+        """
+        if not sec_uid:
+            return None
+        cached = read_profile_cache(PROFILE_CACHE_FILE).get(sec_uid, {}).get("profile")
+        web_rid = str((cached or {}).get("web_rid") or "") if isinstance(cached, dict) else ""
+        if not web_rid:
+            return None
+        async with self._live_room_sem:
+            try:
+                return await self.live_room.fetch_anchor_paygrade(web_rid=web_rid)
             except Exception:
                 return None
 

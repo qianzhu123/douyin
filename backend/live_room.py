@@ -59,6 +59,136 @@ class LiveRoomService:
         """兼容 MonitorService.shutdown 调用；本服务无持久态，no-op。"""
         return
 
+    async def fetch_fansclub(self, *, anchor_id: str = "",
+                             web_rid: str = "") -> dict[str, Any] | None:
+        """仅探测 anchor 粉丝团主页（团等级/成员数），不触发 enter/ranklist。
+
+        web_rid 必须已知；用 web_rid 加载直播间页面触发 fansclub/homepage。
+        必须登录态（webcast 域 Vip 端强约束），未登录返 20003 → 静默 None。
+        """
+        if async_playwright is None:
+            return None
+        if not web_rid:
+            return None
+
+        captured: dict[str, Any] = {}
+
+        async def on_response(response) -> None:
+            if "fansclub/homepage" in response.url and "fansclub" not in captured:
+                try:
+                    captured["fansclub"] = await response.json()
+                except Exception:
+                    pass
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=self.headless,
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                )
+                context = await browser.new_context(
+                    user_agent=UA, viewport={"width": 1600, "height": 1000}
+                )
+                page = await context.new_page()
+                page.on("response", lambda r: asyncio.create_task(on_response(r)))
+
+                live_url = f"https://live.douyin.com/{web_rid}"
+                try:
+                    await page.goto(live_url, wait_until="domcontentloaded",
+                                    timeout=self.timeout_ms)
+                except Exception:
+                    await context.close()
+                    await browser.close()
+                    return None
+
+                # 触发 fansclub/homepage —— 通常页面加载后一次 fetch 即可拦到。
+                if anchor_id:
+                    try:
+                        await page.evaluate(
+                            """async ({url}) => {
+                                try { await fetch(url, {credentials: 'include'}); } catch (e) {}
+                            }""",
+                            {
+                                "url": (
+                                    "https://live.douyin.com/webcast/fansclub/homepage/?aid=6383"
+                                    "&channel=channel_pc_web&device_platform=webapp"
+                                    f"&anchor_id={anchor_id}&request_scene=1&action=1&source=1"
+                                )
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                for _ in range(10):
+                    if "fansclub" in captured:
+                        break
+                    await asyncio.sleep(0.3)
+
+                await context.close()
+                await browser.close()
+        except Exception:
+            return None
+
+        if "fansclub" not in captured:
+            return None
+        data = captured["fansclub"].get("data") or {}
+        return _summarize_fansclub(data) if data else None
+
+    async def fetch_anchor_paygrade(self, *, web_rid: str = "") -> int | None:
+        """仅探测 anchor 本人 paygrade（hover popup 解析）。
+
+        不依赖 anchor 是否在直播（回放页 status=4 也能拿），但需要 web_rid 已知。
+        失败返回 None。
+        """
+        if async_playwright is None or not web_rid:
+            return None
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=self.headless,
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                )
+                context = await browser.new_context(
+                    user_agent=UA, viewport={"width": 1600, "height": 1000}
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(f"https://live.douyin.com/{web_rid}",
+                                    wait_until="domcontentloaded",
+                                    timeout=self.timeout_ms)
+                except Exception:
+                    await context.close()
+                    await browser.close()
+                    return None
+                await asyncio.sleep(15)  # 等 anchor bar 渲染（status=4 回放页较慢）
+                bar = page.locator('[data-e2e="rooom-info-bar-anchor"]')
+                if await bar.count() == 0:
+                    await context.close()
+                    await browser.close()
+                    return None
+                await bar.hover()
+                await asyncio.sleep(2.5)
+                level = await page.evaluate("""
+                    () => {
+                        const popup = document.querySelector('.semi-popover-content');
+                        const userName = popup?.querySelector('.user_name, [class*="user_name"]');
+                        if (!userName) return null;
+                        const imgs = userName.querySelectorAll('img');
+                        for (const img of imgs) {
+                            const m = (img.src || '').match(/new_user_grade_level_v1_(\\d+)/);
+                            if (m) return parseInt(m[1]);
+                        }
+                        return null;
+                    }
+                """)
+                await context.close()
+                await browser.close()
+                if isinstance(level, int) and 0 < level <= 75:
+                    return level
+        except Exception:
+            return None
+        return None
+
     async def fetch_overview(self, *, web_rid: str = "",
                              room_id_str: str = "",
                              sec_uid: str = "") -> dict[str, Any] | None:
@@ -151,15 +281,74 @@ class LiveRoomService:
                     await browser.close()
                     return None
                 await asyncio.sleep(1.5)  # 榜单/心愿单加载余量
+
+                # 第三阶段：anchor 头像 hover 弹 popup，解析 paygrade.level (1-75)。
+                # 这是拿 anchor **本人** 荣耀等级的最简便方式 (viewer 即可)，无需登录态。
+                # 仅当 status==2 (直播中) 时 popup 才稳定 — status==4 (回放页) 实测也能拿。
+                anchor_paygrade: int | None = None
+                try:
+                    bar = page.locator('[data-e2e="rooom-info-bar-anchor"]')
+                    if await bar.count() > 0:
+                        await bar.hover()
+                        await asyncio.sleep(2.5)
+                        pg_result = await page.evaluate("""
+                            () => {
+                                const popup = document.querySelector('.semi-popover-content');
+                                const userName = popup?.querySelector('.user_name, [class*="user_name"]');
+                                if (!userName) return null;
+                                const imgs = userName.querySelectorAll('img');
+                                for (const img of imgs) {
+                                    const m = (img.src || '').match(/new_user_grade_level_v1_(\\d+)/);
+                                    if (m) return parseInt(m[1]);
+                                }
+                                return null;
+                            }
+                        """)
+                        if isinstance(pg_result, int) and 0 < pg_result <= 75:
+                            anchor_paygrade = pg_result
+                except Exception:
+                    anchor_paygrade = None
+
+                # 第四阶段：拦 fansclub/homepage 拿 anchor 粉丝团元数据（团等级/成员数）。
+                # 必须登录态（webcast 域 Vip 端强约束），未登录返 20003 → 静默 None。
+                try:
+                    enter_root = captured.get("enter") or {}
+                    enter_data_inner = enter_root.get("data") or {}
+                    anchor_uid = (enter_data_inner.get("user") or {}).get("id_str") or ""
+                    room_id_guess = (
+                        (enter_data_inner.get("room") or {}).get("id_str")
+                        or enter_data_inner.get("enter_room_id")
+                        or ""
+                    )
+                    if anchor_uid:
+                        await page.evaluate(
+                            """async ({url}) => {
+                                try {
+                                    await fetch(url, {credentials: 'include'});
+                                } catch (e) {}
+                            }""",
+                            {
+                                "url": (
+                                    "https://live.douyin.com/webcast/fansclub/homepage/?aid=6383"
+                                    "&channel=channel_pc_web&device_platform=webapp"
+                                    f"&anchor_id={anchor_uid}&request_scene=1&action=1&source=1"
+                                )
+                            },
+                        )
+                        await asyncio.sleep(2.0)
+                except Exception:
+                    pass
+
                 await context.close()
                 await browser.close()
         except Exception:
             return None
 
-        return _summarize(captured, web_rid=resolved_web_rid)
+        return _summarize(captured, web_rid=resolved_web_rid, anchor_paygrade=anchor_paygrade)
 
 
-def _summarize(captured: dict[str, Any], *, web_rid: str = "") -> dict[str, Any] | None:
+def _summarize(captured: dict[str, Any], *, web_rid: str = "",
+               anchor_paygrade: int | None = None) -> dict[str, Any] | None:
     """把拦到的 enter/ranklist 归一为直播间卡片 dict；失败返回 None。
 
     与 tests/live_room_analysis/extract_live_room.py._summarize 同源逻辑，
@@ -179,6 +368,10 @@ def _summarize(captured: dict[str, Any], *, web_rid: str = "") -> dict[str, Any]
     rank = captured.get("ranklist") or {}
     rank_data = rank.get("data") or {}
     ranks = rank_data.get("ranks") or []
+
+    # fansclub/homepage 拦到的 anchor 粉丝团元数据
+    fansclub_payload = captured.get("profile") or {}
+    fansclub_data = (fansclub_payload.get("data") or {}) if isinstance(fansclub_payload, dict) else {}
 
     card: dict[str, Any] = {
         "web_rid": web_rid or _guess_web_rid(room, enter_data),
@@ -203,7 +396,9 @@ def _summarize(captured: dict[str, Any], *, web_rid: str = "") -> dict[str, Any]
             "sec_uid": user.get("sec_uid") or owner.get("sec_uid") or "",
             "nickname": user.get("nickname") or owner.get("nickname") or "",
             "avatar": ((owner.get("avatar_thumb") or {}).get("url_list") or [None])[0] or "",
+            "paygrade_level": anchor_paygrade,
         },
+        "fansclub": _summarize_fansclub(fansclub_data),
         "stream_url": {
             "hls_pull_url": stream.get("hls_pull_url") or "",
             "flv_pull_url": stream.get("flv_pull_url") or "",
@@ -282,6 +477,8 @@ def _audience_rank(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         u = r.get("user") or {}
         fc = u.get("fans_club") or {}
         fcd = fc.get("data") or {}
+        badge = fcd.get("badge") or {}
+        icons = badge.get("icons") or {}
         out.append({
             "rank": r.get("rank"),
             "nickname": u.get("nickname") or "",
@@ -289,9 +486,35 @@ def _audience_rank(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "display_id": u.get("display_id") or "",
             "gender": u.get("gender"),
             "pay_grade_level": (u.get("pay_grade") or {}).get("level"),
+            "pay_grade_min_diamond": (u.get("pay_grade") or {}).get("this_grade_min_diamond"),
             "fans_club_level": fcd.get("level"),
+            "fans_club_status": fcd.get("user_fans_club_status"),
+            "guard_status": fcd.get("user_guard_status"),
+            "guard_expired_time": fcd.get("guard_expired_time"),
+            "club_name": fcd.get("club_name") or "",
+            "club_anchor_id": fcd.get("anchor_id"),
+            "club_badge_url": ((icons.get("2") or {}).get("url_list") or [None])[0] or "",
+            "club_badge_advanced_url": ((icons.get("4") or {}).get("url_list") or [None])[0] or "",
         })
     return out
+
+
+def _summarize_fansclub(data: dict[str, Any]) -> dict[str, Any]:
+    """归一 fansclub/homepage 响应（anchor 粉丝团元数据）。失败/未登录返回 {}。"""
+    if not isinstance(data, dict) or not data:
+        return {}
+    club_info = data.get("club_info") or {}
+    return {
+        "club_name": data.get("anchor_name") or data.get("club_name") or "",
+        "anchor_id": str(data.get("anchor_id") or ""),
+        "active_fans_count": _int(data.get("active_fans_count")),
+        "total_fans_count": _int(data.get("total_fans_count")),
+        "today_new_fans_count": _int(data.get("today_new_fans_count")),
+        "max_level": _int(data.get("max_level")),
+        "club_level": _int(data.get("club_level")),
+        "fans_name": data.get("fans_name") or "",
+        "fansclub_mode": _int(data.get("fansclub_mode")),
+    }
 
 
 def _int(value: Any) -> int:
@@ -302,6 +525,7 @@ def _int(value: Any) -> int:
     return n
 
 
-def summarize_for_tests(captured: dict[str, Any], *, web_rid: str = "") -> dict[str, Any] | None:
+def summarize_for_tests(captured: dict[str, Any], *, web_rid: str = "",
+                        anchor_paygrade: int | None = None) -> dict[str, Any] | None:
     """供 tests/test_live_room.py 离线喂样本调用（不触碰浏览器）。"""
-    return _summarize(captured, web_rid=web_rid)
+    return _summarize(captured, web_rid=web_rid, anchor_paygrade=anchor_paygrade)
