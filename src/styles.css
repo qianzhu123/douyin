@@ -216,10 +216,7 @@ button:disabled {
   grid-template-columns:
     28px
     minmax(120px, 1.15fr)
-    minmax(70px, .62fr)
-    minmax(70px, .62fr)
-    minmax(70px, .62fr)
-    minmax(88px, .7fr)
+    minmax(80px, .68fr)
     minmax(86px, .72fr)
     minmax(70px, .58fr)
     minmax(132px, .95fr)
@@ -277,6 +274,11 @@ button:disabled {
 
 .account-name > span {
   min-width: 0;
+}
+
+.account-paygrade {
+  font-weight: 700;
+  color: #1b6fc2;
 }
 
 .drag-handle {

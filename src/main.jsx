@@ -826,10 +826,7 @@ function App() {
                 <input type="checkbox" checked={allChecked} onChange={toggleAllAccounts} />
               </label>
               <span>账户</span>
-              <span>粉丝</span>
-              <span>关注</span>
-              <span>获赞</span>
-              <span>IP</span>
+              <span>账号等级</span>
               <span>直播信息</span>
               <span>人数</span>
               <span>上次检测</span>
@@ -1067,10 +1064,13 @@ function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging,
           {!hidden && failed && <small className="error-text">{row.last_error || '检测失败'}</small>}
         </span>
       </span>
-      <span>{hidden ? masked : formatNumber(profile.follower_count || row.follower_count)}</span>
-      <span>{hidden ? masked : formatNumber(profile.following_count || row.following_count)}</span>
-      <span>{hidden ? masked : formatNumber(profile.total_favorited || row.total_favorited)}</span>
-      <span>{hidden ? masked : (profile.ip_location || row.ip_location || '-')}</span>
+      <span className="account-paygrade" title="anchor 本人荣耀等级（hover popup 解析，需 web_rid）">
+        {hidden ? masked : (
+          profile.live_room?.anchor?.paygrade_level
+            ? `Lv ${profile.live_room.anchor.paygrade_level}`
+            : (profile.web_rid || (profile.live_room?.web_rid) ? '未探测' : '-')
+        )}
+      </span>
       <span>
         <span className={hidden ? 'hidden-pill' : failed ? 'failed-pill' : live ? 'live-pill' : 'idle-pill'} title={hidden ? '' : row.last_error || ''}>
           {hidden ? masked : failed ? '检测失败' : live ? '直播中' : '未直播'}
