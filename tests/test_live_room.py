@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.live_room import summarize_for_tests, AUDIENCE_RANK_LIMIT, _web_rid_from_profile  # noqa: E402
+from backend.live_room import summarize_for_tests, AUDIENCE_RANK_LIMIT, _web_rid_from_profile, _summarize_fansclub  # noqa: E402
 
 _SAMPLES = Path(__file__).resolve().parent / "live_room_analysis" / "samples"
 
@@ -91,3 +91,75 @@ def test_web_rid_handles_dict_room_data_and_MISSING():
     assert _web_rid_from_profile({"user": {"room_data": None}}) == ""
     assert _web_rid_from_profile({"user": {"room_data": "not-json"}}) == ""
     assert _web_rid_from_profile({"user": {"room_data": {"owner": {"rid": "55667"}}}}) == "55667"
+
+
+def test_summarize_fansclub_extracts_club_grade():
+    """fansclub/homepage.club_info.club_level_info 才是真正的 anchor 团等级。
+
+    max_level=20 是系统硬顶（实测所有 anchor 都 20），club_level 是请求者自己
+    在团里的等级（未加入=0）。两者都不能区分 anchor。真实可比的"团等级"在
+    club_level_info.level (0-9) 里，配合 club_level_info.max_level/cur_value/
+    season_id 一起读。"""
+    payload = {
+        "data": {
+            "status_code": 0,
+            "club_info": {
+                "anchor_name": "吕德华",
+                "anchor_id": "3597225254730516",
+                "max_level": 20,
+                "club_level": 0,
+                "total_fans_count": 2559410,
+                "active_fans_count": 81434,
+                "today_new_fans_count": 2,
+                "num_of_fans_group": 6,
+                "popularity_rank_hour": 0,
+                "club_level_info": {
+                    "level": 9,
+                    "max_level": 9,
+                    "cur_value": 469487,
+                    "season_id": 4,
+                    "icon": "...",
+                },
+            },
+            "extra": {"fandom_id": "24944082228738"},
+        }
+    }
+    out = _summarize_fansclub(payload["data"])
+    # 真团等级（区别于系统硬顶 20 和用户自己等级 0）
+    assert out["club_grade"] == 9
+    assert out["club_grade_max"] == 9
+    assert out["club_exp"] == 469487
+    assert out["club_season"] == 4
+    # 不应丢其它字段
+    assert out["club_name"] == "吕德华"
+    assert out["total_fans_count"] == 2559410
+    assert out["active_fans_count"] == 81434
+    assert out["num_of_fans_group"] == 6
+    assert out["fandom_id"] == "24944082228738"
+
+
+def test_summarize_fansclub_no_club_level_info_defaults_safely():
+    """未开通粉丝团/老版本响应里 club_level_info 缺失时不应崩，给默认值。"""
+    payload = {
+        "data": {
+            "status_code": 0,
+            "club_info": {
+                "anchor_name": "空团",
+                "anchor_id": "111",
+                "max_level": 20,
+                "club_level": 0,
+            },
+        }
+    }
+    out = _summarize_fansclub(payload["data"])
+    assert out["club_grade"] == 0
+    assert out["club_grade_max"] == 9  # 默认 9
+    assert out["club_exp"] == 0
+    assert out["club_season"] == 0
+
+
+def test_summarize_fansclub_empty_returns_empty():
+    """{} / 非 dict 都应安全返回 {}（未登录态的兜底）。"""
+    assert _summarize_fansclub({}) == {}
+    assert _summarize_fansclub(None) == {}
+    assert _summarize_fansclub("") == {}

@@ -1,9 +1,31 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Plus, RefreshCcw, Search, Trash2 } from 'lucide-react';
+import { Activity, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Loader2, Plus, RefreshCcw, RotateCw, Search, Trash2 } from 'lucide-react';
 import { formatDuration } from './duration.js';
 import { buildDownloadInputText, mergeDownloadPreviews, removeDownloadPreviewItem } from './downloadPreviewState.js';
 import './styles.css';
+
+// 把后端 progress 步骤拼成可滚动文本，挂在 message 上方。
+// 空数组直接返回原 message。
+function progressSummary(progress) {
+  if (!progress || !Array.isArray(progress.steps) || progress.steps.length === 0) return '';
+  return progress.steps
+    .map((step) => {
+      const tag = step.status === 'error' ? '✗' : step.status === 'running' ? '…' : step.status === 'done' ? '✓' : '·';
+      return `${tag} ${step.message || step.step}`;
+    })
+    .join('\n');
+}
+
+function extractDetailFromError(error) {
+  // 兼容后端 {detail: {error, progress}} 形态——把 progress 透出来。
+  try {
+    const msg = error && error.message ? error.message : String(error || '');
+    return msg;
+  } catch (e) {
+    return String(error || '');
+  }
+}
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -60,12 +82,15 @@ function App() {
         return {
           interval: Math.max(5, Math.min(3600, stored.interval)),
           durationMinutes: Math.max(1, Math.min(1440, stored.durationMinutes)),
+          pollTypes: Array.isArray(stored.pollTypes)
+            ? stored.pollTypes.filter((t) => ['basic', 'live', 'fansclub'].includes(t))
+            : [],
         };
       }
     } catch (error) {
       // fall through to defaults
     }
-    return { interval: 30, durationMinutes: 100 };
+    return { interval: 30, durationMinutes: 100, pollTypes: [] };
   });
   const [downloadText, setDownloadText] = React.useState('');
   const [downloadMode, setDownloadMode] = React.useState(1);
@@ -236,11 +261,36 @@ function App() {
         body: JSON.stringify(body),
       });
     } catch (error) {
-      throw new Error('无法连接后端服务，请确认 127.0.0.1:8000 正在运行。');
+      const err = new Error('无法连接后端服务，请确认 127.0.0.1:8000 正在运行。');
+      err.cause = error;
+      throw err;
     }
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '请求失败');
+    let data;
+    try {
+      data = await response.json();
+    } catch (parseError) {
+      throw new Error(`后端返回非 JSON（HTTP ${response.status}），可能后端崩溃，请查看 backend.err.log。`);
+    }
+    if (!response.ok) {
+      const detail = data && data.detail;
+      let message;
+      let progress;
+      if (detail && typeof detail === 'object') {
+        message = detail.error || `请求失败 (${response.status})`;
+        progress = detail.progress;
+      } else {
+        message = detail || `请求失败 (${response.status})`;
+      }
+      const err = new Error(message);
+      err.progress = progress;
+      throw err;
+    }
     return data;
+  }
+
+  function setMessageWithProgress(message, error) {
+    const detail = error && error.progress ? progressSummary(error.progress) : '';
+    setMessage(detail ? `${message}\n${detail}` : message);
   }
 
   async function detectTargets(targets = []) {
@@ -249,7 +299,7 @@ function App() {
     if (pendingTargets.length === 0) return;
 
     setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在检测 ${pendingTargets.length} 个账户的基本信息...`);
+    setMessage(`正在检测 ${pendingTargets.length} 个账户的基本信息…\n· 解析目标账户`);
     try {
       const data = await postJson('/api/query', { targets: pendingTargets });
       await loadAccounts();
@@ -261,7 +311,7 @@ function App() {
       });
       setMessage(failures.length ? `已检测 ${results.length} 个账户，${failures.length} 个失败` : `已检测 ${results.length} 个账户`);
     } catch (error) {
-      setMessage(error.message);
+      setMessageWithProgress(`检测 ${pendingTargets.length} 个账户失败：${error.message}`, error);
       appendLog('error', error.message, '检测');
     } finally {
       setDetectingUids((current) => {
@@ -276,23 +326,25 @@ function App() {
     const pendingTargets = targets.filter((uid) => !detectingUids.has(uid));
     if (pendingTargets.length === 0) return;
     setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在检测 ${pendingTargets.length} 个账户的直播间详情...`);
+    setMessage(`正在刷新 ${pendingTargets.length} 个账户的直播间人数…\n· 拦 enter 取 view_count`);
     const results = [];
     for (const uid of pendingTargets) {
+      setMessage(`正在刷新 ${pendingTargets.length} 个账户的直播间人数…\n· ${uid.slice(0, 12)}…`);
       try {
-        const data = await postJson('/api/live-room', { sec_uid: uid, web_rid: '', room_id_str: '' });
-        results.push({ sec_uid: uid, ok: !!data.live_room });
-        appendLog(data.live_room ? 'info' : 'error',
-          data.live_room ? `${uid.slice(0, 16)}... 直播间详情已刷新（含 paygrade ${data.live_room.anchor?.paygrade_level ?? '-'}）` : `${uid.slice(0, 16)}... 直播间详情失败（需先有 web_rid）`,
-          '直播间');
+        const data = await postJson('/api/live-viewers', { sec_uid: uid });
+        const ok = !!data.live_viewers;
+        results.push({ sec_uid: uid, ok });
+        appendLog(ok ? 'info' : 'error',
+          ok ? `${uid.slice(0, 16)}... 直播间人数已刷新（${data.live_viewers.viewers || 0}）` : `${uid.slice(0, 16)}... 直播间人数失败（需先有 web_rid）`,
+          '直播人数');
       } catch (error) {
         results.push({ sec_uid: uid, ok: false });
-        appendLog('error', `${uid.slice(0, 16)}... 直播间检测失败：${error.message}`, '直播间');
+        appendLog('error', `${uid.slice(0, 16)}... 直播人数失败：${error.message}`, '直播人数');
       }
     }
     await loadAccounts();
     const failures = results.filter((r) => !r.ok).length;
-    setMessage(failures ? `${results.length - failures} 个直播间详情已刷新，${failures} 个失败` : `${results.length} 个直播间详情已刷新`);
+    setMessage(failures ? `${results.length - failures} 个直播间人数已刷新，${failures} 个失败` : `${results.length} 个直播间人数已刷新`);
     setDetectingUids((current) => {
       const next = new Set(current);
       pendingTargets.forEach((uid) => next.delete(uid));
@@ -304,14 +356,15 @@ function App() {
     const pendingTargets = targets.filter((uid) => !detectingUids.has(uid));
     if (pendingTargets.length === 0) return;
     setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在检测 ${pendingTargets.length} 个账户的粉丝团数据...`);
+    setMessage(`正在检测 ${pendingTargets.length} 个账户的粉丝团数据…\n· 读取 cache 中 web_rid`);
     const results = [];
     for (const uid of pendingTargets) {
+      setMessage(`正在检测 ${pendingTargets.length} 个账户的粉丝团数据…\n· ${uid.slice(0, 12)}… 拦 webcast/fansclub/homepage`);
       try {
         const data = await postJson('/api/fansclub', { sec_uid: uid });
         results.push({ sec_uid: uid, ok: !!data.fansclub });
         appendLog(data.fansclub ? 'info' : 'error',
-          data.fansclub ? `${uid.slice(0, 16)}... 粉丝团已刷新（团 ${data.fansclub.total_fans_count} 人）` : `${uid.slice(0, 16)}... 粉丝团失败（需先有 web_rid + 登录态）`,
+          data.fansclub ? `${uid.slice(0, 16)}... 粉丝团已刷新（团 Lv${data.fansclub.club_grade || 0} ${formatNumber(data.fansclub.total_fans_count || 0)}粉）` : `${uid.slice(0, 16)}... 粉丝团失败（缺 web_rid 或未登录）`,
           '粉丝团');
       } catch (error) {
         results.push({ sec_uid: uid, ok: false });
@@ -320,7 +373,7 @@ function App() {
     }
     await loadAccounts();
     const failures = results.filter((r) => !r.ok).length;
-    setMessage(failures ? `${results.length - failures} 个粉丝团已刷新，${failures} 个失败` : `${results.length} 个粉丝团已刷新`);
+    setMessage(failures ? `${results.length - failures} 个粉丝团已刷新，${failures} 个失败（缺 web_rid/未登录）` : `${results.length} 个粉丝团已刷新`);
     setDetectingUids((current) => {
       const next = new Set(current);
       pendingTargets.forEach((uid) => next.delete(uid));
@@ -446,27 +499,32 @@ function App() {
     reorderAccounts(accountsRef.current);
   }
 
-  async function startPolling({ interval, durationMinutes }) {
+  async function startPolling({ interval, durationMinutes, pollTypes }) {
     setBusy(true);
     try {
       const label = `轮询 ${new Date().toLocaleTimeString()}`;
-      await postJson('/api/watch/start', {
+      const data = await postJson('/api/watch/start', {
         targets: pollTargets,
         interval,
         duration_minutes: durationMinutes,
         label,
+        poll_types: pollTypes,
       });
       // remember the last-used values so the next modal opens with them
       setPollDefaults({
         interval: Math.max(5, Math.min(3600, Number(interval) || 30)),
         durationMinutes: Math.max(1, Math.min(1440, Number(durationMinutes) || 100)),
+        pollTypes: Array.isArray(pollTypes) ? pollTypes.slice() : [],
       });
       await loadWatch();
       setPollOpen(false);
-      setMessage('轮询检测已启动');
-      appendLog('info', `轮询检测已启动：${pollTargets.length} 个账户，间隔 ${interval}s，持续 ${durationMinutes} 分钟`, '轮询');
+      const typeText = (data.watch && data.watch.poll_types && data.watch.poll_types.length)
+        ? data.watch.poll_types.join('/')
+        : 'basic/live/fansclub';
+      setMessage(`轮询已启动：${pollTargets.length} 账户，间隔 ${interval}s，持续 ${durationMinutes}m，类型 ${typeText}`);
+      appendLog('info', `轮询检测已启动：${pollTargets.length} 个账户，间隔 ${interval}s，持续 ${durationMinutes} 分钟，类型 ${typeText}`, '轮询');
     } catch (error) {
-      setMessage(error.message);
+      setMessageWithProgress(`轮询启动失败：${error.message}`, error);
       appendLog('error', error.message, '轮询');
     } finally {
       setBusy(false);
@@ -766,9 +824,9 @@ function App() {
             className="secondary"
             onClick={() => detectLiveRoom(checkedTargets)}
             disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
-            title="刷新选中账户的直播间详情（含 anchor 等级）"
+            title="仅刷新选中账户的直播间人数（不刷其它详情）"
           >
-            刷直播
+            刷人数
           </button>
           <button
             className="secondary"
@@ -788,7 +846,11 @@ function App() {
       </header>
 
       <section className="content list-layout">
-        {message && <div className="notice">{message}</div>}
+        {message && (
+          <div className={`notice${message.includes('\n') ? ' multi' : ''}`}>
+            {message}
+          </div>
+        )}
 
         <section className="panel account-panel">
           <div className="panel-head">
@@ -826,9 +888,10 @@ function App() {
                 <input type="checkbox" checked={allChecked} onChange={toggleAllAccounts} />
               </label>
               <span>账户</span>
-              <span>账号等级</span>
-              <span>直播信息</span>
+              <span>直播间</span>
               <span>人数</span>
+              <span>账号等级</span>
+              <span>粉丝团</span>
               <span>上次检测</span>
               <span>操作</span>
             </div>
@@ -1003,6 +1066,7 @@ function App() {
           targetCount={pollTargets.length}
           initialInterval={pollDefaults.interval}
           initialDurationMinutes={pollDefaults.durationMinutes}
+          initialPollTypes={pollDefaults.pollTypes}
           onClose={() => setPollOpen(false)}
           onStart={startPolling}
         />
@@ -1064,6 +1128,12 @@ function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging,
           {!hidden && failed && <small className="error-text">{row.last_error || '检测失败'}</small>}
         </span>
       </span>
+      <span>
+        <span className={hidden ? 'hidden-pill' : failed ? 'failed-pill' : live ? 'live-pill' : 'idle-pill'} title={hidden ? '' : row.last_error || ''}>
+          {hidden ? masked : failed ? '检测失败' : live ? '直播中' : '未直播'}
+        </span>
+      </span>
+      <span>{hidden ? masked : live ? formatNumber(profile.live_viewers) : '-'}</span>
       <span className="account-paygrade" title="anchor 本人荣耀等级（hover popup 解析，需 web_rid）">
         {hidden ? masked : (
           profile.live_room?.anchor?.paygrade_level
@@ -1071,16 +1141,36 @@ function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging,
             : (profile.web_rid || (profile.live_room?.web_rid) ? '未探测' : '-')
         )}
       </span>
-      <span>
-        <span className={hidden ? 'hidden-pill' : failed ? 'failed-pill' : live ? 'live-pill' : 'idle-pill'} title={hidden ? '' : row.last_error || ''}>
-          {hidden ? masked : failed ? '检测失败' : live ? '直播中' : '未直播'}
-        </span>
+      <span title="粉丝团">
+        {hidden ? masked : (() => {
+          const fc = profile.live_room?.fansclub;
+          if (!fc) return profile.web_rid ? '未探测' : '-';
+          // 后端在未登录态会回 {}；不能让 {} 误判成"已探测但没人"→ 退回未探测
+          const hasClubData = fc.club_name || (fc.total_fans_count && fc.total_fans_count > 0) || (fc.active_fans_count && fc.active_fans_count > 0);
+          if (!hasClubData) return profile.web_rid ? '未探测' : '-';
+          // 注意：max_level 是系统硬顶（所有 anchor 都 20），club_level 是
+          // "请求者自己在这个团里的等级"（未加入 = 0），两者都不能区分 anchor。
+          // 真有价值的字段：club_name(anchor 自己取的)、total_fans_count、
+          // active_fans_count、today_new_fans_count、popularity_rank_hour
+          // (数字越小越热门)、num_of_fans_group(子团数)、club_grade(团等级0-9,
+          // 真正能区分 anchor 的指标)、club_exp(团经验值)。
+          const parts = [];
+          if (fc.club_name) parts.push(fc.club_name);
+          if (fc.club_grade != null && fc.club_grade > 0) {
+            parts.push(`团 Lv${fc.club_grade}${fc.club_grade_max ? `/${fc.club_grade_max}` : ''}`);
+          }
+          if (fc.total_fans_count) parts.push(`${formatNumber(fc.total_fans_count)}粉`);
+          else if (fc.active_fans_count) parts.push(`${formatNumber(fc.active_fans_count)}活粉`);
+          if (fc.today_new_fans_count) parts.push(`今日+${formatNumber(fc.today_new_fans_count)}`);
+          if (fc.popularity_rank_hour) parts.push(`热度#${fc.popularity_rank_hour}`);
+          if (fc.num_of_fans_group) parts.push(`${fc.num_of_fans_group}分团`);
+          return parts.join(' · ') || '空团';
+        })()}
       </span>
-      <span>{hidden ? masked : live ? formatNumber(profile.live_viewers) : '-'}</span>
       <span>{hidden ? masked : formatTime(row.last_checked_at)}</span>
       <span className="row-actions" onClick={(event) => event.stopPropagation()}>
         <button onClick={onDetect} disabled={detecting} title="刷新基本信息（昵称/粉丝/直播状态）">基本</button>
-        <button className="secondary" onClick={onDetectLiveRoom} disabled={detecting} title="刷新直播间详情（enter/ranklist/anchor等级）">直播</button>
+        <button className="secondary" onClick={onDetectLiveRoom} disabled={detecting} title="仅刷新直播间人数（不刷其它字段）">人数</button>
         <button className="secondary" onClick={onDetectFansclub} disabled={detecting} title="刷新粉丝团数据（团等级/成员数）">团</button>
         <button className="secondary" onClick={onPoll} disabled={busy}>轮询</button>
         <button className="secondary icon-button small-icon" onClick={onHide} title={hidden ? '恢复信息' : '隐藏信息'}>
@@ -1128,9 +1218,15 @@ function DetailPanel({ row, hidden }) {
           <h4>粉丝团</h4>
           <div className="detail-grid">
             <Info label="团名" value={fansclub.club_name || '-'} />
-            <Info label="团等级" value={fansclub.max_level ? `满 ${fansclub.max_level} 级` : (fansclub.club_level ? `Lv ${fansclub.club_level}` : '-')} />
-            <Info label="活跃粉丝" value={formatNumber(fansclub.active_fans_count)} />
+            <Info label="粉丝团粉丝名" value={fansclub.fans_name || '-'} />
+            <Info label="团等级" value={fansclub.club_grade != null && fansclub.club_grade > 0 ? `Lv ${fansclub.club_grade}${fansclub.club_grade_max ? ` / ${fansclub.club_grade_max}` : ''}` : '-'} />
+            <Info label="团经验值" value={fansclub.club_exp ? formatNumber(fansclub.club_exp) : '-'} />
+            <Info label="赛季" value={fansclub.club_season || '-'} />
             <Info label="总粉丝" value={formatNumber(fansclub.total_fans_count)} />
+            <Info label="活跃粉丝" value={formatNumber(fansclub.active_fans_count)} />
+            <Info label="今日新增" value={formatNumber(fansclub.today_new_fans_count)} />
+            <Info label="热度排名(小时)" value={fansclub.popularity_rank_hour ? `#${fansclub.popularity_rank_hour}` : '-'} />
+            <Info label="子团数" value={fansclub.num_of_fans_group || 0} />
           </div>
         </div>
       )}
@@ -1521,6 +1617,17 @@ function WatchJobCard({ job, busy, onStop, onAdjust, onRemove }) {
         </div>
       )}
       {lastEvent && <div className="watch-job-event">{lastEvent.message}</div>}
+      {Array.isArray(job.progress) && job.progress.length > 0 && (
+        <div className="watch-job-progress">
+          {job.progress.slice(-12).map((step, index) => (
+            <div className={`watch-job-progress-line ${step.status}`} key={`${step.time}-${index}`}>
+              <span>{step.status === 'done' ? '✓' : step.status === 'error' ? '✗' : step.status === 'running' ? '⟳' : '·'}</span>
+              <span>{step.step}</span>
+              <span>{step.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="watch-job-actions">
         <button className="secondary" onClick={() => setEditing((value) => !value)} disabled={busy}>调整</button>
         <button className="secondary" onClick={onStop} disabled={busy || !job.running}>停止</button>
@@ -1530,9 +1637,24 @@ function WatchJobCard({ job, busy, onStop, onAdjust, onRemove }) {
   );
 }
 
-function PollModal({ targetCount, initialInterval, initialDurationMinutes, onClose, onStart }) {
+function PollModal({ targetCount, initialInterval, initialDurationMinutes, initialPollTypes, onClose, onStart }) {
   const [interval, setIntervalValue] = React.useState(initialInterval || 30);
   const [durationMinutes, setDurationMinutes] = React.useState(initialDurationMinutes || 30);
+  // 默认全选（兼容旧行为）；空数组=后端跑全部。
+  const [pollTypes, setPollTypes] = React.useState(() => {
+    if (Array.isArray(initialPollTypes)) return initialPollTypes.slice();
+    return ['basic', 'live', 'fansclub'];
+  });
+
+  function toggleType(name) {
+    setPollTypes((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      // 至少保留一个；如果全部取消 → 后端跑全部 (传空数组)。
+      return Array.from(next);
+    });
+  }
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -1544,6 +1666,14 @@ function PollModal({ targetCount, initialInterval, initialDurationMinutes, onClo
           </div>
           <Activity size={20} />
         </div>
+        <div className="field">
+          轮询范围（不勾选 = 全部）
+          <div className="poll-type-row">
+            <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('basic')} onChange={() => toggleType('basic')} /> 基本信息</label>
+            <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('live')} onChange={() => toggleType('live')} /> 直播间</label>
+            <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('fansclub')} onChange={() => toggleType('fansclub')} /> 粉丝团</label>
+          </div>
+        </div>
         <label className="field">
           间隔秒数
           <input value={interval} onChange={(event) => setIntervalValue(event.target.value)} inputMode="numeric" />
@@ -1554,7 +1684,7 @@ function PollModal({ targetCount, initialInterval, initialDurationMinutes, onClo
         </label>
         <div className="modal-actions">
           <button className="secondary" onClick={onClose}>取消</button>
-          <button onClick={() => onStart({ interval: Number(interval) || 30, durationMinutes: Number(durationMinutes) || 30 })}>开始轮询</button>
+          <button onClick={() => onStart({ interval: Number(interval) || 30, durationMinutes: Number(durationMinutes) || 30, pollTypes })}>开始轮询</button>
         </div>
       </div>
     </div>

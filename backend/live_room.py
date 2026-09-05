@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import urllib.request
+import websockets  # type: ignore
+from pathlib import Path
 from typing import Any
 
 try:
@@ -41,6 +45,129 @@ AUDIENCE_RANK_LIMIT = 10
 # web_rid 可能存放的字段名（主页 room_data JSON 里逐个尝试）
 _WEB_RID_KEYS = ("web_rid", "webRid", "web_rid_str", "rid")
 
+# 与 downloader.preview_douyin_url 同样使用常驻 Chrome 拿登录态：CDP 端点 + 落盘 profile。
+# 优先 CDP（用户已手动登录的常驻 Chrome），CDP 不可达时退化到 launch_persistent_context
+# （复用 SEARCH_PROFILE_DIR 里的 cookie）。这俩都连不上再裸启动 headless（无登录态，
+# fansclub/homepage 必返 20003，调用方应自行决定要不要写到 cache）。
+_CDP_DEFAULT = "http://127.0.0.1:9222"
+
+
+def _resolve_login_profile() -> str:
+    """默认登录 profile 路径——与 start-douyin.ps1 的 $LoginProfile 保持一致。"""
+    candidates = []
+    env = os.environ.get("DOUYIN_LOGIN_PROFILE")
+    if env:
+        candidates.append(Path(env))
+    # 与 start-douyin.ps1 保持一致：external\douyin-user-search\douyin_profile
+    candidates.append(Path(__file__).resolve().parents[1] / "external" / "douyin-user-search" / "douyin_profile")
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return ""
+
+
+async def _fetch_fansclub_via_cdp_raw(cdp_url: str, web_rid: str, anchor_id: str, timeout_s: float) -> dict[str, Any] | None:
+    """绕过 playwright 直接走 raw CDP WS 拦 fansclub/homepage。
+
+    背景：playwright 在当前版本的 sync/async connect_over_cdp 会无限挂起
+    （已实测 — WS 握手成功但后续 Target.setAutoAttach 等无响应），所以
+    这里直接用 websockets 库驱动 Chrome DevTools Protocol，对 live.douyin.com
+    的现有 page 调 Runtime.evaluate 触发 fetch，再读 .text() 拿正文。
+
+    已知坑：CDP-Chrome 上 page tab#0 偶尔会卡住 Runtime.evaluate（已实测：
+    tab#0 timeout、tab#1+ 正常），所以遍历 page tabs 时按"找第一个非 timeout
+    的"作为兜底。如果 web_rid 对应的 tab 不在 list 里、或者首 tab timeout，
+    也自动顺延到下一个 live.douyin.com page。
+    """
+    if not anchor_id or not web_rid:
+        return None
+    try:
+        with urllib.request.urlopen(cdp_url.rstrip("/") + "/json", timeout=5) as resp:
+            tabs = json.loads(resp.read())
+    except Exception:
+        return None
+    fetch_url = (
+        "https://live.douyin.com/webcast/fansclub/homepage/?aid=6383"
+        "&channel=channel_pc_web&device_platform=webapp"
+        f"&anchor_id={anchor_id}&request_scene=4&action=2&source=2"
+    )
+    # 优先 web_rid 匹配，其次任意 live.douyin.com page
+    page_tabs = [t for t in tabs if t.get("type") == "page"]
+    ordered = []
+    for t in page_tabs:
+        if web_rid and web_rid in (t.get("url") or ""):
+            ordered.append(t)
+    for t in page_tabs:
+        if "live.douyin.com" in (t.get("url") or "") and t not in ordered:
+            ordered.append(t)
+
+    async def call(ws, method: str, params: dict, mid: int, timeout: float):
+        await ws.send(json.dumps({"id": mid, "method": method, "params": params}))
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(f"{method} timed out")
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+            if msg.get("id") == mid:
+                return msg
+
+    for target in ordered:
+        ws_url = target.get("webSocketDebuggerUrl")
+        if not ws_url:
+            continue
+        try:
+            async with websockets.connect(ws_url, max_size=20 * 1024 * 1024, ping_interval=None, open_timeout=4) as ws:
+                mid_state = {"n": 0}
+
+                async def call(method: str, params: dict, timeout: float = 10.0) -> dict:
+                    mid_state["n"] += 1
+                    await ws.send(json.dumps({"id": mid_state["n"], "method": method, "params": params}))
+                    deadline = asyncio.get_event_loop().time() + timeout
+                    while True:
+                        remaining = deadline - asyncio.get_event_loop().time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError(f"{method} timed out")
+                        msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+                        if msg.get("id") == mid_state["n"]:
+                            return msg
+
+                # 如果 tab 当前不在 live.douyin.com 上（CORS/无登录态），
+                # 先导航到 live.douyin.com/<web_rid> 再 fetch fansclub/homepage。
+                # 仅当页面 URL 不含 live.douyin.com 时才导航，避免破坏用户当前页面。
+                cur_url = (((await call("Runtime.evaluate", {
+                    "expression": "location.href",
+                })).get("result") or {}).get("result") or {}).get("value") or ""
+                if "live.douyin.com" not in cur_url or (web_rid and web_rid not in cur_url):
+                    try:
+                        await call("Page.enable", {}, timeout=4)
+                        await call("Page.navigate", {"url": f"https://live.douyin.com/{web_rid}"}, timeout=10)
+                        # 等页面拉到 webcast 接口返回（fansclub 是页面加载后自动发的，
+                        # 但 anchor cookie 通常要等几秒；保守等 6s）。
+                        await asyncio.sleep(6)
+                    except Exception:
+                        pass
+
+                r = await call("Runtime.evaluate", {
+                    "expression": (
+                        "fetch(" + json.dumps(fetch_url) + ", {credentials:'include'})"
+                        ".then(r => r.text()).then(t => t)"
+                    ),
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                }, timeout=timeout_s)
+                value = (((r or {}).get("result") or {}).get("result") or {}).get("value")
+                if not isinstance(value, str):
+                    continue
+                payload = json.loads(value)
+                data = payload.get("data") or {}
+                if not data:
+                    return None
+                return _summarize_fansclub(data)
+        except (asyncio.TimeoutError, Exception):
+            continue
+    return None
+
 
 class LiveRoomService:
     """打开直播间、拦 webcast 接口并归一为直播间卡片 dict。
@@ -60,18 +187,39 @@ class LiveRoomService:
         return
 
     async def fetch_fansclub(self, *, anchor_id: str = "",
-                             web_rid: str = "") -> dict[str, Any] | None:
+                             web_rid: str = "",
+                             room_id_str: str = "",
+                             sec_uid: str = "") -> dict[str, Any] | None:
         """仅探测 anchor 粉丝团主页（团等级/成员数），不触发 enter/ranklist。
 
         web_rid 必须已知；用 web_rid 加载直播间页面触发 fansclub/homepage。
         必须登录态（webcast 域 Vip 端强约束），未登录返 20003 → 静默 None。
+
+        浏览器优先级（与 downloader.preview_douyin_url 保持一致）：
+          1) 复用常驻 Chrome（CDP=http://127.0.0.1:9222） — 已有登录态的入口；
+          2) launch_persistent_context 走 SEARCH_PROFILE_DIR — 有 cookie 但没启 Chrome；
+          3) 裸启动 headless（无登录态）— 仅用于兜底，多数情况下会返 20003。
         """
         if async_playwright is None:
             return None
         if not web_rid:
             return None
 
+        # 0) 优先：raw CDP 复用常驻 Chrome 的现有 tab（最快路径，已实测稳定）。
+        cdp_url = os.environ.get("DOUYIN_CDP", _CDP_DEFAULT)
+        fast = await _fetch_fansclub_via_cdp_raw(cdp_url, web_rid, anchor_id, timeout_s=12.0)
+        if fast:
+            return fast
+
+        # 1) 兜底：playwright 路径（仅在 raw CDP 不可用时跑一次）。
+
         captured: dict[str, Any] = {}
+        fansclub_url = (
+            "https://live.douyin.com/webcast/fansclub/homepage/?aid=6383"
+            "&channel=channel_pc_web&device_platform=webapp"
+            f"&anchor_id={anchor_id}&request_scene=1&action=1&source=1"
+        )
+        live_url = f"https://live.douyin.com/{web_rid}"
 
         async def on_response(response) -> None:
             if "fansclub/homepage" in response.url and "fansclub" not in captured:
@@ -80,9 +228,58 @@ class LiveRoomService:
                 except Exception:
                     pass
 
+        browser = None
+        context = None
+        page = None
+        owns_context = False
+        playwright = None
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
+            cdp_url = os.environ.get("DOUYIN_CDP", _CDP_DEFAULT)
+            if cdp_url:
+                try:
+                    playwright = await async_playwright().start()
+                    browser = await playwright.chromium.connect_over_cdp(cdp_url)
+                    ctxs = browser.contexts
+                    if ctxs:
+                        context = ctxs[0]
+                        owns_context = False
+                    else:
+                        context = await browser.new_context(viewport={"width": 1600, "height": 1000})
+                        owns_context = True
+                    page = await context.new_page()
+                except Exception:
+                    browser = None
+                    context = None
+                    page = None
+                    if playwright is not None:
+                        try:
+                            await playwright.stop()
+                        except Exception:
+                            pass
+                        playwright = None
+            if page is None:
+                profile = _resolve_login_profile()
+                if profile:
+                    try:
+                        playwright = await async_playwright().start()
+                        context = await playwright.chromium.launch_persistent_context(
+                            profile, headless=True,
+                            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                        )
+                        page = context.pages[0] if context.pages else await context.new_page()
+                        owns_context = True
+                    except Exception:
+                        context = None
+                        page = None
+                        if playwright is not None:
+                            try:
+                                await playwright.stop()
+                            except Exception:
+                                pass
+                            playwright = None
+            if page is None:
+                playwright = await async_playwright().start()
+                browser = await playwright.chromium.launch(
                     headless=self.headless,
                     args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
                 )
@@ -90,44 +287,64 @@ class LiveRoomService:
                     user_agent=UA, viewport={"width": 1600, "height": 1000}
                 )
                 page = await context.new_page()
-                page.on("response", lambda r: asyncio.create_task(on_response(r)))
+                owns_context = True
+            page.on("response", lambda r: asyncio.create_task(on_response(r)))
 
-                live_url = f"https://live.douyin.com/{web_rid}"
-                try:
-                    await page.goto(live_url, wait_until="domcontentloaded",
-                                    timeout=self.timeout_ms)
-                except Exception:
-                    await context.close()
-                    await browser.close()
-                    return None
+            try:
+                await page.goto(live_url, wait_until="domcontentloaded",
+                                timeout=self.timeout_ms)
+            except Exception:
+                return None
 
-                # 触发 fansclub/homepage —— 通常页面加载后一次 fetch 即可拦到。
-                if anchor_id:
-                    try:
-                        await page.evaluate(
-                            """async ({url}) => {
-                                try { await fetch(url, {credentials: 'include'}); } catch (e) {}
-                            }""",
-                            {
-                                "url": (
-                                    "https://live.douyin.com/webcast/fansclub/homepage/?aid=6383"
-                                    "&channel=channel_pc_web&device_platform=webapp"
-                                    f"&anchor_id={anchor_id}&request_scene=1&action=1&source=1"
-                                )
-                            },
-                        )
-                    except Exception:
-                        pass
+            # 触发 fansclub/homepage —— 通常页面加载后一次 fetch 即可拦到。
+            # 已登录的常驻 Chrome / persistent context 通常也会自动发一次，
+            # 主动 fetch 仅在什么都没拦到的兜底路径里生效。
+            try:
+                await page.evaluate(
+                    """async ({url}) => {
+                        try { await fetch(url, {credentials: 'include'}); } catch (e) {}
+                    }""",
+                    {"url": fansclub_url},
+                )
+            except Exception:
+                pass
 
-                for _ in range(10):
-                    if "fansclub" in captured:
-                        break
-                    await asyncio.sleep(0.3)
-
-                await context.close()
-                await browser.close()
+            for _ in range(20):
+                if "fansclub" in captured:
+                    break
+                await asyncio.sleep(0.3)
         except Exception:
             return None
+        finally:
+            # CDP 复用常驻 Chrome 时只关 page（不动 browser/context）；
+            # 自主创建的浏览器/context/Playwright 关闭后释放。
+            if owns_context:
+                try:
+                    if context is not None:
+                        await context.close()
+                except Exception:
+                    pass
+                try:
+                    if browser is not None:
+                        await browser.close()
+                except Exception:
+                    pass
+            else:
+                try:
+                    if page is not None:
+                        await page.close()
+                except Exception:
+                    pass
+                try:
+                    if browser is not None:
+                        await browser.close()
+                except Exception:
+                    pass
+            if playwright is not None:
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
 
         if "fansclub" not in captured:
             return None
@@ -500,20 +717,62 @@ def _audience_rank(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _summarize_fansclub(data: dict[str, Any]) -> dict[str, Any]:
-    """归一 fansclub/homepage 响应（anchor 粉丝团元数据）。失败/未登录返回 {}。"""
+    """归一 fansclub/homepage 响应（anchor 粉丝团元数据）。失败/未登录返回 {}。
+
+    响应结构差异：
+      旧版（未登录或早期版本）：data 在根层（data.max_level 等）；
+      新版（登录态实测）：实际字段包在 data.club_info 里，data 顶层只剩
+      status_code/extra/is_sign_up_guard 等；max_level/club_level/total_fans_count
+      等都在 data.club_info 里。club_info 缺字段时回落到 data 顶层。
+    """
     if not isinstance(data, dict) or not data:
         return {}
     club_info = data.get("club_info") or {}
+
+    def pick(key: str, default: Any = 0) -> Any:
+        # 优先 club_info，再回落顶层 data，最后 fallback 到 extra 段（fandom_id 在 extra）
+        if isinstance(club_info, dict) and club_info.get(key) not in (None, ""):
+            return club_info[key]
+        if data.get(key) not in (None, ""):
+            return data[key]
+        extra = data.get("extra") or {}
+        if isinstance(extra, dict) and extra.get(key) not in (None, ""):
+            return extra[key]
+        return default
+
+    # 团名/anchor_name 同义多版本；club_name 在 club_info 里也可能带 "未开通" 等
+    club_name = (
+        (club_info.get("anchor_name") if isinstance(club_info, dict) else None)
+        or (club_info.get("club_name") if isinstance(club_info, dict) else None)
+        or data.get("anchor_name")
+        or data.get("club_name")
+        or ""
+    )
     return {
-        "club_name": data.get("anchor_name") or data.get("club_name") or "",
-        "anchor_id": str(data.get("anchor_id") or ""),
-        "active_fans_count": _int(data.get("active_fans_count")),
-        "total_fans_count": _int(data.get("total_fans_count")),
-        "today_new_fans_count": _int(data.get("today_new_fans_count")),
-        "max_level": _int(data.get("max_level")),
-        "club_level": _int(data.get("club_level")),
-        "fans_name": data.get("fans_name") or "",
-        "fansclub_mode": _int(data.get("fansclub_mode")),
+        "club_name": club_name,
+        "anchor_id": str(pick("anchor_id", "") or ""),
+        "active_fans_count": _int(pick("active_fans_count")),
+        "total_fans_count": _int(pick("total_fans_count")),
+        "today_new_fans_count": _int(pick("today_new_fans_count")),
+        # max_level 是系统硬顶 (实测全 anchor 都 20)，保留但 UI 不要展示；
+        # club_level 是"请求者自己在该团里的等级"（未加入 = 0），不能区分 anchor。
+        "max_level": _int(pick("max_level")),
+        "club_level": _int(pick("club_level")),
+        # 真正的"粉丝团等级"在 club_info.club_level_info 里：level=0-9, max_level=9,
+        # cur_value=经验值（达到 max 后归 0 重置一赛季）。注意 club_level_info 是嵌套
+        # dict 不在 pick() 范围内，直接从 club_info 读，缺则给默认。
+        "club_grade": _int(club_info.get("club_level_info", {}).get("level")) if isinstance(club_info, dict) else 0,
+        "club_grade_max": _int(club_info.get("club_level_info", {}).get("max_level", 9)) if isinstance(club_info, dict) else 9,
+        "club_exp": _int(club_info.get("club_level_info", {}).get("cur_value")) if isinstance(club_info, dict) else 0,
+        "club_season": _int(club_info.get("club_level_info", {}).get("season_id")) if isinstance(club_info, dict) else 0,
+        "fans_name": pick("fans_name", "") or "",
+        "fansclub_mode": _int(pick("fansclub_mode")),
+        # 这俩是 request_scene=4 才有的真实 anchor 指标 — popularity_rank_hour 是
+        # 该 anchor 最近一小时热度排名（数字越小越热门），num_of_fans_group 是
+        # 其下子团（XX分团/家族团）数量。request_scene=1 时它们都是 0。
+        "popularity_rank_hour": _int(pick("popularity_rank_hour")),
+        "num_of_fans_group": _int(pick("num_of_fans_group")),
+        "fandom_id": str(pick("fandom_id", "") or ""),
     }
 
 
