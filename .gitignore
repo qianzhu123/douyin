@@ -30,3 +30,7 @@ backend/backend.log
 backend/backend.err.log
 backend/frontend.log
 backend/frontend.err.log
+
+# 抓包/分析的运行时产物：勿入仓库
+external/douyin-monitor/data/
+tests/live_room_analysis/out/

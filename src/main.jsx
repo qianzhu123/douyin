@@ -83,7 +83,7 @@ function App() {
           interval: Math.max(5, Math.min(3600, stored.interval)),
           durationMinutes: Math.max(1, Math.min(1440, stored.durationMinutes)),
           pollTypes: Array.isArray(stored.pollTypes)
-            ? stored.pollTypes.filter((t) => ['basic', 'live', 'fansclub'].includes(t))
+            ? stored.pollTypes.filter((t) => ['basic', 'live'].includes(t))
             : [],
         };
       }
@@ -352,34 +352,6 @@ function App() {
     });
   }
 
-  async function detectFansclub(targets = []) {
-    const pendingTargets = targets.filter((uid) => !detectingUids.has(uid));
-    if (pendingTargets.length === 0) return;
-    setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在检测 ${pendingTargets.length} 个账户的粉丝团数据…\n· 读取 cache 中 web_rid`);
-    const results = [];
-    for (const uid of pendingTargets) {
-      setMessage(`正在检测 ${pendingTargets.length} 个账户的粉丝团数据…\n· ${uid.slice(0, 12)}… 拦 webcast/fansclub/homepage`);
-      try {
-        const data = await postJson('/api/fansclub', { sec_uid: uid });
-        results.push({ sec_uid: uid, ok: !!data.fansclub });
-        appendLog(data.fansclub ? 'info' : 'error',
-          data.fansclub ? `${uid.slice(0, 16)}... 粉丝团已刷新（团 Lv${data.fansclub.club_grade || 0} ${formatNumber(data.fansclub.total_fans_count || 0)}粉）` : `${uid.slice(0, 16)}... 粉丝团失败（缺 web_rid 或未登录）`,
-          '粉丝团');
-      } catch (error) {
-        results.push({ sec_uid: uid, ok: false });
-        appendLog('error', `${uid.slice(0, 16)}... 粉丝团失败：${error.message}`, '粉丝团');
-      }
-    }
-    await loadAccounts();
-    const failures = results.filter((r) => !r.ok).length;
-    setMessage(failures ? `${results.length - failures} 个粉丝团已刷新，${failures} 个失败（缺 web_rid/未登录）` : `${results.length} 个粉丝团已刷新`);
-    setDetectingUids((current) => {
-      const next = new Set(current);
-      pendingTargets.forEach((uid) => next.delete(uid));
-      return next;
-    });
-  }
 
   function openPollModal(targets) {
     const runningTargets = (watch.targets || []).map((target) => target.sec_uid);
@@ -520,7 +492,7 @@ function App() {
       setPollOpen(false);
       const typeText = (data.watch && data.watch.poll_types && data.watch.poll_types.length)
         ? data.watch.poll_types.join('/')
-        : 'basic/live/fansclub';
+        : 'basic/live';
       setMessage(`轮询已启动：${pollTargets.length} 账户，间隔 ${interval}s，持续 ${durationMinutes}m，类型 ${typeText}`);
       appendLog('info', `轮询检测已启动：${pollTargets.length} 个账户，间隔 ${interval}s，持续 ${durationMinutes} 分钟，类型 ${typeText}`, '轮询');
     } catch (error) {
@@ -828,14 +800,6 @@ function App() {
           >
             刷人数
           </button>
-          <button
-            className="secondary"
-            onClick={() => detectFansclub(checkedTargets)}
-            disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
-            title="刷新选中账户的粉丝团数据"
-          >
-            刷团
-          </button>
           <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
             <Activity size={16} /> 轮询选中
           </button>
@@ -891,7 +855,6 @@ function App() {
               <span>直播间</span>
               <span>人数</span>
               <span>账号等级</span>
-              <span>粉丝团</span>
               <span>上次检测</span>
               <span>操作</span>
             </div>
@@ -917,7 +880,6 @@ function App() {
                 }}
                 onDetect={() => detectTargets([row.sec_uid])}
                 onDetectLiveRoom={() => detectLiveRoom([row.sec_uid])}
-                onDetectFansclub={() => detectFansclub([row.sec_uid])}
                 onPoll={() => openPollModal([row.sec_uid])}
                 onDelete={() => setDeleteTarget(row)}
               />
@@ -1101,7 +1063,7 @@ function App() {
   );
 }
 
-function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onDetectLiveRoom, onDetectFansclub, onPoll, onDelete }) {
+function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onDetectLiveRoom, onPoll, onDelete }) {
   const profile = row.profile || {};
   const live = profile.live_status === 1;
   const failed = row.last_ok === false;
@@ -1134,44 +1096,17 @@ function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging,
         </span>
       </span>
       <span>{hidden ? masked : live ? formatNumber(profile.live_viewers) : '-'}</span>
-      <span className="account-paygrade" title="anchor 本人荣耀等级（hover popup 解析，需 web_rid）">
+      <span title="账号等级 (anchor 本人 paygrade，hover popup 解析，需 web_rid)">
         {hidden ? masked : (
           profile.live_room?.anchor?.paygrade_level
             ? `Lv ${profile.live_room.anchor.paygrade_level}`
             : (profile.web_rid || (profile.live_room?.web_rid) ? '未探测' : '-')
         )}
       </span>
-      <span title="粉丝团">
-        {hidden ? masked : (() => {
-          const fc = profile.live_room?.fansclub;
-          if (!fc) return profile.web_rid ? '未探测' : '-';
-          // 后端在未登录态会回 {}；不能让 {} 误判成"已探测但没人"→ 退回未探测
-          const hasClubData = fc.club_name || (fc.total_fans_count && fc.total_fans_count > 0) || (fc.active_fans_count && fc.active_fans_count > 0);
-          if (!hasClubData) return profile.web_rid ? '未探测' : '-';
-          // 注意：max_level 是系统硬顶（所有 anchor 都 20），club_level 是
-          // "请求者自己在这个团里的等级"（未加入 = 0），两者都不能区分 anchor。
-          // 真有价值的字段：club_name(anchor 自己取的)、total_fans_count、
-          // active_fans_count、today_new_fans_count、popularity_rank_hour
-          // (数字越小越热门)、num_of_fans_group(子团数)、club_grade(团等级0-9,
-          // 真正能区分 anchor 的指标)、club_exp(团经验值)。
-          const parts = [];
-          if (fc.club_name) parts.push(fc.club_name);
-          if (fc.club_grade != null && fc.club_grade > 0) {
-            parts.push(`团 Lv${fc.club_grade}${fc.club_grade_max ? `/${fc.club_grade_max}` : ''}`);
-          }
-          if (fc.total_fans_count) parts.push(`${formatNumber(fc.total_fans_count)}粉`);
-          else if (fc.active_fans_count) parts.push(`${formatNumber(fc.active_fans_count)}活粉`);
-          if (fc.today_new_fans_count) parts.push(`今日+${formatNumber(fc.today_new_fans_count)}`);
-          if (fc.popularity_rank_hour) parts.push(`热度#${fc.popularity_rank_hour}`);
-          if (fc.num_of_fans_group) parts.push(`${fc.num_of_fans_group}分团`);
-          return parts.join(' · ') || '空团';
-        })()}
-      </span>
       <span>{hidden ? masked : formatTime(row.last_checked_at)}</span>
       <span className="row-actions" onClick={(event) => event.stopPropagation()}>
         <button onClick={onDetect} disabled={detecting} title="刷新基本信息（昵称/粉丝/直播状态）">基本</button>
         <button className="secondary" onClick={onDetectLiveRoom} disabled={detecting} title="仅刷新直播间人数（不刷其它字段）">人数</button>
-        <button className="secondary" onClick={onDetectFansclub} disabled={detecting} title="刷新粉丝团数据（团等级/成员数）">团</button>
         <button className="secondary" onClick={onPoll} disabled={busy}>轮询</button>
         <button className="secondary icon-button small-icon" onClick={onHide} title={hidden ? '恢复信息' : '隐藏信息'}>
           {hidden ? <Eye size={15} /> : <EyeOff size={15} />}
@@ -1192,7 +1127,6 @@ function DetailPanel({ row, hidden }) {
   const masked = '******';
   const display = (value) => (hidden ? masked : value);
   const anchorPaygrade = profile.live_room?.anchor?.paygrade_level;
-  const fansclub = profile.live_room?.fansclub || null;
   return (
     <section className="panel detail-panel">
       <div className="panel-head">
@@ -1213,23 +1147,6 @@ function DetailPanel({ row, hidden }) {
         <Info label="主播等级" value={display(anchorPaygrade ? `Lv ${anchorPaygrade}` : (profile.web_rid ? '未探测' : '需 web_rid'))} />
         <Info label="上次检测" value={display(formatTime(row.last_checked_at))} />
       </div>
-      {fansclub && Object.keys(fansclub).length > 0 && !hidden && (
-        <div className="fansclub-summary">
-          <h4>粉丝团</h4>
-          <div className="detail-grid">
-            <Info label="团名" value={fansclub.club_name || '-'} />
-            <Info label="粉丝团粉丝名" value={fansclub.fans_name || '-'} />
-            <Info label="团等级" value={fansclub.club_grade != null && fansclub.club_grade > 0 ? `Lv ${fansclub.club_grade}${fansclub.club_grade_max ? ` / ${fansclub.club_grade_max}` : ''}` : '-'} />
-            <Info label="团经验值" value={fansclub.club_exp ? formatNumber(fansclub.club_exp) : '-'} />
-            <Info label="赛季" value={fansclub.club_season || '-'} />
-            <Info label="总粉丝" value={formatNumber(fansclub.total_fans_count)} />
-            <Info label="活跃粉丝" value={formatNumber(fansclub.active_fans_count)} />
-            <Info label="今日新增" value={formatNumber(fansclub.today_new_fans_count)} />
-            <Info label="热度排名(小时)" value={fansclub.popularity_rank_hour ? `#${fansclub.popularity_rank_hour}` : '-'} />
-            <Info label="子团数" value={fansclub.num_of_fans_group || 0} />
-          </div>
-        </div>
-      )}
       {profile.live_room && profile.live_status === 1 && !hidden && (
         <LiveRoomCard data={profile.live_room} />
       )}
@@ -1643,7 +1560,7 @@ function PollModal({ targetCount, initialInterval, initialDurationMinutes, initi
   // 默认全选（兼容旧行为）；空数组=后端跑全部。
   const [pollTypes, setPollTypes] = React.useState(() => {
     if (Array.isArray(initialPollTypes)) return initialPollTypes.slice();
-    return ['basic', 'live', 'fansclub'];
+    return ['basic', 'live'];
   });
 
   function toggleType(name) {
@@ -1671,7 +1588,6 @@ function PollModal({ targetCount, initialInterval, initialDurationMinutes, initi
           <div className="poll-type-row">
             <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('basic')} onChange={() => toggleType('basic')} /> 基本信息</label>
             <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('live')} onChange={() => toggleType('live')} /> 直播间</label>
-            <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('fansclub')} onChange={() => toggleType('fansclub')} /> 粉丝团</label>
           </div>
         </div>
         <label className="field">

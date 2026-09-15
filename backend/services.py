@@ -27,7 +27,21 @@ from .config import (
     SETTINGS_FILE,
     USERS_FILE,
 )
-from .schemas import AddUserResult, AppSettings, DownloadJob, ProfileResult, SearchCandidate, UserEntry, WatchAdjustRequest, WatchEvent, WatchJob, WatchStatus, now_iso
+from .schemas import (
+    AddUserResult,
+    AppSettings,
+    DownloadJob,
+    ProgressLog,
+    ProgressStep,
+    ProfileResult,
+    SearchCandidate,
+    UserEntry,
+    WatchAdjustRequest,
+    WatchEvent,
+    WatchJob,
+    WatchStatus,
+    now_iso,
+)
 from .tool_loader import load_module
 from .live_room import LiveRoomService
 from .download_runner import run_download_subprocess
@@ -54,9 +68,12 @@ class _WatchJobState:
     last_checked_at: str = ""
     round: int = 0
     stopped: bool = False
+    # 轮询类型筛选：basic / live；空 = 全部（旧行为）
+    poll_types: tuple[str, ...] = ()
     live_now: set[str] = field(default_factory=set)
     profiles: dict[str, ProfileResult] = field(default_factory=dict)
     events: deque[WatchEvent] = field(default_factory=lambda: deque(maxlen=400))
+    progress: deque[ProgressStep] = field(default_factory=lambda: deque(maxlen=400))
     task: asyncio.Task | None = None
 
     def is_running(self) -> bool:
@@ -64,6 +81,17 @@ class _WatchJobState:
 
     def add_event(self, level: str, message: str, sec_uid: str = "") -> None:
         self.events.append(WatchEvent(time=now_iso(), level=level, message=message, sec_uid=sec_uid))
+
+    def add_progress(self, step: str, status: str, message: str, level: str = "info") -> None:
+        self.progress.append(
+            ProgressStep(
+                step=step,
+                status=status,
+                message=message,
+                level=level,
+                time=now_iso(),
+            )
+        )
 
 
 class MonitorService:
@@ -300,13 +328,13 @@ class MonitorService:
             except Exception:
                 pass
 
-    async def start_watch(self, target_ids: list[str], interval: int, duration_minutes: int = 30, end_at: str = "", job_id: str = "", label: str = "") -> WatchStatus:
+    async def start_watch(self, target_ids: list[str], interval: int, duration_minutes: int = 30, end_at: str = "", job_id: str = "", label: str = "", poll_types: list[str] | None = None) -> WatchStatus:
         async with self._watch_lock:
-            job = await self._start_watch_job(target_ids, interval, duration_minutes, end_at, job_id, label)
+            job = await self._start_watch_job(target_ids, interval, duration_minutes, end_at, job_id, label, poll_types or [])
             self._watch_current_id = job.id
             return self._job_to_status(job)
 
-    async def _start_watch_job(self, target_ids: list[str], interval: int, duration_minutes: int, end_at: str, job_id: str, label: str) -> "_WatchJobState":
+    async def _start_watch_job(self, target_ids: list[str], interval: int, duration_minutes: int, end_at: str, job_id: str, label: str, poll_types: list[str] | None = None) -> "_WatchJobState":
         targets = self.resolve_targets(target_ids)
         job_id = job_id or str(uuid.uuid4())
         # allow same-id restart (replace), but different ids coexist
@@ -322,6 +350,7 @@ class MonitorService:
                 pass
         started_at = now_iso()
         end_at_resolved = end_at or (datetime_from_iso(started_at) + timedelta(minutes=max(1, duration_minutes))).isoformat(timespec="seconds")
+        normalized_types = _normalize_poll_types(poll_types)
         job = _WatchJobState(
             id=job_id,
             label=label or f"轮询 {job_id[:8]}",
@@ -330,8 +359,10 @@ class MonitorService:
             duration_minutes=max(1, duration_minutes),
             end_at=end_at_resolved,
             started_at=started_at,
+            poll_types=normalized_types,
         )
-        job.add_event("info", f"Started live polling for {len(targets)} user(s).")
+        type_label = "/".join(normalized_types) if normalized_types else "basic/live"
+        job.add_event("info", f"Started live polling for {len(targets)} user(s), types={type_label}.")
         self._watch_jobs[job_id] = job
         job.task = asyncio.create_task(self._watch_loop(job_id))
         return job
@@ -406,6 +437,7 @@ class MonitorService:
         if not job:
             return WatchStatus(running=False)
         return WatchStatus(
+            id=job.id,
             running=job.is_running(),
             interval=job.interval,
             duration_minutes=job.duration_minutes,
@@ -413,9 +445,11 @@ class MonitorService:
             started_at=job.started_at,
             end_at=job.end_at,
             last_checked_at=job.last_checked_at,
+            poll_types=list(job.poll_types),
             targets=[UserEntry(**entry) for entry in job.targets],
             profiles=list(job.profiles.values()),
             events=list(job.events),
+            progress=list(job.progress),
         )
 
     def _job_to_model(self, job: "_WatchJobState") -> WatchJob:
@@ -429,9 +463,11 @@ class MonitorService:
             started_at=job.started_at,
             end_at=job.end_at,
             last_checked_at=job.last_checked_at,
+            poll_types=list(job.poll_types),
             targets=[UserEntry(**entry) for entry in job.targets],
             profiles=list(job.profiles.values()),
             events=list(job.events),
+            progress=list(job.progress),
         )
 
     async def shutdown(self) -> None:
@@ -441,7 +477,7 @@ class MonitorService:
         await self.live_room.close()
 
     async def _enrich_live_room(self, profile: ProfileResult) -> None:
-        """对有 web_rid 的 profile 补直播间详情（含 paygrade + fansclub）。
+        """对有 web_rid 的 profile 补直播间详情（含 paygrade）。
 
         触发条件：profile.web_rid 已知（monitor 抓到过直播后写库）。
         不再受 live_status==1 限制——web_rid 永久稳定，anchor 离线时也能开
@@ -477,6 +513,12 @@ class MonitorService:
 
         优先用入参 web_rid / room_id_str；否则按 sec_uid 从 profile_cache.json
         取 cached profile.web_rid（web_rid 已知即可触发，不依赖 live_status）。
+
+        探测成功后会回写 profile_cache.json 里对应账户的 profile.live_room，
+        并只刷新 live_room 段 + 派生字段（live_status=1 当 status==2 时）。
+        基础信息（昵称/粉丝/直播状态等）一概不写，与 basic 检测解耦。
+
+        探测失败（room=None）不写 cache，保留上一次结果。
         """
         if not web_rid and not room_id_str:
             if sec_uid:
@@ -484,39 +526,53 @@ class MonitorService:
                 if isinstance(cached, dict):
                     web_rid = str(cached.get("web_rid") or "")
                     room_id_str = str(cached.get("room_id") or "")
+                    # 兼容：web_rid 也可能只存于 live_room.web_rid（旧 cache 数据）。
+                    if not web_rid:
+                        web_rid = str((cached.get("live_room") or {}).get("web_rid") or "")
             if not web_rid and not room_id_str and not sec_uid:
                 return None
         async with self._live_room_sem:
             try:
-                return await self.live_room.fetch_overview(
+                room = await self.live_room.fetch_overview(
                     web_rid=web_rid, room_id_str=room_id_str, sec_uid=sec_uid
                 )
             except Exception:
-                return None
+                room = None
+        if sec_uid and room is not None:
+            self._merge_live_room_into_cache(sec_uid, room)
+        return room
 
-    async def fetch_fansclub(self, sec_uid: str) -> dict[str, Any] | None:
-        """手动探测 anchor 粉丝团元数据（供前端"刷粉丝团"按钮）。
+    async def fetch_live_viewers(self, sec_uid: str) -> dict[str, Any] | None:
+        """仅刷新直播间人数（profile.live_viewers / live_room.viewers）。
 
-        需要 cache 中已存 web_rid；未登录态返 20003 → 静默 None。
+        走与 fetch_live_room 相同的 enter 接口，但只取 viewers/user_count_str/
+        status 三个字段写回 cache；其它字段（title/anchor/audience_rank 等）保留
+        原值，避免探测耗时与数据抖动。status==2 时同步把 live_status=1 写回。
         """
         if not sec_uid:
             return None
         cached = read_profile_cache(PROFILE_CACHE_FILE).get(sec_uid, {}).get("profile")
         web_rid = ""
-        anchor_id = ""
+        room_id_str = ""
         if isinstance(cached, dict):
             web_rid = str(cached.get("web_rid") or "")
-            room = cached.get("live_room") or {}
-            anchor_id = str((room.get("anchor") or {}).get("uid") or "")
-        if not web_rid:
+            if not web_rid:
+                web_rid = str((cached.get("live_room") or {}).get("web_rid") or "")
+            room_id_str = str(cached.get("room_id") or "")
+        if not web_rid and not room_id_str:
             return None
         async with self._live_room_sem:
             try:
-                return await self.live_room.fetch_fansclub(
-                    anchor_id=anchor_id, web_rid=web_rid,
+                room = await self.live_room.fetch_overview(
+                    web_rid=web_rid, room_id_str=room_id_str, sec_uid=sec_uid
                 )
             except Exception:
-                return None
+                room = None
+        if not room:
+            return None
+        if sec_uid:
+            self._merge_live_viewers_into_cache(sec_uid, room)
+        return {"viewers": room.get("viewers") or 0, "user_count_str": room.get("user_count_str") or "", "status": room.get("status")}
 
     async def fetch_anchor_paygrade(self, sec_uid: str) -> int | None:
         """手动探测 anchor 本人 paygrade（hover popup），供前端"刷等级"按钮。
@@ -531,35 +587,160 @@ class MonitorService:
             return None
         async with self._live_room_sem:
             try:
-                return await self.live_room.fetch_anchor_paygrade(web_rid=web_rid)
+                level = await self.live_room.fetch_anchor_paygrade(web_rid=web_rid)
             except Exception:
-                return None
+                level = None
+        if isinstance(level, int) and sec_uid:
+            self._merge_anchor_paygrade_into_cache(sec_uid, level)
+        return level
+
+    def _merge_live_room_into_cache(self, sec_uid: str, room: dict[str, Any]) -> None:
+        """把手动探测到的直播间详情合并写回 cache。只更新 profile.live_room
+        与派生字段，基础信息（昵称/粉丝数等）一概不动。"""
+        cache = read_profile_cache(PROFILE_CACHE_FILE)
+        entry = cache.get(sec_uid)
+        if not isinstance(entry, dict):
+            return
+        profile = entry.get("profile")
+        if not isinstance(profile, dict):
+            return
+        profile["live_room"] = room
+        # 同时把 web_rid 提升到 profile 顶层（方便后续 paygrade 复用）
+        if room.get("web_rid") and not profile.get("web_rid"):
+            profile["web_rid"] = room["web_rid"]
+        # status==2 时把 live_status 也对齐；status==4 (回放) 不强行覆盖，避免误把
+        # 已下播账户重新标记成"直播中"。
+        if room.get("status") == 2:
+            profile["live_status"] = 1
+        entry["profile"] = profile
+        entry["last_checked_at"] = now_iso()
+        cache[sec_uid] = entry
+        PROFILE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROFILE_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def _merge_anchor_paygrade_into_cache(self, sec_uid: str, level: int) -> None:
+        """把 anchor 荣耀等级写回 cache 的 profile.live_room.anchor.paygrade_level。"""
+        if not isinstance(level, int):
+            return
+        cache = read_profile_cache(PROFILE_CACHE_FILE)
+        entry = cache.get(sec_uid)
+        if not isinstance(entry, dict):
+            return
+        profile = entry.get("profile")
+        if not isinstance(profile, dict):
+            return
+        room = profile.get("live_room")
+        if not isinstance(room, dict):
+            room = {}
+        anchor = room.get("anchor")
+        if not isinstance(anchor, dict):
+            anchor = {}
+        anchor["paygrade_level"] = level
+        room["anchor"] = anchor
+        profile["live_room"] = room
+        entry["profile"] = profile
+        entry["last_checked_at"] = now_iso()
+        cache[sec_uid] = entry
+        PROFILE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROFILE_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def _merge_live_viewers_into_cache(self, sec_uid: str, room: dict[str, Any]) -> None:
+        """只刷人数：profile.live_viewers + live_room.viewers/user_count_str/status。
+        其它字段（title/anchor/audience_rank 等）原样保留。"""
+        cache = read_profile_cache(PROFILE_CACHE_FILE)
+        entry = cache.get(sec_uid)
+        if not isinstance(entry, dict):
+            return
+        profile = entry.get("profile")
+        if not isinstance(profile, dict):
+            return
+        # 顶层 live_viewers 与 live_room.viewers/user_count_str 同步刷新
+        viewers = room.get("viewers")
+        if isinstance(viewers, int) and viewers >= 0:
+            profile["live_viewers"] = viewers
+        status = room.get("status")
+        # status==2 直播中；status==4 回放；status==0 等其它值视为已下播
+        if status == 2:
+            profile["live_status"] = 1
+        elif status in (0, 4):
+            profile["live_status"] = 0
+            profile["live_viewers"] = None  # 已下播人数清零，避免和缓存值混淆
+        # 更新 live_room 内对应字段，其它不动
+        room_existing = profile.get("live_room") if isinstance(profile.get("live_room"), dict) else {}
+        room_existing = dict(room_existing)  # 拷贝，不污染原引用
+        if isinstance(viewers, int) and viewers >= 0:
+            room_existing["viewers"] = viewers
+        if room.get("user_count_str"):
+            room_existing["user_count_str"] = room["user_count_str"]
+        if status is not None:
+            room_existing["status"] = status
+        profile["live_room"] = room_existing
+        entry["profile"] = profile
+        entry["last_checked_at"] = now_iso()
+        cache[sec_uid] = entry
+        PROFILE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROFILE_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     async def _watch_loop(self, job_id: str) -> None:
         job = self._watch_jobs.get(job_id)
         if not job:
             return
+        types = job.poll_types or ("basic", "live")
         while True:
             if job.end_at and datetime_from_iso(job.end_at) <= datetime_from_iso(now_iso()):
                 job.add_event("info", "Polling stopped after configured duration.")
+                job.add_progress("polling", "done", "轮询时长到，自动停止")
                 job.stopped = True
                 return
             job.round += 1
             job.last_checked_at = now_iso()
+            job.add_progress("round", "running", f"第 {job.round} 轮开始 (types={'/'.join(types)})")
             try:
-                results = await self.module.fetch_profiles_parallel(job.targets)
+                results: list[dict[str, Any] | None] = []
+                if "basic" in types:
+                    job.add_progress("basic", "running", f"并发拉取 {len(job.targets)} 个账户主页 (profile/other)", "info")
+                    try:
+                        results = await self.module.fetch_profiles_parallel(job.targets)
+                    except Exception as exc:
+                        if _is_pool_death(exc):
+                            await self._reset_monitor_pool()
+                            results = await self.module.fetch_profiles_parallel(job.targets)
+                        else:
+                            raise
+                    job.add_progress("basic", "done", "主页基础信息已更新")
+                else:
+                    # 不刷 basic 时也保证 profiles 表存在（用 cache 兜底），
+                    # 后续 live 才能挑出 web_rid。
+                    results = [self._cached_profile_for(entry) for entry in job.targets]
+                    job.add_progress("basic", "done", "已跳过主页（仅依赖缓存）")
                 for entry, info in zip(job.targets, results):
                     profile = self._to_profile_result(entry, info)
                     job.profiles[entry["sec_uid"]] = profile
                     self._record_live_transition(job, entry, profile)
-                # 对直播中的 profile 并发补直播间详情
-                await asyncio.gather(*(self._enrich_live_room(p) for p in job.profiles.values()))
+                if "live" in types:
+                    job.add_progress("live", "running", "并发探测直播间详情 (enter/ranklist/paygrade)")
+                    await asyncio.gather(*(self._enrich_live_room(p) for p in job.profiles.values()))
+                    job.add_progress("live", "done", "直播间详情已刷新")
                 upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in job.profiles.values()])
                 failed = sum(1 for profile in job.profiles.values() if not profile.ok)
                 job.add_event("info", f"Round {job.round}: checked {len(job.targets)} user(s), failed {failed}.")
+                job.add_progress("round", "done", f"第 {job.round} 轮完成：成功 {len(job.targets) - failed}/{len(job.targets)}")
             except Exception as exc:
                 job.add_event("error", f"Polling failed: {exc}")
+                job.add_progress("round", "error", f"第 {job.round} 轮失败：{exc}", "error")
             await asyncio.sleep(job.interval)
+
+    def _cached_profile_for(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """不刷 basic 时，从 profile_cache.json 里捞最近一次的结果填回去，
+        让后续 live 也能继续运行（web_rid 已经持久化）。"""
+        cached = read_profile_cache(PROFILE_CACHE_FILE).get(entry["sec_uid"], {}).get("profile")
+        return cached if isinstance(cached, dict) else None
 
     def _record_live_transition(self, job: "_WatchJobState", entry: dict[str, Any], profile: ProfileResult) -> None:
         sec_uid = entry["sec_uid"]
@@ -604,6 +785,21 @@ class MonitorService:
             profile=profile,
         )
 
+
+
+def _normalize_poll_types(values: list[str] | None) -> tuple[str, ...]:
+    """规范化轮询类型白名单：去空/去重/保序/限定已知键。空 → 返回空 tuple 表示"全部"。"""
+    if not values:
+        return ()
+    allowed = {"basic", "live"}
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values:
+        v = str(raw or "").strip().lower()
+        if v in allowed and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return tuple(out)
 
 
 def _is_pool_death(exc: BaseException) -> bool:

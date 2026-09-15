@@ -210,15 +210,24 @@ button:disabled {
   padding-right: 4px;
 }
 
+.account-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #fff;
+  /* sticky 元素需要 box-shadow 才能盖住下面滚上来的 row */
+  box-shadow: 0 1px 0 #d8e9f8;
+}
+
 .account-header,
 .account-row {
   display: grid;
   grid-template-columns:
     28px
     minmax(120px, 1.15fr)
-    minmax(80px, .68fr)
     minmax(86px, .72fr)
     minmax(70px, .58fr)
+    minmax(80px, .68fr)
     minmax(132px, .95fr)
     minmax(244px, 1.2fr);
   gap: 12px;
@@ -945,6 +954,46 @@ button:disabled {
   color: #5a6b78;
   border-left: 2px solid #c4ced6;
   padding-left: 6px;
+}
+
+.watch-job-progress {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px dashed #d8e4ed;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #f9fcff;
+}
+
+.watch-job-progress-line {
+  display: grid;
+  grid-template-columns: 18px 92px 1fr;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  color: #34516d;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+
+.watch-job-progress-line.running { color: #1b6fc2; }
+.watch-job-progress-line.error   { color: #ba1a1a; }
+.watch-job-progress-line.done    { color: #2f8f46; }
+
+.poll-type-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 6px;
+}
+
+.notice.multi {
+  white-space: pre-wrap;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .watch-job-actions {

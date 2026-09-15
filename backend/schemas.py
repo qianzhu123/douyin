@@ -6,6 +6,23 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+ProgressLevel = Literal["info", "live", "offline", "error"]
+
+
+class ProgressStep(BaseModel):
+    """进度流的一条记录：单步名 + 状态 + 文案。"""
+
+    step: str
+    status: Literal["pending", "running", "done", "error"] = "pending"
+    message: str = ""
+    level: ProgressLevel = "info"
+    time: str = ""
+
+
+class ProgressLog(BaseModel):
+    steps: list[ProgressStep] = Field(default_factory=list)
+
+
 class UserEntry(BaseModel):
     label: str = ""
     url: str
@@ -38,7 +55,7 @@ class LiveRoomRequest(BaseModel):
     room_id_str: str = ""
 
 
-class FansclubRequest(BaseModel):
+class LiveViewersRequest(BaseModel):
     sec_uid: str
 
 
@@ -101,6 +118,9 @@ class WatchStartRequest(BaseModel):
     duration_minutes: int = 30
     id: str = ""
     label: str = ""
+    # 轮询类型筛选；空 = 全跑（向后兼容）。"basic"=只刷主页基本信息，
+    # "live"=只刷直播间（需 web_rid）。
+    poll_types: list[str] = Field(default_factory=list)
 
 
 class WatchAdjustRequest(BaseModel):
@@ -117,6 +137,7 @@ class WatchEvent(BaseModel):
 
 
 class WatchStatus(BaseModel):
+    id: str = ""
     running: bool = False
     interval: int = 30
     duration_minutes: int = 30
@@ -124,9 +145,11 @@ class WatchStatus(BaseModel):
     started_at: str = ""
     end_at: str = ""
     last_checked_at: str = ""
+    poll_types: list[str] = Field(default_factory=list)
     targets: list[UserEntry] = Field(default_factory=list)
     profiles: list[ProfileResult] = Field(default_factory=list)
     events: list[WatchEvent] = Field(default_factory=list)
+    progress: list[ProgressStep] = Field(default_factory=list)
 
 
 class WatchJob(BaseModel):
@@ -139,9 +162,11 @@ class WatchJob(BaseModel):
     started_at: str = ""
     end_at: str = ""
     last_checked_at: str = ""
+    poll_types: list[str] = Field(default_factory=list)
     targets: list[UserEntry] = Field(default_factory=list)
     profiles: list[ProfileResult] = Field(default_factory=list)
     events: list[WatchEvent] = Field(default_factory=list)
+    progress: list[ProgressStep] = Field(default_factory=list)
 
 
 class WatchJobsResult(BaseModel):

@@ -1,8 +1,10 @@
 from pathlib import Path
+import json
 
 from backend.config import DOWNLOAD_OUTPUT_DIR, DOWNLOADER_DIR, MONITOR_DIR
 from backend.services import (
     DownloadService,
+    LiveRoomService,
     MonitorService,
     _extract_duration_from_payload,
     _extract_preview_video_duration,
@@ -183,22 +185,36 @@ def test_default_download_output_is_user_downloads():
     assert DOWNLOAD_OUTPUT_DIR == Path.home() / "Downloads"
 
 
-def test_download_job_runs_from_sync_context_and_records_logs():
-    class FakeDownloader:
-        @staticmethod
-        def download_douyin(url, output_dir, mode, fetch_comments=False, selected_indices=None, wrap_folder=False):
-            return {
-                "type": "video",
-                "title": "demo",
-                "url": url,
-                "output_dir": output_dir,
-                "mode": mode,
-                "wrap_folder": wrap_folder,
-            }
+def test_download_job_runs_from_sync_context_and_records_logs(monkeypatch):
+    """job 在共享线程池里调度，每个 URL 经 run_download_subprocess 隔离执行。"""
+    import threading
+
+    import backend.services as services
+
+    def fake_run_subprocess(url, output_dir, mode, comments=False, selected_indices=None,
+                            wrap_folder=False, timeout=None):
+        return {
+            "type": "video",
+            "title": "demo",
+            "url": url,
+            "output_dir": output_dir,
+            "mode": mode,
+            "wrap_folder": wrap_folder,
+        }
+
+    monkeypatch.setattr(services, "run_download_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(
+        services,
+        "load_app_settings",
+        lambda: services.AppSettings(
+            download_output_dir=str(Path.home() / "Downloads"), wrap_download_folder=False
+        ),
+    )
 
     service = DownloadService.__new__(DownloadService)
-    service.module = FakeDownloader()
     service.jobs = {}
+    service._pending = {}
+    service._state_lock = threading.Lock()
 
     job = service.create_job("https://www.douyin.com/video/111", 1, "", False)
     deadline = time.time() + 2
@@ -215,15 +231,21 @@ def test_download_job_runs_from_sync_context_and_records_logs():
     assert any("Finished" in entry["message"] for entry in finished.logs)
 
 
-def test_download_job_uses_custom_output_dir_and_wrap_folder(tmp_path):
-    class FakeDownloader:
-        @staticmethod
-        def download_douyin(url, output_dir, mode, fetch_comments=False, selected_indices=None, wrap_folder=False):
-            return {"type": "video", "output_dir": output_dir, "wrap_folder": wrap_folder}
+def test_download_job_uses_custom_output_dir_and_wrap_folder(tmp_path, monkeypatch):
+    import threading
+
+    import backend.services as services
+
+    def fake_run_subprocess(url, output_dir, mode, comments=False, selected_indices=None,
+                            wrap_folder=False, timeout=None):
+        return {"type": "video", "output_dir": output_dir, "wrap_folder": wrap_folder}
+
+    monkeypatch.setattr(services, "run_download_subprocess", fake_run_subprocess)
 
     service = DownloadService.__new__(DownloadService)
-    service.module = FakeDownloader()
     service.jobs = {}
+    service._pending = {}
+    service._state_lock = threading.Lock()
 
     job = service.create_job("https://www.douyin.com/video/111", 1, str(tmp_path), False, wrap_folder=True)
     deadline = time.time() + 2
@@ -231,6 +253,7 @@ def test_download_job_uses_custom_output_dir_and_wrap_folder(tmp_path):
         time.sleep(0.02)
 
     finished = service.get_job(job.id)
+    assert finished.status == "done"
     assert finished.output_dir == str(tmp_path)
     assert finished.wrap_folder is True
     assert finished.results[0]["output_dir"] == str(tmp_path)
@@ -521,6 +544,63 @@ def test_query_profiles_does_not_retry_on_unrelated_error(monkeypatch):
 
     assert FakeMonitor.close_called == 0  # 没触发 close_browser
     assert FakeMonitor.fetch_calls == 1   # 没重试
+
+
+def test_fetch_live_room_writes_back_only_live_room_segment(tmp_path, monkeypatch):
+    """手动刷直播间详情应该写回 cache，但只更新 live_room 段 + 派生字段，
+    不能覆盖基础信息（昵称/粉丝数等）。"""
+    import asyncio
+    from backend.services import MonitorService, PROFILE_CACHE_FILE
+
+    cache_file = tmp_path / "profile_cache.json"
+    sec_uid = "MS4wLjABAAAAWriteBack"
+    cache_file.write_text(json.dumps({
+        sec_uid: {
+            "ok": True,
+            "error": "",
+            "profile": {
+                "nickname": "原昵称",
+                "follower_count": 12345,
+                "live_status": 0,
+                "web_rid": "9999",
+                "live_room": None,
+            },
+            "last_checked_at": "2026-09-01T00:00:00",
+        }
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr("backend.services.PROFILE_CACHE_FILE", cache_file)
+    monkeypatch.setattr("backend.services.read_profile_cache",
+                        lambda _f=None: json.loads(cache_file.read_text(encoding="utf-8")))
+
+    service = MonitorService.__new__(MonitorService)
+    service.live_room = LiveRoomService.__new__(LiveRoomService)
+    service._live_room_sem = asyncio.Semaphore(3)
+    new_room = {
+        "web_rid": "9999",
+        "status": 2,
+        "title": "测试直播间",
+        "viewers": 999,
+        "anchor": {"nickname": "anchorX", "paygrade_level": 30},
+        "fansclub": {"club_name": "X团", "total_fans_count": 100},
+    }
+    async def _fake_fetch(*a, **kw):
+        return new_room
+    monkeypatch.setattr(service.live_room, "fetch_overview", _fake_fetch)
+
+    result = asyncio.run(service.fetch_live_room(sec_uid=sec_uid, web_rid="9999"))
+
+    assert result == new_room
+    cached = json.loads(cache_file.read_text(encoding="utf-8"))[sec_uid]
+    profile = cached["profile"]
+    # 基础信息不能被改
+    assert profile["nickname"] == "原昵称"
+    assert profile["follower_count"] == 12345
+    # 派生字段对齐
+    assert profile["live_status"] == 1
+    assert profile["live_room"]["title"] == "测试直播间"
+    # last_checked_at 应被刷新
+    assert cached["last_checked_at"] >= "2026-09-01T00:00:00"
+
 
 
 class TargetClosedError(Exception):
