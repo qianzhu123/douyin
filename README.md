@@ -44,12 +44,30 @@ If frontend dependencies are missing, the launcher runs `npm install` before sta
 
 ## Browser Extensions
 
-Two local Chrome/Edge Manifest V3 extensions live under `tools/douyin_extensions/`:
+单 Chrome/Edge Manifest V3 扩展位于 `tools/douyin_extensions/douyin-helper/`：
 
-- `downloader/` — Douyin Downloader Helper. On any Douyin web page (video / note / short link / recommended / search / liked / following / profile modal), shows a floating round button in the top-right that submits the current URL to the local downloader.
-- `live-overlay/` — Douyin 直播间人数悬浮窗. On any `live.douyin.com/<web_rid>` room, shows a floating round button with the current viewer count; clicking it expands a detail panel with room title, anchor, like / total-user counts, and a link to the local dashboard.
+- 自动识别当前页面（视频/笔记/直播间/个人主页/短链/聚合页），右上角显示圆形悬浮按钮；
+- 视频/笔记场景 → 一键提交下载；个人主页 → 一键导入本地账户列表；
+  直播间 → 就地检测展示房间/主播/当前观看/累计观看/本场点赞（MAIN world 捕获
+  `webcast/room/web/enter/`；累计观看达 10万 后永远展示 `10万+`）；
+- 提供 "打开本地控制台" 和 "重启本地后端" 两个共用动作。
+- 所有本地后端调用走扩展的 background service worker，避开 HTTPS 页面的 mixed-content 限制。
 
-Both extensions call the local backend at `http://127.0.0.1:8000`; they do not download media themselves.
+扩展只调用 `http://127.0.0.1:8000`，不直接下载媒体。
+
+## Polling Steps & Progress
+
+每个检测接口（搜索 / 添加 / 单检 / 直播间 / 观看人数 / 轮询）都会返回结构化的 `progress`
+步骤流，前端把它附在 `message` 上方，告诉你当前正在执行哪一步、是否已报错。
+轮询任务本身也有一个滚动进度窗（`watch_jobs[i].progress`），每轮显示
+basic / live 两段是否完成。
+
+## Polling Scope
+
+启动轮询时可在弹窗里勾选 "基本信息 / 直播间" 中的部分，
+不勾选 = 全部跑（旧行为，向后兼容）。后端 `_watch_loop` 会按所选类型跳过对应探测，
+避免在已知的"从未开播"账户上白跑直播间探测。粉丝团探测已整体舍弃
+（实测 max_level 全 20 / club_level 都 0，区分度无价值）。
 
 ## Account Data
 

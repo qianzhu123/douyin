@@ -115,8 +115,11 @@ def render(out_dir: Path, draw_glyph) -> None:
 def main() -> None:
     d_root = ROOT / "downloader" / "icons"
     l_root = ROOT / "live-overlay" / "icons"
+    h_root = ROOT / "douyin-helper" / "icons"
     render(d_root, draw_download_glyph)
     render(l_root, draw_eye_glyph)
+    # 合并扩展沿用 downloader 的下载图标，但配色更深，象征"统一"。
+    render(h_root, draw_download_glyph)
 
 
 if __name__ == "__main__":
