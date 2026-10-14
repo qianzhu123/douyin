@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Loader2, Plus, RefreshCcw, RotateCw, Search, Trash2 } from 'lucide-react';
+import { Activity, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Loader2, Plus, RefreshCcw, RotateCw, Search, Square, Trash2 } from 'lucide-react';
 import { formatDuration } from './duration.js';
 import { buildDownloadInputText, mergeDownloadPreviews, removeDownloadPreviewItem } from './downloadPreviewState.js';
 import './styles.css';
