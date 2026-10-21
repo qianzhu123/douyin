@@ -180,8 +180,10 @@ class DownloadRequest(BaseModel):
     output_dir: str = ""
     wrap_folder: bool = False
     comments: bool = False
-    # 图片目标格式: auto=跟随源格式(默认), jpg/png/webp=统一转码
-    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp)$")
+    # 图片目标格式: auto=跟随源格式(默认), jpg/png/webp/avif=统一转码
+    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp|avif)$")
+    # 视频目标格式: auto=mp4原始字节(默认), mp4=重编码, webm=VP9+Opus, audio=提取mp3音轨
+    video_format: str = Field(default="auto", pattern="^(auto|mp4|webm|audio)$")
     selected_urls: list[str] = Field(default_factory=list)
     selected_media: dict[str, list[int]] = Field(default_factory=dict)
 
@@ -204,6 +206,7 @@ class DownloadJob(BaseModel):
     wrap_folder: bool = False
     comments: bool = False
     image_format: str = "auto"
+    video_format: str = "auto"
     selected_media: dict[str, list[int]] = Field(default_factory=dict)
     cancel_requested: bool = False
     logs: list[dict[str, str]] = Field(default_factory=list)
@@ -214,14 +217,16 @@ class DownloadJob(BaseModel):
 class AppSettings(BaseModel):
     download_output_dir: str = ""
     wrap_download_folder: bool = False
-    # 默认图片下载格式: auto=跟随源格式(默认), jpg/png/webp=统一转码
-    image_format: str = "auto"
+    # 默认媒体下载格式: auto=跟随源格式(默认)
+    image_format: str = "auto"   # jpg/png/webp/avif=统一转码
+    video_format: str = "auto"   # mp4/webm/audio=ffmpeg 转码
 
 
 class AppSettingsRequest(BaseModel):
     download_output_dir: str = ""
     wrap_download_folder: bool = False
-    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp)$")
+    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp|avif)$")
+    video_format: str = Field(default="auto", pattern="^(auto|mp4|webm|audio)$")
 
 
 def now_iso() -> str:

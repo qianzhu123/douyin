@@ -2,6 +2,7 @@
 
 import json
 import re
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -653,32 +654,60 @@ def _scroll_and_collect_images(page, max_presses=80) -> list[str]:
     return page.evaluate("""() => { window.__collectImages(); const b={}; for(const u of window.__imgUrls){const k=u.replace(/~[^:]*/,'').replace(/\\?.*/,''); if(!b[k]||u.includes('aweme-images-v2:300')||u.includes('aweme-images:q75')) b[k]=u; } return Object.values(b); }""") or []
 
 
-def _convert_image(src_path: Path, target_ext: str) -> int:
-    """把已落盘的图片转成目标格式（原地替换，返回转码后字节数）。
+def _convert_image(src_path: Path, dst_path: Path) -> int:
+    """把已落盘的图片转成目标格式（src→dst，返回转码后字节数）。
 
     JPEG 不支持透明通道：带 alpha 的图先在白底上合成再存，避免直接 convert('RGB')
-    时透明区变黑。转换失败时保留原文件并抛异常，由调用方决定降级策略。
+    时透明区变黑。AVIF 走 ffmpeg（Pillow 的 avif 插件在本机缺 codec），其余用 Pillow。
+    目标格式由 dst_path 的扩展名决定，转换失败时 dst 会被清掉并抛异常，源文件不动。
     """
     from PIL import Image
 
-    with Image.open(src_path) as im:
-        im.load()
-        if target_ext == ".jpg":
-            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
-                rgba = im.convert("RGBA")
-                bg = Image.new("RGB", rgba.size, (255, 255, 255))
-                bg.paste(rgba, mask=rgba.getchannel("A"))
-                im = bg
+    target_ext = dst_path.suffix.lower()
+    if target_ext == ".jpeg":
+        target_ext = ".jpg"
+
+    try:
+        if target_ext == ".avif":
+            out_tmp = dst_path.with_suffix(dst_path.suffix + ".tmp")
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                   "-i", str(src_path),
+                   "-c:v", "libaom-av1", "-still-picture", "1", "-qp", "90",
+                   "-f", "avif", str(out_tmp)]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            except FileNotFoundError:
+                raise RuntimeError("未找到 ffmpeg，无法转换 AVIF")
+            except subprocess.TimeoutExpired as e:
+                out_tmp.unlink(missing_ok=True)
+                raise RuntimeError("ffmpeg AVIF 转码超时(300s)") from e
+            if proc.returncode != 0 or not out_tmp.exists() or out_tmp.stat().st_size == 0:
+                out_tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"ffmpeg AVIF 转码失败: {(proc.stderr or '')[:200]}")
+            out_tmp.replace(dst_path)
+            return dst_path.stat().st_size
+
+        with Image.open(src_path) as im:
+            im.load()
+            if target_ext in (".jpg",):
+                if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                    rgba = im.convert("RGBA")
+                    bg = Image.new("RGB", rgba.size, (255, 255, 255))
+                    bg.paste(rgba, mask=rgba.getchannel("A"))
+                    im = bg
+                else:
+                    im = im.convert("RGB")
+                im.save(dst_path, "JPEG", quality=95)
+            elif target_ext == ".png":
+                im.save(dst_path, "PNG")
+            elif target_ext == ".webp":
+                im.save(dst_path, "WEBP", quality=95)
             else:
-                im = im.convert("RGB")
-            im.save(src_path, "JPEG", quality=95)
-        elif target_ext == ".png":
-            im.save(src_path, "PNG")
-        elif target_ext == ".webp":
-            im.save(src_path, "WEBP", quality=95)
-        else:
-            raise ValueError(f"不支持的图片格式: {target_ext}")
-    return src_path.stat().st_size
+                raise ValueError(f"不支持的图片格式: {target_ext}")
+        return dst_path.stat().st_size
+    except Exception:
+        dst_path.unlink(missing_ok=True)
+        raise
 
 
 def _resolve_image_target(supplied: str) -> str:
@@ -686,7 +715,53 @@ def _resolve_image_target(supplied: str) -> str:
     if not supplied or supplied == "auto":
         return ""
     ext = supplied.lower().lstrip(".")
-    return f".{ext}" if ext in ("jpg", "jpeg", "png", "webp") else ""
+    return f".{ext}" if ext in ("jpg", "jpeg", "png", "webp", "avif") else ""
+
+
+# 视频目标格式 → (输出扩展名, ffmpeg 目标容器/编码)。None 表示跟随源格式不转码。
+VIDEO_FORMATS = {
+    "auto": None,
+    "mp4": (".mp4", ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]),
+    "webm": (".webm", ["-c:v", "libvpx-vp9", "-crf", "34", "-b:v", "0",
+                       "-c:a", "libopus", "-b:a", "128k"]),
+    "audio": (".mp3", ["-vn", "-c:a", "libmp3lame", "-q:a", "2"]),
+}
+
+
+def _resolve_video_target(supplied: str) -> tuple[str, list[str]] | tuple[str, None]:
+    """规整视频格式参数，返回 (目标扩展名, ffmpeg 编码参数或 None)。"""
+    key = (supplied or "auto").lower().strip().lstrip(".")
+    if key in ("jpeg", "jpg"):
+        return (None, None)  # 图片格式参数误传到视频位：不转码
+    if key not in VIDEO_FORMATS:
+        return (None, None)
+    spec = VIDEO_FORMATS[key]
+    return spec if spec is not None else (None, None)
+
+
+def _convert_video(src_path: Path, target_ext: str, codec_args: list[str]) -> Path:
+    """用 ffmpeg 把视频转成目标格式，返回转码后文件路径。
+
+    成功则删除源文件；失败则保留源文件并抛异常，由调用方降级保留原始 mp4。
+    """
+    out_path = src_path.with_suffix(target_ext)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-i", str(src_path), *codec_args, str(out_path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        raise RuntimeError("未找到 ffmpeg，无法转换视频格式")
+    except subprocess.TimeoutExpired as e:
+        if out_path.exists():
+            out_path.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg 转码超时(600s)") from e
+    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+        if out_path.exists():
+            out_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg 转码失败: {(proc.stderr or '')[:200]}")
+    src_path.unlink(missing_ok=True)
+    return out_path
 
 
 def _sniff_image_ext(url: str) -> str:
@@ -699,12 +774,30 @@ def _sniff_image_ext(url: str) -> str:
     return ext
 
 
+def _save_video_file(url: str, file_path: Path, video_target: tuple[str, list[str]] | tuple[str, None]) -> tuple[int, Path]:
+    """下载视频并按 video_target 落盘，返回 (字节数, 最终路径)。
+
+    - target 为 (None, None): 跟随源格式（mp4 原始字节，与旧版一致，零转码）。
+    - 有目标格式: 先按 mp4 落盘，再用 ffmpeg 转码；失败降级保留原始 mp4。
+    """
+    size = _download_file(url, file_path)
+    target_ext, codec_args = video_target
+    if target_ext is None:
+        return size, file_path
+    try:
+        converted = _convert_video(file_path, target_ext, codec_args)
+        return converted.stat().st_size, converted
+    except Exception as e:
+        _print(f"  [!] 视频转码失败，保留原始格式: {e}")
+        return file_path.stat().st_size, file_path
+
+
 def _download_image_via_playwright(page, url, output_path, target_ext: str = "") -> tuple[int, Path]:
     """下载图片并按 target_ext 落盘，返回 (字节数, 最终路径)。
 
     - target_ext 为空: 跟随源格式（按 URL 嗅探），行为与旧版一致。
-    - target_ext 与源格式不一致: 先写 .tmp，转码为目标格式；转码失败保留原始
-      字节和源扩展名（降级不丢图）。
+    - target_ext 与源格式不一致: 原始字节写 .tmp → 转码到最终路径；
+      转码失败降级回源扩展名 + 原始字节（不丢图）。
     最终路径可能与传入 output_path 不同（后缀被替换成实际落盘格式）。
     """
     resp = page.request.get(url)
@@ -713,22 +806,32 @@ def _download_image_via_playwright(page, url, output_path, target_ext: str = "")
     body = resp.body()
 
     src_ext = _sniff_image_ext(url)
-    final_ext = target_ext or src_ext
-    final_path = output_path.with_suffix(final_ext)
-    tmp = final_path.with_suffix(final_path.suffix + ".tmp")
-    tmp.write_bytes(body)
+    final_path = output_path.with_suffix(target_ext or src_ext)
 
-    if target_ext and target_ext != src_ext:
-        try:
-            _convert_image(tmp, target_ext)
-        except Exception as e:
-            _print(f"  [!] 转码 {src_ext} → {target_ext} 失败，保留原始格式: {e}")
-            final_path = output_path.with_suffix(src_ext)
+    if not target_ext or target_ext == src_ext:
+        # 零转码: 原始字节直落最终路径（沿用 .tmp 原子改名约定）
+        tmp = final_path.with_suffix(final_path.suffix + ".tmp")
+        tmp.write_bytes(body)
+        if final_path.exists():
+            final_path.unlink()
+        tmp.rename(final_path)
+        return final_path.stat().st_size, final_path
 
-    if final_path.exists():
-        final_path.unlink()
-    tmp.rename(final_path)
-    return final_path.stat().st_size, final_path
+    # 需要转码: 原始字节落 .tmp → 转到最终路径
+    src_tmp = final_path.with_suffix(final_path.suffix + ".tmp")
+    src_tmp.write_bytes(body)
+    try:
+        _convert_image(src_tmp, final_path)
+        src_tmp.unlink(missing_ok=True)
+        return final_path.stat().st_size, final_path
+    except Exception as e:
+        # 降级: 保留原始格式和原始字节（把 .tmp 原子改名到源扩展名路径）
+        _print(f"  [!] 转码 {src_ext} → {target_ext} 失败，保留原始格式: {e}")
+        final_path = output_path.with_suffix(src_ext)
+        if final_path.exists():
+            final_path.unlink()
+        src_tmp.rename(final_path)
+        return final_path.stat().st_size, final_path
 
 
 # ════════════════════════════════════════════════════════════════
@@ -935,7 +1038,8 @@ def _media_file_path(folder: Path, base_path: Path, title: str, index: int, ext:
 
 def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                     fetch_comments: bool = False, selected_indices: list | None = None,
-                    wrap_folder: bool = False, image_format: str = "auto") -> dict:
+                    wrap_folder: bool = False, image_format: str = "auto",
+                    video_format: str = "auto") -> dict:
     """
     下载抖音视频/图集 + 互动数据（可选评论）
     每个 URL 用独立的浏览器实例，可多线程并行。
@@ -947,9 +1051,12 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
         selected_indices: 图集/笔记类型时仅下载指定序号（1-based）的图片/视频；
                           None 表示全部下载。对单视频类型忽略。
         wrap_folder:     是否在输出根目录下按标题创建子文件夹
-        image_format:    图片目标格式: "auto"=跟随源格式(默认)，或 "jpg"/"png"/"webp"。
+        image_format:    图片目标格式: "auto"=跟随源格式(默认)，或 "jpg"/"png"/"webp"/"avif"。
                          与源格式不同时下载后本地转码；转码失败保留原始格式。
-                         视频不受影响（始终 mp4 原始字节）。
+        video_format:    视频目标格式: "auto"=mp4原始字节(默认，零转码)，"mp4"=重编码，
+                         "webm"=VP9+Opus，"audio"=仅提取音轨mp3。混合链接(slide)中
+                         视频按此参数、图片按 image_format 各自独立处理。
+                         依赖 ffmpeg；转码失败降级保留原始 mp4。
 
     Returns:
         dict: 下载结果
@@ -965,6 +1072,9 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
     target_ext = _resolve_image_target(image_format)
     if target_ext:
         _print(f"[*] 图片目标格式: {target_ext}（源格式不同时自动转码）")
+    video_target = _resolve_video_target(video_format)
+    if video_target[0] is not None:
+        _print(f"[*] 视频目标格式: {video_target[0]}（ffmpeg 转码）")
 
     _print("[*] 正在启动浏览器...")
 
@@ -1201,12 +1311,13 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
 
                 # ── mode 1/3: 下载视频 ──
                 if mode in (1, 3):
-                    filename = _sanitize_filename(title) + ".mp4"
-                    file_path = out_dir / filename
+                    file_path = out_dir / (_sanitize_filename(title) + ".mp4")
                     _print("[*] 正在下载视频...")
-                    file_size = _download_file(video_url, file_path)
-                    result["file_path"] = str(file_path)
+                    file_size, saved_path = _save_video_file(video_url, file_path, video_target)
+                    result["file_path"] = str(saved_path)
                     result["file_size"] = file_size
+                    if saved_path != file_path:
+                        _print(f"[.] 已转码保存为: {saved_path.name}")
 
                 return result
 
@@ -1292,11 +1403,13 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                                 _print(f"  [{idx}/{len(slides)}] ! 第 {idx} 页视频: 无法获取视频地址，跳过")
                                 fail_count += 1
                                 continue
-                            filename = _sanitize_filename(title) + f"_S{idx:02d}.mp4"
-                            file_path = folder / filename
+                            file_path = folder / (_sanitize_filename(title) + f"_S{idx:02d}.mp4")
                             _print(f"  [{idx}/{len(slides)}] 下载视频: {file_path.name}")
                             try:
-                                total_size += _download_file(video_url, file_path)
+                                size, saved_path = _save_video_file(video_url, file_path, video_target)
+                                total_size += size
+                                if saved_path != file_path:
+                                    _print(f"  [.] 已转码保存为: {saved_path.name}")
                                 ok_count += 1
                             except Exception as e:
                                 fail_count += 1

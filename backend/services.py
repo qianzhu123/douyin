@@ -844,14 +844,16 @@ def load_app_settings() -> AppSettings:
         download_output_dir=normalize_download_dir(raw.get("download_output_dir") or settings.download_output_dir),
         wrap_download_folder=bool(raw.get("wrap_download_folder", settings.wrap_download_folder)),
         image_format=str(raw.get("image_format") or "auto"),
+        video_format=str(raw.get("video_format") or "auto"),
     )
 
 
-def save_app_settings(download_output_dir: str, wrap_download_folder: bool, image_format: str = "auto") -> AppSettings:
+def save_app_settings(download_output_dir: str, wrap_download_folder: bool, image_format: str = "auto", video_format: str = "auto") -> AppSettings:
     settings = AppSettings(
         download_output_dir=normalize_download_dir(download_output_dir),
         wrap_download_folder=bool(wrap_download_folder),
-        image_format=image_format if image_format in ("auto", "jpg", "jpeg", "png", "webp") else "auto",
+        image_format=image_format if image_format in ("auto", "jpg", "jpeg", "png", "webp", "avif") else "auto",
+        video_format=video_format if video_format in ("auto", "mp4", "webm", "audio") else "auto",
     )
     path = Path(settings.download_output_dir)
     if path.exists() and not path.is_dir():
@@ -878,7 +880,7 @@ class DownloadService:
         self._pending: dict[str, int] = {}
         self._state_lock = threading.Lock()
 
-    def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None, selected_media: dict[str, list[int]] | None = None, wrap_folder: bool = False, image_format: str = "auto") -> DownloadJob:
+    def create_job(self, text: str, mode: int, output_dir: str, comments: bool, selected_urls: list[str] | None = None, selected_media: dict[str, list[int]] | None = None, wrap_folder: bool = False, image_format: str = "auto", video_format: str = "auto") -> DownloadJob:
         urls = extract_douyin_urls(text)
         if selected_urls:
             selected = set(selected_urls)
@@ -904,7 +906,8 @@ class DownloadService:
             output_dir=resolved_output,
             wrap_folder=wrap_folder,
             comments=comments,
-            image_format=image_format if image_format in ("auto", "jpg", "jpeg", "png", "webp") else "auto",
+            image_format=image_format if image_format in ("auto", "jpg", "jpeg", "png", "webp", "avif") else "auto",
+            video_format=video_format if video_format in ("auto", "mp4", "webm", "audio") else "auto",
             selected_media=normalized_media,
         )
         self.jobs[job.id] = job
@@ -1020,6 +1023,7 @@ class DownloadService:
                 wanted,
                 job.wrap_folder,
                 image_format=job.image_format,
+                video_format=job.video_format,
                 timeout=DOWNLOAD_TIMEOUT,
             )
         except TimeoutError as exc:

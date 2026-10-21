@@ -43,6 +43,7 @@ try:
         selected_indices=job["selected_indices"],  # list[int] or None
         wrap_folder=bool(job["wrap_folder"]),
         image_format=job.get("image_format") or "auto",
+        video_format=job.get("video_format") or "auto",
     )
     print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
     sys.exit(0)
@@ -62,6 +63,7 @@ def run_download_subprocess(
     selected_indices: list[int] | None,
     wrap_folder: bool,
     image_format: str = "auto",
+    video_format: str = "auto",
     timeout: int | None = None,
 ) -> dict[str, Any]:
     """在子进程中跑 download_douyin，返回结果 dict。
@@ -88,6 +90,7 @@ def run_download_subprocess(
         "selected_indices": list(selected_indices) if selected_indices else None,
         "wrap_folder": bool(wrap_folder),
         "image_format": image_format or "auto",
+        "video_format": video_format or "auto",
         "downloader_dir": str(DOWNLOADER_DIR),
     }
     env["DOUYIN_DL_JOB"] = json.dumps(job_env, ensure_ascii=False)

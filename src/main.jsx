@@ -97,6 +97,7 @@ function App() {
   const [downloadOutputDir, setDownloadOutputDir] = React.useState('');
   const [downloadWrapFolder, setDownloadWrapFolder] = React.useState(false);
   const [downloadImageFormat, setDownloadImageFormat] = React.useState('auto');
+  const [downloadVideoFormat, setDownloadVideoFormat] = React.useState('auto');
   const [downloadPreview, setDownloadPreview] = React.useState(null);
   const [selectedDownloadUrls, setSelectedDownloadUrls] = React.useState(new Set());
   const [selectedDownloadMedia, setSelectedDownloadMedia] = React.useState({});
@@ -236,6 +237,7 @@ function App() {
     setDownloadOutputDir(settings.download_output_dir || '');
     setDownloadWrapFolder(Boolean(settings.wrap_download_folder));
     setDownloadImageFormat(settings.image_format || 'auto');
+    setDownloadVideoFormat(settings.video_format || 'auto');
   }, []);
 
   React.useEffect(() => {
@@ -578,6 +580,7 @@ function App() {
         download_output_dir: downloadOutputDir,
         wrap_download_folder: downloadWrapFolder,
         image_format: downloadImageFormat,
+        video_format: downloadVideoFormat,
       });
       const actualSettings = settingsData.settings || {};
       const actualOutputDir = actualSettings.download_output_dir || downloadOutputDir;
@@ -589,6 +592,7 @@ function App() {
         wrap_folder: downloadWrapFolder,
         comments: false,
         image_format: downloadImageFormat,
+        video_format: downloadVideoFormat,
         selected_urls: selectedUrls,
         selected_media: mediaPayload,
       });
@@ -612,13 +616,15 @@ function App() {
         download_output_dir: downloadOutputDir,
         wrap_download_folder: downloadWrapFolder,
         image_format: downloadImageFormat,
+        video_format: downloadVideoFormat,
       });
       const settings = data.settings || {};
       setDownloadOutputDir(settings.download_output_dir || '');
       setDownloadWrapFolder(Boolean(settings.wrap_download_folder));
       setDownloadImageFormat(settings.image_format || 'auto');
+      setDownloadVideoFormat(settings.video_format || 'auto');
       setMessage('下载设置已保存');
-      appendLog('info', `下载设置已保存：${settings.download_output_dir || ''}${settings.wrap_download_folder ? '，按标题创建文件夹' : '，直接保存到根目录'}，图片格式 ${settings.image_format || 'auto'}`, '下载');
+      appendLog('info', `下载设置已保存：${settings.download_output_dir || ''}${settings.wrap_download_folder ? '，按标题创建文件夹' : '，直接保存到根目录'}，图片 ${settings.image_format || 'auto'}，视频 ${settings.video_format || 'auto'}`, '下载');
     } catch (error) {
       setMessage(error.message);
       appendLog('error', error.message, '下载');
@@ -960,17 +966,31 @@ function App() {
               />
               按作品标题创建文件夹
             </label>
-            <label className="checkbox-line" title="图片保存格式：跟随源格式或统一转码（webp→jpg 含透明图自动白底合成）；视频始终 mp4">
-              图片格式
+            <label className="checkbox-line" title="图片保存格式：跟随源格式或统一转码（webp→jpg 含透明图自动白底合成）">
+              图片
               <select
                 value={downloadImageFormat}
                 onChange={(event) => setDownloadImageFormat(event.target.value)}
                 style={{ marginLeft: 4 }}
               >
                 <option value="auto">跟随源格式</option>
-                <option value="jpg">统一 JPG</option>
-                <option value="png">统一 PNG</option>
-                <option value="webp">统一 WebP</option>
+                <option value="jpg">JPG</option>
+                <option value="png">PNG</option>
+                <option value="webp">WebP</option>
+                <option value="avif">AVIF</option>
+              </select>
+            </label>
+            <label className="checkbox-line" title="视频保存格式：转码依赖 ffmpeg，失败自动降级保留原始 mp4；混合链接(视频+图片)中视频按此选项、图片按上面选项各自处理">
+              视频
+              <select
+                value={downloadVideoFormat}
+                onChange={(event) => setDownloadVideoFormat(event.target.value)}
+                style={{ marginLeft: 4 }}
+              >
+                <option value="auto">原始 mp4</option>
+                <option value="mp4">重编码 MP4</option>
+                <option value="webm">WebM (VP9)</option>
+                <option value="audio">仅提取音频 MP3</option>
               </select>
             </label>
             <button className="secondary" onClick={saveDownloadSettings} disabled={busy}>保存下载设置</button>
