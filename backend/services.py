@@ -1518,14 +1518,38 @@ def _extract_video_duration(page, aweme_id: str | list[str] = "") -> int:
 
 
 def _extract_cover_url(page) -> str:
+    # 2026-10 实测: 抖音详情页已不再注入 SSR_RENDER_DATA.videoDetail（RENDER_DATA
+    # 壳里没有作品数据），旧 SSR 路径恒空；而裸 querySelector('img[src*="aweme"]')
+    # 会误抓侧栏作者头像(aweme-avatar)，导致预览封面显示登录用户头像。
+    # 现按可靠性排序: 播放器容器内封面图 → og:image → SSR(仅当真有) 。
     return page.evaluate(
         """() => {
+            // 1. 播放器容器内的封面 img（xgplayer poster，image-cut-tos 特征，
+            //    实测 440px 宽，是最可靠的"当前作品封面"来源）
+            const player = document.querySelector("video");
+            const scope = player?.closest("[class*='player'], [class*='video-detail']") || player?.parentElement;
+            if (scope) {
+                const imgs = Array.from(scope.querySelectorAll('img'));
+                const pick = (pred) => imgs.find(pred);
+                const isCover = (s) => s.includes('image-cut-tos')
+                    || (s.includes('douyinpic') && !s.includes('avatar'));
+                const big = pick((i) => i.naturalWidth >= 200 && isCover(i.src));
+                if (big) return big.src;
+            }
+            // 2. og:image（未登录/蜘蛛场景可能有）
+            const og = document.querySelector('meta[property="og:image"]')?.content;
+            if (og) return og;
+            // 3. SSR 数据（保留旧路径兜底，抖音若恢复注入则直接命中）
             const vd = window.SSR_RENDER_DATA?.app?.videoDetail;
             const video = vd?.video || {};
             const cover = video.cover || video.originCover || video.dynamicCover || vd?.cover;
             const urls = cover?.urlList || cover?.url_list || cover?.url_list_0 || [];
             if (Array.isArray(urls) && urls.length) return urls[0];
-            const img = document.querySelector('img[src*="douyinpic"], img[src*="aweme"]');
+            // 4. 最后才用全页图选择器，但明确排除头像和静态资源，
+            //    避免误抓作者头像/界面图标
+            const img = document.querySelector(
+                'img[src*="douyinpic"]:not([src*="avatar"]):not([src*=".svg"]):not([src*=".png"])'
+            );
             return img?.src || '';
         }"""
     )
