@@ -180,6 +180,8 @@ class DownloadRequest(BaseModel):
     output_dir: str = ""
     wrap_folder: bool = False
     comments: bool = False
+    # 图片目标格式: auto=跟随源格式(默认), jpg/png/webp=统一转码
+    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp)$")
     selected_urls: list[str] = Field(default_factory=list)
     selected_media: dict[str, list[int]] = Field(default_factory=dict)
 
@@ -201,6 +203,7 @@ class DownloadJob(BaseModel):
     output_dir: str
     wrap_folder: bool = False
     comments: bool = False
+    image_format: str = "auto"
     selected_media: dict[str, list[int]] = Field(default_factory=dict)
     cancel_requested: bool = False
     logs: list[dict[str, str]] = Field(default_factory=list)
@@ -211,11 +214,14 @@ class DownloadJob(BaseModel):
 class AppSettings(BaseModel):
     download_output_dir: str = ""
     wrap_download_folder: bool = False
+    # 默认图片下载格式: auto=跟随源格式(默认), jpg/png/webp=统一转码
+    image_format: str = "auto"
 
 
 class AppSettingsRequest(BaseModel):
     download_output_dir: str = ""
     wrap_download_folder: bool = False
+    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp)$")
 
 
 def now_iso() -> str:

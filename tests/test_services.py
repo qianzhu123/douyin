@@ -192,7 +192,7 @@ def test_download_job_runs_from_sync_context_and_records_logs(monkeypatch):
     import backend.services as services
 
     def fake_run_subprocess(url, output_dir, mode, comments=False, selected_indices=None,
-                            wrap_folder=False, timeout=None):
+                            wrap_folder=False, image_format="auto", timeout=None):
         return {
             "type": "video",
             "title": "demo",
@@ -237,7 +237,7 @@ def test_download_job_uses_custom_output_dir_and_wrap_folder(tmp_path, monkeypat
     import backend.services as services
 
     def fake_run_subprocess(url, output_dir, mode, comments=False, selected_indices=None,
-                            wrap_folder=False, timeout=None):
+                            wrap_folder=False, image_format="auto", timeout=None):
         return {"type": "video", "output_dir": output_dir, "wrap_folder": wrap_folder}
 
     monkeypatch.setattr(services, "run_download_subprocess", fake_run_subprocess)

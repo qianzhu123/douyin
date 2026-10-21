@@ -45,7 +45,7 @@ def settings() -> dict:
 @app.post("/api/settings")
 def update_settings(payload: AppSettingsRequest) -> dict:
     try:
-        settings = save_app_settings(payload.download_output_dir, payload.wrap_download_folder)
+        settings = save_app_settings(payload.download_output_dir, payload.wrap_download_folder, payload.image_format)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"settings": settings}
@@ -246,6 +246,7 @@ def create_download(payload: DownloadRequest) -> dict:
             payload.selected_urls,
             payload.selected_media,
             payload.wrap_folder,
+            payload.image_format,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -96,6 +96,7 @@ function App() {
   const [downloadMode, setDownloadMode] = React.useState(1);
   const [downloadOutputDir, setDownloadOutputDir] = React.useState('');
   const [downloadWrapFolder, setDownloadWrapFolder] = React.useState(false);
+  const [downloadImageFormat, setDownloadImageFormat] = React.useState('auto');
   const [downloadPreview, setDownloadPreview] = React.useState(null);
   const [selectedDownloadUrls, setSelectedDownloadUrls] = React.useState(new Set());
   const [selectedDownloadMedia, setSelectedDownloadMedia] = React.useState({});
@@ -234,6 +235,7 @@ function App() {
     const settings = data.settings || {};
     setDownloadOutputDir(settings.download_output_dir || '');
     setDownloadWrapFolder(Boolean(settings.wrap_download_folder));
+    setDownloadImageFormat(settings.image_format || 'auto');
   }, []);
 
   React.useEffect(() => {
@@ -575,6 +577,7 @@ function App() {
       const settingsData = await postJson('/api/settings', {
         download_output_dir: downloadOutputDir,
         wrap_download_folder: downloadWrapFolder,
+        image_format: downloadImageFormat,
       });
       const actualSettings = settingsData.settings || {};
       const actualOutputDir = actualSettings.download_output_dir || downloadOutputDir;
@@ -585,6 +588,7 @@ function App() {
         output_dir: actualOutputDir,
         wrap_folder: downloadWrapFolder,
         comments: false,
+        image_format: downloadImageFormat,
         selected_urls: selectedUrls,
         selected_media: mediaPayload,
       });
@@ -607,12 +611,14 @@ function App() {
       const data = await postJson('/api/settings', {
         download_output_dir: downloadOutputDir,
         wrap_download_folder: downloadWrapFolder,
+        image_format: downloadImageFormat,
       });
       const settings = data.settings || {};
       setDownloadOutputDir(settings.download_output_dir || '');
       setDownloadWrapFolder(Boolean(settings.wrap_download_folder));
+      setDownloadImageFormat(settings.image_format || 'auto');
       setMessage('下载设置已保存');
-      appendLog('info', `下载设置已保存：${settings.download_output_dir || ''}${settings.wrap_download_folder ? '，按标题创建文件夹' : '，直接保存到根目录'}`, '下载');
+      appendLog('info', `下载设置已保存：${settings.download_output_dir || ''}${settings.wrap_download_folder ? '，按标题创建文件夹' : '，直接保存到根目录'}，图片格式 ${settings.image_format || 'auto'}`, '下载');
     } catch (error) {
       setMessage(error.message);
       appendLog('error', error.message, '下载');
@@ -953,6 +959,19 @@ function App() {
                 onChange={(event) => setDownloadWrapFolder(event.target.checked)}
               />
               按作品标题创建文件夹
+            </label>
+            <label className="checkbox-line" title="图片保存格式：跟随源格式或统一转码（webp→jpg 含透明图自动白底合成）；视频始终 mp4">
+              图片格式
+              <select
+                value={downloadImageFormat}
+                onChange={(event) => setDownloadImageFormat(event.target.value)}
+                style={{ marginLeft: 4 }}
+              >
+                <option value="auto">跟随源格式</option>
+                <option value="jpg">统一 JPG</option>
+                <option value="png">统一 PNG</option>
+                <option value="webp">统一 WebP</option>
+              </select>
             </label>
             <button className="secondary" onClick={saveDownloadSettings} disabled={busy}>保存下载设置</button>
           </div>

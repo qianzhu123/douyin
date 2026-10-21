@@ -653,16 +653,82 @@ def _scroll_and_collect_images(page, max_presses=80) -> list[str]:
     return page.evaluate("""() => { window.__collectImages(); const b={}; for(const u of window.__imgUrls){const k=u.replace(/~[^:]*/,'').replace(/\\?.*/,''); if(!b[k]||u.includes('aweme-images-v2:300')||u.includes('aweme-images:q75')) b[k]=u; } return Object.values(b); }""") or []
 
 
-def _download_image_via_playwright(page, url, output_path) -> int:
+def _convert_image(src_path: Path, target_ext: str) -> int:
+    """把已落盘的图片转成目标格式（原地替换，返回转码后字节数）。
+
+    JPEG 不支持透明通道：带 alpha 的图先在白底上合成再存，避免直接 convert('RGB')
+    时透明区变黑。转换失败时保留原文件并抛异常，由调用方决定降级策略。
+    """
+    from PIL import Image
+
+    with Image.open(src_path) as im:
+        im.load()
+        if target_ext == ".jpg":
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                rgba = im.convert("RGBA")
+                bg = Image.new("RGB", rgba.size, (255, 255, 255))
+                bg.paste(rgba, mask=rgba.getchannel("A"))
+                im = bg
+            else:
+                im = im.convert("RGB")
+            im.save(src_path, "JPEG", quality=95)
+        elif target_ext == ".png":
+            im.save(src_path, "PNG")
+        elif target_ext == ".webp":
+            im.save(src_path, "WEBP", quality=95)
+        else:
+            raise ValueError(f"不支持的图片格式: {target_ext}")
+    return src_path.stat().st_size
+
+
+def _resolve_image_target(supplied: str) -> str:
+    """规整图片格式参数：auto/None→''(跟随源格式)，其余统一成带点小写扩展名。"""
+    if not supplied or supplied == "auto":
+        return ""
+    ext = supplied.lower().lstrip(".")
+    return f".{ext}" if ext in ("jpg", "jpeg", "png", "webp") else ""
+
+
+def _sniff_image_ext(url: str) -> str:
+    """按 URL 嗅探源图片扩展名（与旧版逻辑一致，默认 webp）。"""
+    ext = ".webp"
+    if ".jpeg" in url or ".jpg" in url:
+        ext = ".jpg"
+    elif ".png" in url:
+        ext = ".png"
+    return ext
+
+
+def _download_image_via_playwright(page, url, output_path, target_ext: str = "") -> tuple[int, Path]:
+    """下载图片并按 target_ext 落盘，返回 (字节数, 最终路径)。
+
+    - target_ext 为空: 跟随源格式（按 URL 嗅探），行为与旧版一致。
+    - target_ext 与源格式不一致: 先写 .tmp，转码为目标格式；转码失败保留原始
+      字节和源扩展名（降级不丢图）。
+    最终路径可能与传入 output_path 不同（后缀被替换成实际落盘格式）。
+    """
     resp = page.request.get(url)
     if not resp.ok:
         raise RuntimeError(f"下载图片失败: {resp.status}")
     body = resp.body()
-    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+
+    src_ext = _sniff_image_ext(url)
+    final_ext = target_ext or src_ext
+    final_path = output_path.with_suffix(final_ext)
+    tmp = final_path.with_suffix(final_path.suffix + ".tmp")
     tmp.write_bytes(body)
-    if output_path.exists(): output_path.unlink()
-    tmp.rename(output_path)
-    return len(body)
+
+    if target_ext and target_ext != src_ext:
+        try:
+            _convert_image(tmp, target_ext)
+        except Exception as e:
+            _print(f"  [!] 转码 {src_ext} → {target_ext} 失败，保留原始格式: {e}")
+            final_path = output_path.with_suffix(src_ext)
+
+    if final_path.exists():
+        final_path.unlink()
+    tmp.rename(final_path)
+    return final_path.stat().st_size, final_path
 
 
 # ════════════════════════════════════════════════════════════════
@@ -869,7 +935,7 @@ def _media_file_path(folder: Path, base_path: Path, title: str, index: int, ext:
 
 def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                     fetch_comments: bool = False, selected_indices: list | None = None,
-                    wrap_folder: bool = False) -> dict:
+                    wrap_folder: bool = False, image_format: str = "auto") -> dict:
     """
     下载抖音视频/图集 + 互动数据（可选评论）
     每个 URL 用独立的浏览器实例，可多线程并行。
@@ -878,11 +944,12 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
         url:             抖音链接
         output_dir:      输出目录
         mode:            1=仅下载视频/图集, 2=仅数据(JSON), 3=全部
-        fetch_comments:  是否抓取评论（默认否，评论容易卡死）
         selected_indices: 图集/笔记类型时仅下载指定序号（1-based）的图片/视频；
                           None 表示全部下载。对单视频类型忽略。
         wrap_folder:     是否在输出根目录下按标题创建子文件夹
-        fetch_comments: 是否抓取评论（默认否，评论容易卡死）
+        image_format:    图片目标格式: "auto"=跟随源格式(默认)，或 "jpg"/"png"/"webp"。
+                         与源格式不同时下载后本地转码；转码失败保留原始格式。
+                         视频不受影响（始终 mp4 原始字节）。
 
     Returns:
         dict: 下载结果
@@ -894,6 +961,10 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
     wanted = set(int(i) for i in selected_indices) if selected_indices else None
     if wanted is not None:
         _print(f"[*] 图集选择下载: {sorted(wanted)} 共 {len(wanted)} 项")
+
+    target_ext = _resolve_image_target(image_format)
+    if target_ext:
+        _print(f"[*] 图片目标格式: {target_ext}（源格式不同时自动转码）")
 
     _print("[*] 正在启动浏览器...")
 
@@ -1240,15 +1311,13 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                                 _print(f"  [{idx}/{len(slides)}] ! 第 {idx} 页图片: 无法获取图片地址，跳过")
                                 fail_count += 1
                                 continue
-                            ext = ".webp"
-                            if ".jpeg" in img_url or ".jpg" in img_url:
-                                ext = ".jpg"
-                            elif ".png" in img_url:
-                                ext = ".png"
-                            file_path = _media_file_path(folder, base_path, title, idx, ext, wrap_folder, width=2, prefix="S")
+                            file_path = _media_file_path(folder, base_path, title, idx, target_ext or _sniff_image_ext(img_url), wrap_folder, width=2, prefix="S")
                             _print(f"  [{idx}/{len(slides)}] 下载图片: {file_path.name}")
                             try:
-                                total_size += _download_image_via_playwright(page, img_url, file_path)
+                                size, saved_path = _download_image_via_playwright(page, img_url, file_path, target_ext)
+                                total_size += size
+                                if saved_path != file_path:
+                                    _print(f"  [.] 已转码保存为: {saved_path.name}")
                                 ok_count += 1
                             except Exception as e:
                                 fail_count += 1
@@ -1328,15 +1397,15 @@ def download_douyin(url: str, output_dir: str = "", mode: int = 1,
                     for i, img_url in enumerate(image_urls, 1):
                         if wanted is not None and i not in wanted:
                             continue
-                        ext = ".webp"
-                        if ".jpeg" in img_url or ".jpg" in img_url: ext = ".jpg"
-                        elif ".png" in img_url: ext = ".png"
-                        file_path = _media_file_path(folder, base_path, title, i, ext, wrap_folder, width=3)
+                        file_path = _media_file_path(folder, base_path, title, i, target_ext or _sniff_image_ext(img_url), wrap_folder, width=3)
                         if file_path.exists() and file_path.stat().st_size > 0:
                             ok_count += 1; continue
                         _print(f"  [{i}/{len(image_urls)}] 下载: {file_path.name}")
                         try:
-                            total_size += _download_image_via_playwright(page, img_url, file_path)
+                            size, saved_path = _download_image_via_playwright(page, img_url, file_path, target_ext)
+                            total_size += size
+                            if saved_path != file_path:
+                                _print(f"  [.] 已转码保存为: {saved_path.name}")
                             ok_count += 1
                         except Exception as e:
                             fail_count += 1
