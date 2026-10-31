@@ -114,6 +114,8 @@ def calendar_map(token: str, anchor_id: str) -> tuple[dict, dict]:
         "current_streak": cal.get("current_streak"),
         "makeup_card_count": cal.get("makeup_card_count"),
         "fandom_id": cal.get("fandom_id") or "",
+        # 入圈判定 (§82): has_join_circle=False → 日历不适用, 不是"未签"
+        "has_join_circle": cal.get("has_join_circle"),
     }
     return cm, info
 
@@ -150,12 +152,22 @@ def account_overview(label: str, token: str) -> dict:
             "makeup_card": None,
             "is_circle": False,
             "pending": False,
+            # 亲密度数据源: user_auto_light_up_list (§08-fansclub 4.3)
+            "intimacy": u.get("intimacy") or 0,
+            "next_level_intimacy": u.get("next_level_intimacy"),
+            "badge_status": u.get("status"),  # 1=点亮 2=熄灭(长时间未观看)
+            "join_days": None,
+            "has_join_circle": None,  # False=未入圈, 签到日历不适用
         }
+        pt = u.get("participate_time") or 0
+        if pt:
+            row["join_days"] = int((time.time() - pt) / 86400)
         try:
             cm, info = calendar_map(token, aid)
             row["streak"] = info.get("current_streak") or 0
             row["makeup_card"] = info.get("makeup_card_count")
             row["is_circle"] = bool(info.get("fandom_id"))
+            row["has_join_circle"] = info.get("has_join_circle")
             if str(today_ts) in cm:
                 row["signed"] = True
             # 日历渲染延迟 (§80): 今日条目未出但 streak>=1 → 可能已签, 标 pending
@@ -174,7 +186,7 @@ def account_overview(label: str, token: str) -> dict:
             pass
         clubs.append(row)
         time.sleep(0.25)
-    clubs.sort(key=lambda r: (-(r["level"] or 0), -(r["heat"] or 0)))
+    clubs.sort(key=lambda r: (-(r["level"] or 0), -(r["intimacy"] or 0)))
     return {"label": label, "ok": True, "clubs": clubs,
             "signed_count": sum(1 for c in clubs if c["signed"])}
 

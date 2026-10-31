@@ -1124,3 +1124,4 @@ button:disabled {
 .fansclub-row .signed { color: #1a9c5b; font-weight: 600; }
 .fansclub-row .pending { color: #d9940f; font-weight: 600; }
 .fansclub-row .unsigned { color: #b0483c; }
+.fansclub-row .nocircle { color: #8a97a5; }
