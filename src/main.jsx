@@ -70,6 +70,11 @@ function FansClubPanel() {
   });
   const [loadingLabel, setLoadingLabel] = React.useState(''); // 正在检查的账户(单个), 避免切账户误显检查中
   const [error, setError] = React.useState('');
+  // 今日亲密度基线: light_up_list 的 increased_intimacy_today 是死值(PC直连不同步),
+  // 改为前端自算: 当天首次检查记基线, 之后显示 当前-基线
+  const [baseMap, setBaseMap] = React.useState(() => {
+    try { return JSON.parse(localStorage.getItem('fansclub_today_base') || '{}'); } catch { return {}; }
+  });
   const [signJobs, setSignJobs] = React.useState([]);
   const [signingAll, setSigningAll] = React.useState(false);
 
@@ -95,6 +100,19 @@ function FansClubPanel() {
         throw new Error(d.detail || r.statusText);
       }
       const d = await r.json();
+      // 今日基线: 同一天第一次见到该账户时, 记录各团亲密度
+      const todayKey = new Date().toISOString().slice(0, 10);
+      setBaseMap((bm) => {
+        const day = bm[todayKey] || {};
+        if (!day[label]) {
+          const base = {};
+          (d.clubs || []).forEach((c) => { base[c.anchor_id] = c.intimacy || 0; });
+          const next = { ...bm, [todayKey]: { ...day, [label]: base } };
+          try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+          return next;
+        }
+        return bm;
+      });
       setOverviewMap((m) => {
         const next = { ...m, [label]: d };
         try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略容量异常 */ }
@@ -154,7 +172,15 @@ function FansClubPanel() {
   const jobFor = (label) => signJobs.find((j) => j.label === label);
   const overview = overviewMap[selected] ?? null; // 当前账户的缓存结果
   const clubs = overview?.clubs || [];
-  const signedShown = clubs.filter((c) => c.signed || c.pending).length;
+  // 今日亲密度 = 当前 - 当天基线 (服务端 increased_intimacy_today 字段是死值, 不用)
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayBase = (baseMap[todayKey] || {})[selected] || {};
+  const todayGainFor = (c) => {
+    const b = todayBase[c.anchor_id];
+    if (b == null) return null; // 无基线(本账户今天第一次检查前), 显示 '-'
+    const g = (c.intimacy || 0) - b;
+    return g > 0 ? `+${g}` : '0';
+  };
   const checking = loadingLabel === selected; // 只有当前账户自己在检查才算
   const checkedLabelRef = React.useRef(new Set()); // 已检查过的账户(标记用, 与缓存同步)
   Object.keys(overviewMap).forEach((k) => { if (overviewMap[k]) checkedLabelRef.current.add(k); });
@@ -164,7 +190,7 @@ function FansClubPanel() {
       <div className="panel-head">
         <div>
           <h2>粉丝团签到</h2>
-          <p>凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${signedShown}`}</p>
+          <p>凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => c.signed || c.pending).length}`}</p>
         </div>
         <div className="panel-actions">
           <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
@@ -255,8 +281,8 @@ function FansClubPanel() {
                 <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
                   {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
                 </span>
-                <span className={c.today_intimacy > 0 ? 'today-gain' : 'muted'}>
-                  {c.today_intimacy > 0 ? `+${c.today_intimacy}` : '0'}
+                <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}>
+                  {todayGainFor(c) ?? '-'}
                 </span>
                 <span title={distNext != null ? `距下一级还差 ${distNext.toLocaleString()}` : undefined}>
                   {(c.intimacy || 0).toLocaleString()}
