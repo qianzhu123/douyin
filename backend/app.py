@@ -347,6 +347,17 @@ def fansclub_sign_status() -> dict:
     return {"jobs": _fc.sign_status()}
 
 
+@app.post("/api/fansclub/check-all")
+def fansclub_check_all() -> dict:
+    """后台串行检查全部账户 (每天0点前端自动触发 + 手动按钮共用)。"""
+    return _fc.start_check_all()
+
+
+@app.get("/api/fansclub/check-status")
+def fansclub_check_status() -> dict:
+    return _fc.check_all_status()
+
+
 @app.post("/api/fansclub/admin/restart-backend")
 def admin_restart_backend() -> dict:
     """幂等重启后端（8000）。前端调用后预计 1-3s 内会失联。"""

@@ -133,6 +133,78 @@ function FansClubPanel() {
   React.useEffect(() => { loadAccounts(); }, [loadAccounts]);
   // 切换账户不自动拉取也不清缓存: 已检查过的账户随时切回查看, 「检查」才更新
 
+  // ---- 每天 0 点后首次见到时, 自动全量检查一遍 (后台串行, 前端只触发+轮询) ----
+  const [checkAll, setCheckAll] = React.useState(null); // 后端 check-all 状态
+  const autoCheckRef = React.useRef('');
+  React.useEffect(() => {
+    const tick = async () => {
+      const todayKey = new Date().toISOString().slice(0, 10);
+      const flagKey = 'fansclub_autocheck_day';
+      let lastDay = '';
+      try { lastDay = localStorage.getItem(flagKey) || ''; } catch { /* ignore */ }
+      if (lastDay === todayKey || autoCheckRef.current === todayKey) return;
+      autoCheckRef.current = todayKey; // 防并发重复触发
+      try {
+        const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
+        const d = await r.json();
+        if (d.started || d.reason === 'already running') {
+          try { localStorage.setItem(flagKey, todayKey); } catch { /* ignore */ }
+        } else {
+          autoCheckRef.current = ''; // 没触发成功, 允许下个周期再试
+        }
+      } catch { autoCheckRef.current = ''; }
+    };
+    tick(); // 打开页面先判一次 (0点后第一次打开补跑)
+    const t = setInterval(tick, 60 * 1000); // 每分钟看一次是否跨了 0 点
+    return () => clearInterval(t);
+  }, []);
+
+  // 全量检查进行中每 3s 轮询状态; 结束后把本轮账户结果写进缓存
+  const fetchOverviewSilent = React.useCallback(async (label) => {
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/overview?label=${encodeURIComponent(label)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      const todayKey = new Date().toISOString().slice(0, 10);
+      setBaseMap((bm) => {
+        const day = bm[todayKey] || {};
+        if (!day[label]) {
+          const base = {};
+          (d.clubs || []).forEach((c) => { base[c.anchor_id] = c.intimacy || 0; });
+          const next = { ...bm, [todayKey]: { ...day, [label]: base } };
+          try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+          return next;
+        }
+        return bm;
+      });
+      setOverviewMap((m) => {
+        const next = { ...m, [label]: d };
+        try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
+        return next;
+      });
+    } catch { /* ignore */ }
+  }, []);
+
+  const lastCheckAllDone = React.useRef('');
+  React.useEffect(() => {
+    if (!checkAll || checkAll.running) return undefined;
+    const doneKey = String(checkAll.finished_at || '');
+    if (!checkAll.done_labels?.length || lastCheckAllDone.current === doneKey) return undefined;
+    lastCheckAllDone.current = doneKey;
+    checkAll.done_labels.forEach((label) => fetchOverviewSilent(label));
+    return undefined;
+  }, [checkAll, fetchOverviewSilent]);
+  React.useEffect(() => {
+    if (!checkAll?.running) return undefined;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/fansclub/check-status`);
+        setCheckAll(await r.json());
+      } catch { /* ignore */ }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [checkAll?.running]);
+
   // 轮询签到任务状态 (运行中每 2s)
   const hasRunning = signJobs.some((j) => j.running);
   React.useEffect(() => {
@@ -182,6 +254,8 @@ function FansClubPanel() {
     return g > 0 ? `+${g}` : '0';
   };
   const checking = loadingLabel === selected; // 只有当前账户自己在检查才算
+  // 全量检查时当前账户是否正在被检查 (tab 上有橙色呼吸点, 但表格不打断)
+  const checkingCurrent = loadingLabel === selected;
   const checkedLabelRef = React.useRef(new Set()); // 已检查过的账户(标记用, 与缓存同步)
   Object.keys(overviewMap).forEach((k) => { if (overviewMap[k]) checkedLabelRef.current.add(k); });
 
@@ -203,6 +277,22 @@ function FansClubPanel() {
             title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），其他账户检查中也可并发检查"
           >
             <Search size={16} /> {checking ? '检查中…' : '检查'}
+          </button>
+          <button
+            className="secondary"
+            onClick={async () => {
+              try {
+                const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
+                const d = await r.json();
+                if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
+                else if (d.reason === 'already running') setCheckAll(d.state);
+                else setError(d.reason || '未能启动');
+              } catch (e) { setError(e.message); }
+            }}
+            disabled={!!checkAll?.running}
+            title="后台串行检查全部账户（每天 0 点后打开页面也会自动执行一次）"
+          >
+            <Search size={16} /> {checkAll?.running ? '全量检测中…' : '检查全部'}
           </button>
           <button
             onClick={signAll}
@@ -255,12 +345,12 @@ function FansClubPanel() {
         </div>
       )}
 
-      {checking && <div className="empty">检查中…</div>}
+      {checking && !clubs.length && <div className="empty">检测中…</div>}
       {!checking && !overview && !error && accounts.length > 0 && (
         <div className="empty">点「检查」拉取 {selected} 的粉丝团状态</div>
       )}
       {!checking && clubs.length > 0 && (
-        <div className="fansclub-table">
+        <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
             <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>入团</span>
           </div>
@@ -273,21 +363,30 @@ function FansClubPanel() {
                 <span title={`${c.nickname}${c.progress_text ? ` · ${c.progress_text}` : ''}`}>
                   {c.nickname}
                 </span>
-                <span>LV{c.level}</span>
-                <span className={c.badge_status === 2 ? 'badge-off' : 'badge-on'} title={c.badge_status === 2 ? '勋章熄灭（长时间未观看）' : '勋章点亮'}>
-                  {c.badge_status === 2 ? '熄' : '亮'}
-                </span>
-                <span>{c.streak}天</span>
-                <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
-                  {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
-                </span>
-                <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}>
-                  {todayGainFor(c) ?? '-'}
-                </span>
-                <span title={distNext != null ? `距下一级还差 ${distNext.toLocaleString()}` : undefined}>
-                  {(c.intimacy || 0).toLocaleString()}
-                </span>
-                <span>{c.join_days != null ? `${c.join_days}天` : '-'}</span>
+                {checking ? (
+                  // 检查当前账户时: 保留行框架, 数值列写「检测中」
+                  <>
+                    <span className="cell-checking" colSpan={7}>检测中…</span>
+                  </>
+                ) : (
+                  <>
+                    <span>LV{c.level}</span>
+                    <span className={c.badge_status === 2 ? 'badge-off' : 'badge-on'} title={c.badge_status === 2 ? '勋章熄灭（长时间未观看）' : '勋章点亮'}>
+                      {c.badge_status === 2 ? '熄' : '亮'}
+                    </span>
+                    <span>{c.streak}天</span>
+                    <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
+                      {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
+                    </span>
+                    <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}>
+                      {todayGainFor(c) ?? '-'}
+                    </span>
+                    <span title={distNext != null ? `距下一级还差 ${distNext.toLocaleString()}` : undefined}>
+                      {(c.intimacy || 0).toLocaleString()}
+                    </span>
+                    <span>{c.join_days != null ? `${c.join_days}天` : '-'}</span>
+                  </>
+                )}
               </div>
             );
           })}

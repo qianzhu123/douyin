@@ -1130,6 +1130,10 @@ button:disabled {
 .fansclub-row .today-gain { color: #e0742c; font-weight: 600; }
 .fansclub-row .muted { color: #9aa7b3; }
 
+/* 检查中: 保留表格框架, 数值区显示检测中 */
+.fansclub-row .cell-checking { color: #d9940f; font-size: 12.5px; grid-column: 2 / -1; }
+.fansclub-table.checking { opacity: 0.75; }
+
 /* 账户 tab 的已检查/检查中小圆点标记 (非文字) */
 .fansclub-tab { position: relative; }
 .fansclub-tab .tab-check-dot {

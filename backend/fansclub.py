@@ -263,3 +263,49 @@ def start_sign(label: str, token: str) -> dict:
 def sign_status() -> list[dict]:
     with _sign_lock:
         return [dict(v) for v in _sign_state.values()]
+
+
+# ---- 全账户检查 (后台线程串行; 每天0点前端触发 + 手动触发共用) ----
+_check_state: dict = {"running": False, "done_labels": [], "current": None,
+                      "labels": [], "started_at": None, "finished_at": None}
+_check_lock = threading.Lock()
+
+
+def start_check_all() -> dict:
+    """后台线程串行检查全部账户; 进行中重复启动直接拒绝。"""
+    with _check_lock:
+        if _check_state["running"]:
+            return {"started": False, "reason": "already running",
+                    "state": {k: v for k, v in _check_state.items()}}
+        tokens = load_tokens()
+        if not tokens:
+            return {"started": False, "reason": "no tokens"}
+        _check_state.update(running=True, done_labels=[], current=None,
+                            labels=[a["label"] for a in tokens],
+                            started_at=time.time(), finished_at=None)
+        t = threading.Thread(target=_do_check_all, daemon=True)
+        t.start()
+        return {"started": True}
+
+
+def _do_check_all() -> None:
+    tokens = {a["label"]: a["token"] for a in load_tokens()}
+    for label in list(_check_state["labels"]):
+        with _check_lock:
+            if not _check_state["running"]:  # 中途停止标记预留
+                return
+            _check_state["current"] = label
+        try:
+            account_overview(label, tokens[label])
+            with _check_lock:
+                _check_state["done_labels"].append(label)
+        except Exception:
+            with _check_lock:
+                _check_state["done_labels"].append(label)  # 失败也计入完成
+    with _check_lock:
+        _check_state.update(running=False, current=None, finished_at=time.time())
+
+
+def check_all_status() -> dict:
+    with _check_lock:
+        return dict(_check_state)
