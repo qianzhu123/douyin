@@ -64,9 +64,11 @@ function mergeAccount(account, watch) {
 function FansClubPanel() {
   const [accounts, setAccounts] = React.useState([]);
   const [selected, setSelected] = React.useState('');
-  // 各账户检查结果缓存: {label: overview} — 切换不丢, 手动「检查」才更新
-  const [overviewMap, setOverviewMap] = React.useState({});
-  const [loading, setLoading] = React.useState(false);
+  // 各账户检查结果缓存: {label: overview} — 切换不丢, 刷新也不丢(localStorage), 手动「检查」才更新
+  const [overviewMap, setOverviewMap] = React.useState(() => {
+    try { return JSON.parse(localStorage.getItem('fansclub_overview') || '{}'); } catch { return {}; }
+  });
+  const [loadingLabel, setLoadingLabel] = React.useState(''); // 正在检查的账户(单个), 避免切账户误显检查中
   const [error, setError] = React.useState('');
   const [signJobs, setSignJobs] = React.useState([]);
   const [signingAll, setSigningAll] = React.useState(false);
@@ -84,7 +86,7 @@ function FansClubPanel() {
 
   const loadOverview = React.useCallback(async (label) => {
     if (!label) return;
-    setLoading(true);
+    setLoadingLabel(label);
     setError('');
     try {
       const r = await fetch(`${API_BASE}/api/fansclub/overview?label=${encodeURIComponent(label)}`);
@@ -93,12 +95,20 @@ function FansClubPanel() {
         throw new Error(d.detail || r.statusText);
       }
       const d = await r.json();
-      setOverviewMap((m) => ({ ...m, [label]: d }));
+      setOverviewMap((m) => {
+        const next = { ...m, [label]: d };
+        try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略容量异常 */ }
+        return next;
+      });
     } catch (e) {
       setError(e.message);
-      setOverviewMap((m) => ({ ...m, [label]: null }));
+      setOverviewMap((m) => {
+        const next = { ...m, [label]: null };
+        try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
+        return next;
+      });
     } finally {
-      setLoading(false);
+      setLoadingLabel('');
     }
   }, []);
 
@@ -144,8 +154,8 @@ function FansClubPanel() {
   const jobFor = (label) => signJobs.find((j) => j.label === label);
   const overview = overviewMap[selected] ?? null; // 当前账户的缓存结果
   const clubs = overview?.clubs || [];
-  const totalIntimacy = clubs.reduce((s, c) => s + (c.intimacy || 0), 0);
   const signedShown = clubs.filter((c) => c.signed || c.pending).length;
+  const checking = loadingLabel === selected; // 只有当前账户自己在检查才算
   const checkedCount = Object.values(overviewMap).filter(Boolean).length;
 
   return (
@@ -153,11 +163,7 @@ function FansClubPanel() {
       <div className="panel-head">
         <div>
           <h2>粉丝团签到</h2>
-          <p>
-            凭证账户 {accounts.length} 个
-            {overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${signedShown}，亲密度总和 ${totalIntimacy.toLocaleString()}`}
-            {checkedCount > 0 && checkedCount < accounts.length && ` · 已检查 ${checkedCount}/${accounts.length}`}
-          </p>
+          <p>凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${signedShown}`}</p>
         </div>
         <div className="panel-actions">
           <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
@@ -166,10 +172,10 @@ function FansClubPanel() {
           <button
             className="secondary"
             onClick={() => loadOverview(selected)}
-            disabled={!selected || loading}
-            title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数/排名），结果缓存可切回查看"
+            disabled={!selected || !!loadingLabel}
+            title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），结果保存在本机，刷新不丢"
           >
-            <Search size={16} /> {loading ? '检查中…' : '检查'}
+            <Search size={16} /> {checking ? '检查中…' : '检查'}
           </button>
           <button
             onClick={signAll}
@@ -221,11 +227,11 @@ function FansClubPanel() {
         </div>
       )}
 
-      {loading && <div className="empty">检查中…</div>}
-      {!loading && !overview && !error && accounts.length > 0 && (
+      {checking && <div className="empty">检查中…</div>}
+      {!checking && !overview && !error && accounts.length > 0 && (
         <div className="empty">点「检查」拉取 {selected} 的粉丝团状态</div>
       )}
-      {!loading && clubs.length > 0 && (
+      {!checking && clubs.length > 0 && (
         <div className="fansclub-table">
           <div className="fansclub-row fansclub-header">
             <span>主播</span><span>等级</span><span>连签</span><span>今日</span><span>亲密度</span><span>入团</span>
@@ -235,9 +241,9 @@ function FansClubPanel() {
             return (
               <div key={c.anchor_id} className="fansclub-row">
                 <span title={`${c.nickname}${c.next_level_intimacy ? ` · 距下一级 ${c.next_level_intimacy - c.intimacy}` : ''}`}>
-                  {c.nickname}{c.is_circle && !noCircle ? ' ⭕' : ''}
+                  {c.nickname}
                 </span>
-                <span>LV{c.level}{c.badge_status === 2 ? ' ·' : ''}</span>
+                <span>LV{c.level}</span>
                 <span>{c.streak}天</span>
                 <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
                   {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
