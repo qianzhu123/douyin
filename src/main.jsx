@@ -60,6 +60,177 @@ function mergeAccount(account, watch) {
   };
 }
 
+// ---- 粉丝团签到面板 (PC 直连, 凭证来自 data/fansclub_tokens/) ----
+function FansClubPanel() {
+  const [accounts, setAccounts] = React.useState([]);
+  const [selected, setSelected] = React.useState('');
+  const [overview, setOverview] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [signJobs, setSignJobs] = React.useState([]);
+  const [signingAll, setSigningAll] = React.useState(false);
+
+  const loadAccounts = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/accounts`);
+      const d = await r.json();
+      setAccounts(d.accounts || []);
+      setSelected((prev) => (d.accounts?.some((a) => a.label === prev) ? prev : (d.accounts?.[0]?.label || '')));
+    } catch (e) {
+      setError('加载账户失败: ' + e.message);
+    }
+  }, []);
+
+  const loadOverview = React.useCallback(async (label) => {
+    if (!label) return;
+    setLoading(true);
+    setError('');
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/overview?label=${encodeURIComponent(label)}`);
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || r.statusText);
+      }
+      setOverview(await r.json());
+    } catch (e) {
+      setError(e.message);
+      setOverview(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => { loadAccounts(); }, [loadAccounts]);
+  React.useEffect(() => { if (selected) loadOverview(selected); }, [selected, loadOverview]);
+
+  // 轮询签到任务状态 (运行中每 2s)
+  const hasRunning = signJobs.some((j) => j.running);
+  React.useEffect(() => {
+    if (!hasRunning && !signingAll) return undefined;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/fansclub/sign-status`);
+        const d = await r.json();
+        setSignJobs(d.jobs || []);
+        if (!(d.jobs || []).some((j) => j.running)) setSigningAll(false);
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [hasRunning, signingAll]);
+
+  async function signOne(label) {
+    setError('');
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/sign/${encodeURIComponent(label)}`, { method: 'POST' });
+      const d = await r.json();
+      if (!d.started) setError(d.reason || '未能启动');
+      else setSigningAll(true);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function signAll() {
+    setError('');
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/sign-all`, { method: 'POST' });
+      const d = await r.json();
+      const started = Object.values(d.results || {}).filter((x) => x.started).length;
+      if (started === 0) setError('没有可启动的签到任务');
+      else setSigningAll(true);
+    } catch (e) { setError(e.message); }
+  }
+
+  const jobFor = (label) => signJobs.find((j) => j.label === label);
+  const clubs = overview?.clubs || [];
+  const totalHeat = clubs.reduce((s, c) => s + (c.heat || 0), 0);
+
+  return (
+    <section className="panel fansclub-panel">
+      <div className="panel-head">
+        <div>
+          <h2>粉丝团签到</h2>
+          <p>
+            凭证账户 {accounts.length} 个（来自真机抓取的登录态，电脑端无法直接登录添加）
+            {overview?.ok && ` · 当前 ${overview.label}：${clubs.length} 团，今日已签 ${overview.signed_count}，总热度 ${totalHeat}`}
+          </p>
+        </div>
+        <div className="panel-actions">
+          <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
+            <RotateCw size={16} /> 重载凭证
+          </button>
+          <button
+            onClick={signAll}
+            disabled={accounts.length === 0 || signingAll || signJobs.some((j) => j.running)}
+            title="对全部账户执行一键签到（免费端点，幂等）"
+          >
+            <Activity size={16} /> {signingAll || signJobs.some((j) => j.running) ? '签到中…' : '一键签到全部'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="notice">{error}</div>}
+      {accounts.length === 0 && (
+        <div className="empty">
+          未找到凭证文件。请在 data/fansclub_tokens/ 放入 {'{label, x_tt_token}'}.json
+          （凭证需在 root 真机上用 frida 抓取，见 douyin-re-lab docs/09 §79）。
+        </div>
+      )}
+
+      {accounts.length > 0 && (
+        <div className="fansclub-toolbar">
+          {accounts.map((a) => {
+            const job = jobFor(a.label);
+            return (
+              <button
+                key={a.label}
+                className={`fansclub-tab${selected === a.label ? ' active' : ''}`}
+                onClick={() => setSelected(a.label)}
+              >
+                {a.label}
+                {job?.running && ' ⏳'}
+                {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
+              </button>
+            );
+          })}
+          <button
+            className="secondary fansclub-sign-one"
+            onClick={() => signOne(selected)}
+            disabled={!selected || signingAll || signJobs.some((j) => j.running)}
+          >
+            签到当前账户
+          </button>
+        </div>
+      )}
+
+      {jobFor(selected)?.log?.length > 0 && (
+        <div className="fansclub-log">
+          {jobFor(selected).log.slice(-8).map((line, i) => <div key={i}>{line}</div>)}
+        </div>
+      )}
+
+      {loading && <div className="empty">加载中…</div>}
+      {!loading && clubs.length > 0 && (
+        <div className="fansclub-table">
+          <div className="fansclub-row fansclub-header">
+            <span>主播</span><span>等级</span><span>连签</span><span>今日</span><span>热度</span><span>排名</span>
+          </div>
+          {clubs.map((c) => (
+            <div key={c.anchor_id} className="fansclub-row">
+              <span title={c.nickname}>{c.nickname}{c.is_circle ? ' ⭕' : ''}</span>
+              <span>LV{c.level}</span>
+              <span>{c.streak}天</span>
+              <span className={c.signed ? 'signed' : (c.pending ? 'pending' : 'unsigned')}>
+                {c.signed ? '✓已签' : (c.pending ? '延迟中' : '未签')}
+              </span>
+              <span>{c.heat}</span>
+              <span>{c.rank || '-'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [accounts, setAccounts] = React.useState([]);
   const [watchJobs, setWatchJobs] = React.useState([]);
@@ -901,6 +1072,8 @@ function App() {
         </section>
 
         {selected && <DetailPanel row={selected} hidden={hiddenUids.has(selected.sec_uid)} />}
+
+        <FansClubPanel />
 
         <section className="panel download-panel">
           <div className="panel-head">

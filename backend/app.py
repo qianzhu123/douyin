@@ -302,8 +302,52 @@ from pathlib import Path as _P_admin
 
 from .config import PROJECT_ROOT as _PROJECT_ROOT
 
+# ---- 粉丝团签到 (PC 直连, 凭证来自 data/fansclub_tokens/, 详见 backend/fansclub.py) ----
+from . import fansclub as _fc
 
-@app.post("/api/admin/restart-backend")
+
+@app.get("/api/fansclub/accounts")
+def fansclub_accounts() -> dict:
+    """列出本地凭证账户 (不含 token 本体)。"""
+    return {"accounts": [{"label": a["label"]} for a in _fc.load_tokens()]}
+
+
+@app.get("/api/fansclub/overview")
+def fansclub_overview(label: str) -> dict:
+    """单账户全量粉丝团信息 (等级/连签/今日签/热度/排名)。"""
+    tokens = {a["label"]: a["token"] for a in _fc.load_tokens()}
+    if label not in tokens:
+        raise HTTPException(status_code=404, detail=f"no token for label: {label}")
+    try:
+        return _fc.account_overview(label, tokens[label])
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
+@app.post("/api/fansclub/sign/{label}")
+def fansclub_sign(label: str) -> dict:
+    """一键签到该账户全部未签团 (免费 join 端点, 幂等)。"""
+    tokens = {a["label"]: a["token"] for a in _fc.load_tokens()}
+    if label not in tokens:
+        raise HTTPException(status_code=404, detail=f"no token for label: {label}")
+    return _fc.start_sign(label, tokens[label])
+
+
+@app.post("/api/fansclub/sign-all")
+def fansclub_sign_all() -> dict:
+    """一键签到全部账户。"""
+    results = {}
+    for a in _fc.load_tokens():
+        results[a["label"]] = _fc.start_sign(a["label"], a["token"])
+    return {"results": results}
+
+
+@app.get("/api/fansclub/sign-status")
+def fansclub_sign_status() -> dict:
+    return {"jobs": _fc.sign_status()}
+
+
+@app.post("/api/fansclub/admin/restart-backend")
 def admin_restart_backend() -> dict:
     """幂等重启后端（8000）。前端调用后预计 1-3s 内会失联。"""
     project_root = _P_admin(_PROJECT_ROOT).resolve()

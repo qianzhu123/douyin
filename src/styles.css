@@ -1045,3 +1045,82 @@ button:disabled {
 .live-room-stream { margin: 8px 0 0; font-size: 11px; color: var(--muted, #94a3b8); word-break: break-all; }
 
 @media (max-width: 720px) { .live-room-grid { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---- 粉丝团签到面板 ---- */
+.fansclub-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.fansclub-tab {
+  background: #eef4fb;
+  color: #17324d;
+  border: 1px solid #d4e3f5;
+  padding: 6px 14px;
+  font-weight: 600;
+}
+
+.fansclub-tab.active {
+  background: #2f8cff;
+  color: #fff;
+  border-color: #2f8cff;
+}
+
+.fansclub-sign-one {
+  margin-left: auto;
+}
+
+.fansclub-log {
+  background: #f4f8fd;
+  border: 1px solid #e2ecf7;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #3d5a75;
+  margin-bottom: 10px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.fansclub-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e2ecf7;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.fansclub-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.6fr) 60px 70px 80px minmax(70px, 1fr) 60px;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 13.5px;
+  align-items: center;
+  border-bottom: 1px solid #eef4fb;
+}
+
+.fansclub-row:last-child {
+  border-bottom: 0;
+}
+
+.fansclub-row > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fansclub-header {
+  background: #f4f8fd;
+  font-weight: 700;
+  color: #4a6580;
+  font-size: 12.5px;
+}
+
+.fansclub-row .signed { color: #1a9c5b; font-weight: 600; }
+.fansclub-row .pending { color: #d9940f; font-weight: 600; }
+.fansclub-row .unsigned { color: #b0483c; }
