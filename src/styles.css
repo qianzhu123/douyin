@@ -1125,3 +1125,26 @@ button:disabled {
 .fansclub-row .pending { color: #d9940f; font-weight: 600; }
 .fansclub-row .unsigned { color: #b0483c; }
 .fansclub-row .nocircle { color: #8a97a5; }
+.fansclub-row .badge-on { color: #1a9c5b; font-size: 12px; }
+.fansclub-row .badge-off { color: #c2872b; font-size: 12px; }
+.fansclub-row .today-gain { color: #e0742c; font-weight: 600; }
+.fansclub-row .muted { color: #9aa7b3; }
+
+/* 账户 tab 的已检查/检查中小圆点标记 (非文字) */
+.fansclub-tab { position: relative; }
+.fansclub-tab .tab-check-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: #1a9c5b;
+  vertical-align: middle;
+}
+.fansclub-tab .tab-check-dot.checking {
+  background: #d9940f;
+  animation: tabdot-pulse 1s ease-in-out infinite;
+}
+@keyframes tabdot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}

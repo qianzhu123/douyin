@@ -152,10 +152,13 @@ def account_overview(label: str, token: str) -> dict:
             "makeup_card": None,
             "is_circle": False,
             "pending": False,
-            # 亲密度数据源: user_auto_light_up_list (§08-fansclub 4.3)
+            # 亲密度数据源: user_auto_light_up_list (§08-fansclub 4.3/§6)
             "intimacy": u.get("intimacy") or 0,
             "next_level_intimacy": u.get("next_level_intimacy"),
             "badge_status": u.get("status"),  # 1=点亮 2=熄灭(长时间未观看)
+            "today_intimacy": u.get("increased_intimacy_today") or 0,  # 今日增量
+            "watch_duration": u.get("watching_duration") or 0,  # 今日观看秒数
+            "progress_text": ((u.get("biz_extra") or {}).get("fansclub_progress_text") or ""),
             "join_days": None,
             "has_join_circle": None,  # False=未入圈, 签到日历不适用
         }

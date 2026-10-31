@@ -156,7 +156,8 @@ function FansClubPanel() {
   const clubs = overview?.clubs || [];
   const signedShown = clubs.filter((c) => c.signed || c.pending).length;
   const checking = loadingLabel === selected; // 只有当前账户自己在检查才算
-  const checkedCount = Object.values(overviewMap).filter(Boolean).length;
+  const checkedLabelRef = React.useRef(new Set()); // 已检查过的账户(标记用, 与缓存同步)
+  Object.keys(overviewMap).forEach((k) => { if (overviewMap[k]) checkedLabelRef.current.add(k); });
 
   return (
     <section className="panel fansclub-panel">
@@ -172,8 +173,8 @@ function FansClubPanel() {
           <button
             className="secondary"
             onClick={() => loadOverview(selected)}
-            disabled={!selected || !!loadingLabel}
-            title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），结果保存在本机，刷新不丢"
+            disabled={!selected || checking}
+            title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），其他账户检查中也可并发检查"
           >
             <Search size={16} /> {checking ? '检查中…' : '检查'}
           </button>
@@ -205,7 +206,8 @@ function FansClubPanel() {
                 onClick={() => setSelected(a.label)}
               >
                 {a.label}
-                {overviewMap[a.label] && ' ·'}
+                {checkedLabelRef.current.has(a.label) && <span className="tab-check-dot" title="已检查（结果保存在本机）" />}
+                {loadingLabel === a.label && <span className="tab-check-dot checking" title="检查中" />}
                 {job?.running && ' ⏳'}
                 {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
               </button>
@@ -234,21 +236,31 @@ function FansClubPanel() {
       {!checking && clubs.length > 0 && (
         <div className="fansclub-table">
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>连签</span><span>今日</span><span>亲密度</span><span>入团</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>入团</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
+            const distNext = (c.next_level_intimacy != null && c.next_level_intimacy > (c.intimacy || 0))
+              ? c.next_level_intimacy - c.intimacy : null;
             return (
               <div key={c.anchor_id} className="fansclub-row">
-                <span title={`${c.nickname}${c.next_level_intimacy ? ` · 距下一级 ${c.next_level_intimacy - c.intimacy}` : ''}`}>
+                <span title={`${c.nickname}${c.progress_text ? ` · ${c.progress_text}` : ''}`}>
                   {c.nickname}
                 </span>
                 <span>LV{c.level}</span>
+                <span className={c.badge_status === 2 ? 'badge-off' : 'badge-on'} title={c.badge_status === 2 ? '勋章熄灭（长时间未观看）' : '勋章点亮'}>
+                  {c.badge_status === 2 ? '熄' : '亮'}
+                </span>
                 <span>{c.streak}天</span>
                 <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
                   {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
                 </span>
-                <span>{(c.intimacy || 0).toLocaleString()}</span>
+                <span className={c.today_intimacy > 0 ? 'today-gain' : 'muted'}>
+                  {c.today_intimacy > 0 ? `+${c.today_intimacy}` : '0'}
+                </span>
+                <span title={distNext != null ? `距下一级还差 ${distNext.toLocaleString()}` : undefined}>
+                  {(c.intimacy || 0).toLocaleString()}
+                </span>
                 <span>{c.join_days != null ? `${c.join_days}天` : '-'}</span>
               </div>
             );
