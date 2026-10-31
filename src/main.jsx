@@ -101,7 +101,8 @@ function FansClubPanel() {
   }, []);
 
   React.useEffect(() => { loadAccounts(); }, [loadAccounts]);
-  React.useEffect(() => { if (selected) loadOverview(selected); }, [selected, loadOverview]);
+  // 切换账户不自动拉取 (每次 33 团串行查询较慢), 由「检查」按钮触发
+  React.useEffect(() => { setOverview(null); }, [selected]);
 
   // 轮询签到任务状态 (运行中每 2s)
   const hasRunning = signJobs.some((j) => j.running);
@@ -142,6 +143,7 @@ function FansClubPanel() {
   const jobFor = (label) => signJobs.find((j) => j.label === label);
   const clubs = overview?.clubs || [];
   const totalHeat = clubs.reduce((s, c) => s + (c.heat || 0), 0);
+  const signedShown = clubs.filter((c) => c.signed || c.pending).length;
 
   return (
     <section className="panel fansclub-panel">
@@ -149,13 +151,21 @@ function FansClubPanel() {
         <div>
           <h2>粉丝团签到</h2>
           <p>
-            凭证账户 {accounts.length} 个（来自真机抓取的登录态，电脑端无法直接登录添加）
-            {overview?.ok && ` · 当前 ${overview.label}：${clubs.length} 团，今日已签 ${overview.signed_count}，总热度 ${totalHeat}`}
+            凭证账户 {accounts.length} 个
+            {overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${signedShown}，总热度 ${totalHeat}`}
           </p>
         </div>
         <div className="panel-actions">
           <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
             <RotateCw size={16} /> 重载凭证
+          </button>
+          <button
+            className="secondary"
+            onClick={() => loadOverview(selected)}
+            disabled={!selected || loading}
+            title="拉取当前账户全部粉丝团的最新状态（连签/热度/排名）"
+          >
+            <Search size={16} /> {loading ? '检查中…' : '检查'}
           </button>
           <button
             onClick={signAll}
@@ -170,8 +180,7 @@ function FansClubPanel() {
       {error && <div className="notice">{error}</div>}
       {accounts.length === 0 && (
         <div className="empty">
-          未找到凭证文件。请在 data/fansclub_tokens/ 放入 {'{label, x_tt_token}'}.json
-          （凭证需在 root 真机上用 frida 抓取，见 douyin-re-lab docs/09 §79）。
+          未找到凭证文件。请在 data/fansclub_tokens/ 放入 {'{label, x_tt_token}'}.json。
         </div>
       )}
 
@@ -207,7 +216,10 @@ function FansClubPanel() {
         </div>
       )}
 
-      {loading && <div className="empty">加载中…</div>}
+      {loading && <div className="empty">检查中…</div>}
+      {!loading && !overview && !error && accounts.length > 0 && (
+        <div className="empty">点「检查」拉取 {selected} 的粉丝团状态</div>
+      )}
       {!loading && clubs.length > 0 && (
         <div className="fansclub-table">
           <div className="fansclub-row fansclub-header">
@@ -218,8 +230,8 @@ function FansClubPanel() {
               <span title={c.nickname}>{c.nickname}{c.is_circle ? ' ⭕' : ''}</span>
               <span>LV{c.level}</span>
               <span>{c.streak}天</span>
-              <span className={c.signed ? 'signed' : (c.pending ? 'pending' : 'unsigned')}>
-                {c.signed ? '✓已签' : (c.pending ? '延迟中' : '未签')}
+              <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
+                {c.signed || c.pending ? '✓已签' : '未签'}
               </span>
               <span>{c.heat}</span>
               <span>{c.rank || '-'}</span>
