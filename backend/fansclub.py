@@ -53,10 +53,17 @@ _sign_state: dict[str, dict] = {}  # label -> {running, done, fail, skip, log[],
 
 
 def _today_bj() -> tuple[int, str]:
-    """北京时间当日 0 点时间戳 (UTC-8h) 与 YYYYMMDD 字符串。日历键样本验证过。"""
+    """北京时间当日 0 点的 UTC 时间戳与 YYYYMMDD 字符串。
+
+    日历 days[].date 的口径 (服务端样本验证): 北京 11-01 的条目 date=1793462400
+    = UTC 10-31 16:00 = 北京 11-01 00:00。即"北京当日0点的UTC时间戳"。
+    旧实现 +8h 算成 1793520000 (UTC 11-01 08:00), 比真条目晚 8h → 永远匹配不上,
+    已签被误判未签 (2026-11-01 修复, 本机 UTC+8 时区下 time.gmtime(0点) 本身
+    已是"北京日期 16:00 UTC", 无需再加 8h)。
+    """
     lt = time.localtime()
-    # 北京0点 = UTC0 + 8h (样本 1793203200 = UTC 10-28 16:00 = 北京 10-29 00:00)
-    ts = int(calendar.timegm((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, 0))) + 8 * 3600
+    # 本机时钟按北京时间跑: 本机日期的 0 点在 UTC 上就是 北京当日0点 - 8h
+    ts = calendar.timegm((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, 0)) - 8 * 3600
     return ts, f"{lt.tm_year:04d}{lt.tm_mon:02d}{lt.tm_mday:02d}"
 
 
@@ -96,28 +103,30 @@ def club_list(token: str) -> list[dict]:
 
 
 def calendar_map(token: str, anchor_id: str) -> tuple[dict, dict]:
-    """返回 (calendar_map, cal_raw顶层精简). biz_extra 是 JSON 字符串需二次 parse."""
+    """返回 (已签日期集合 {date_ts: day}, cal_raw顶层精简).
+
+    真实签到记录在 months[].days[] ({date: 北京0点ts, type:1=已签, time:签到时刻}),
+    biz_extra.calendar_map 恒为空 {} (2026-11-01 实测确证, 旧实现查错地方 → 永远判未签).
+    """
     cal = _req("GET", BASE_FANDOM, "/ent/fandom/user/calendar/",
                {"business_id": anchor_id, "business_type": 4}, token)
     if cal.get("status_code") != 0:
         return {}, {}
-    be = cal.get("biz_extra")
-    cm: dict = {}
-    if isinstance(be, str):
-        try:
-            cm = json.loads(be).get("calendar_map") or {}
-        except Exception:
-            cm = {}
-    elif isinstance(be, dict):
-        cm = be.get("calendar_map") or {}
+    days: dict = {}
+    for mth in cal.get("months") or []:
+        for d in mth.get("days") or []:
+            ts = d.get("date")
+            if ts and d.get("type") == 1:  # type=1 已签
+                days[str(ts)] = d
     info = {
         "current_streak": cal.get("current_streak"),
         "makeup_card_count": cal.get("makeup_card_count"),
         "fandom_id": cal.get("fandom_id") or "",
         # 入圈判定 (§82): has_join_circle=False → 日历不适用, 不是"未签"
         "has_join_circle": cal.get("has_join_circle"),
+        "allow_sign_days_range": cal.get("allow_sign_days_range"),
     }
-    return cm, info
+    return days, info
 
 
 def rank_self(token: str, anchor_id: str) -> dict:
@@ -177,8 +186,8 @@ def account_overview(label: str, token: str) -> dict:
             if not row["signed"] and (row["streak"] or 0) >= 1:
                 row["pending"] = True
             if cm:
-                latest = cm[max(cm, key=lambda k: cm[k].get("date_str", ""))]
-                row["factor"] = latest.get("score")
+                latest_key = max(cm.keys())  # date ts 字符串, 字典序=时间序
+                row["factor"] = cm[latest_key].get("time")  # 签到时刻
         except Exception:
             pass
         try:
@@ -195,6 +204,9 @@ def account_overview(label: str, token: str) -> dict:
 
 
 def _do_sign(label: str, token: str) -> None:
+    # 【2026-11-01 恢复】用户澄清: 禁用指"先不要直接对所有账户签", 不是废弃签到。
+    # 恢复 join 签到 (保连签/灯牌), 但保留实测结论: PC join 不发亲密度(+5 不兑现),
+    # 修复亲密度需真机链路 (e87 lab 进行中)。手动触发单账户签, 不再自动全量签。
     state = _sign_state[label]
     today_ts, _ = _today_bj()
     ok = fail = skip = 0
@@ -209,9 +221,13 @@ def _do_sign(label: str, token: str) -> None:
         u = f.get("user_fansclub_info") or {}
         aid = str(u.get("anchor_id") or "")
         name = ((f.get("anchor_info") or {}).get("nickname") or "?")[:14]
-        level = u.get("level")
         try:
-            cm, _ = calendar_map(token, aid)
+            cm, info = calendar_map(token, aid)
+            # 未入圈的团 (has_join_circle=False) 日历不适用, 直接跳过不签
+            if info.get("has_join_circle") is False:
+                skip += 1
+                state["log"].append(f"跳过 {name} (未入圈)")
+                continue
             if str(today_ts) in cm:
                 skip += 1
                 state["log"].append(f"跳过 {name} (已签)")
