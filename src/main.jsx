@@ -1339,8 +1339,7 @@ function App() {
         {selected && <DetailPanel row={selected} hidden={hiddenUids.has(selected.sec_uid)} />}
 
         <FansClubPanel />
-
-        <LiveAnalysisPanel />
+        {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
 
         <section className="panel download-panel">
           <div className="panel-head">
