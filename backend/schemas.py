@@ -55,6 +55,12 @@ class LiveRoomRequest(BaseModel):
     room_id_str: str = ""
 
 
+class LiveAnalysisRequest(BaseModel):
+    room_id: str
+    anchor_id: str = ""
+    label: str = ""
+
+
 class LiveViewersRequest(BaseModel):
     sec_uid: str
 

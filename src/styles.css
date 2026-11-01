@@ -1152,3 +1152,27 @@ button:disabled {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.25; }
 }
+
+/* 直播间分析面板 */
+.live-analysis-form { display: flex; gap: 8px; margin-bottom: 12px; }
+.live-analysis-form input {
+  flex: 1; padding: 7px 10px;
+  border: 1px solid #d5e2f0; border-radius: 6px; font-size: 13px;
+}
+.live-analysis-result { display: flex; flex-direction: column; gap: 10px; }
+.live-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 14px;
+  padding: 10px 12px;
+  background: #f6faff;
+  border: 1px solid #e2ecf7;
+  border-radius: 6px;
+}
+.live-stat { display: flex; gap: 8px; font-size: 13px; align-items: baseline; min-width: 0; }
+.live-stat .k { color: #6b8299; flex-shrink: 0; }
+.live-stat .v { color: #223a52; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-rank { padding: 8px 12px; border: 1px solid #e2ecf7; border-radius: 6px; }
+.live-rank-title { font-weight: 700; font-size: 12.5px; color: #4a6580; margin-bottom: 6px; }
+.live-rank-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+.live-rank-desc { color: #8a97a5; font-size: 12px; margin-top: 4px; }

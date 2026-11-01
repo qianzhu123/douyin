@@ -396,6 +396,106 @@ function FansClubPanel() {
   );
 }
 
+// ---- 直播间分析面板 (PC 直连两头配方, 只读; §81/§83) ----
+function LiveAnalysisPanel() {
+  const [input, setInput] = React.useState('');
+  const [result, setResult] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  async function analyze() {
+    if (!input.trim()) return;
+    setBusy(true);
+    setError('');
+    setResult(null);
+    try {
+      // 支持: 纯 room_id / 直播间链接 (live.douyin.com/<web_rid 或 room_id>)
+      let roomId = input.trim();
+      const m = roomId.match(/live\.douyin\.com\/(\d+)/);
+      if (m) roomId = m[1];
+      roomId = roomId.replace(/\D/g, '');
+      if (!roomId) throw new Error('无法从输入解析出房间号');
+      const r = await fetch(`${API_BASE}/api/live/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room_id: roomId }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      if (!d.ok) throw new Error(d.error || '进房失败');
+      setResult(d);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const room = result?.room;
+  const fc = result?.fansclub;
+  const cr = result?.checkin_rank;
+
+  return (
+    <section className="panel live-analysis-panel">
+      <div className="panel-head">
+        <div>
+          <h2>直播间分析</h2>
+          <p>输入直播间链接或房间号，拉取房间数据/粉丝团面板/签到榜（只读，不进弹幕不送礼）</p>
+        </div>
+      </div>
+      <div className="live-analysis-form">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') analyze(); }}
+          placeholder="如 https://live.douyin.com/123456 或纯房间号"
+          disabled={busy}
+        />
+        <button onClick={analyze} disabled={busy || !input.trim()}>
+          {busy ? '分析中…' : '分析'}
+        </button>
+      </div>
+      {error && <div className="notice">{error}</div>}
+      {room && (
+        <div className="live-analysis-result">
+          <div className="live-stat-grid">
+            <div className="live-stat"><span className="k">主播</span><span className="v">{room.nickname}</span></div>
+            <div className="live-stat"><span className="k">标题</span><span className="v">{room.title}</span></div>
+            <div className="live-stat"><span className="k">在线观众</span><span className="v">{(room.viewers || 0).toLocaleString()}</span></div>
+            <div className="live-stat"><span className="k">累计进房</span><span className="v">{(room.total_user || 0).toLocaleString()}</span></div>
+            <div className="live-stat"><span className="k">点赞</span><span className="v">{(room.like_count || 0).toLocaleString()}</span></div>
+            <div className="live-stat"><span className="k">本场涨粉</span><span className="v">{room.follow_gained ?? '-'}</span></div>
+            <div className="live-stat"><span className="k">带货</span><span className="v">{room.has_goods ? '是' : '否'}</span></div>
+            <div className="live-stat"><span className="k">送礼</span><span className="v">{room.gift_disabled ? '主播已关' : '开放'}</span></div>
+          </div>
+          {fc && (fc.total_fans != null) && (
+            <div className="live-stat-grid">
+              <div className="live-stat"><span className="k">粉丝团</span><span className="v">{fc.anchor_name}·{fc.fans_name}</span></div>
+              <div className="live-stat"><span className="k">活跃粉丝</span><span className="v">{(fc.active_fans || 0).toLocaleString()}</span></div>
+              <div className="live-stat"><span className="k">总粉丝</span><span className="v">{(fc.total_fans || 0).toLocaleString()}</span></div>
+              <div className="live-stat"><span className="k">今日新增</span><span className="v">+{fc.today_new_fans || 0}</span></div>
+            </div>
+          )}
+          {cr && (cr.top?.length > 0) && (
+            <div className="live-rank">
+              <div className="live-rank-title">签到热度榜 (我: {cr.my_score ?? 0} 分 #{cr.my_rank || '未上榜'})</div>
+              {cr.top.map((t) => (
+                <div key={t.rank} className="live-rank-row">
+                  <span>#{t.rank}</span><span>{(t.score || 0).toLocaleString()}</span>
+                </div>
+              ))}
+              {cr.my_desc && <div className="live-rank-desc">{cr.my_desc}</div>}
+            </div>
+          )}
+          {result?.luckybox?.count > 0 && (
+            <div className="notice">检测到 {result.luckybox.count} 个福袋 (免费活动)</div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [accounts, setAccounts] = React.useState([]);
   const [watchJobs, setWatchJobs] = React.useState([]);
@@ -1239,6 +1339,8 @@ function App() {
         {selected && <DetailPanel row={selected} hidden={hiddenUids.has(selected.sec_uid)} />}
 
         <FansClubPanel />
+
+        <LiveAnalysisPanel />
 
         <section className="panel download-panel">
           <div className="panel-head">

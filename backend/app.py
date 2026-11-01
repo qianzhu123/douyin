@@ -358,6 +358,21 @@ def fansclub_check_status() -> dict:
     return _fc.check_all_status()
 
 
+# ---- 直播间 PC 直连分析 (两头配方 2.0, 只读, 见 backend/live_analysis.py) ----
+from . import live_analysis as _la
+from .schemas import LiveAnalysisRequest
+
+
+@app.post("/api/live/analyze")
+def live_analyze(payload: LiveAnalysisRequest) -> dict:
+    """进房拉房间全量+粉丝团面板+签到榜+福袋 (只读; 同房间 10 分钟节流标注)。"""
+    try:
+        return _la.analyze_room(payload.room_id.strip(), payload.anchor_id.strip() or None,
+                                payload.label.strip() or None)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
 @app.post("/api/fansclub/admin/restart-backend")
 def admin_restart_backend() -> dict:
     """幂等重启后端（8000）。前端调用后预计 1-3s 内会失联。"""
