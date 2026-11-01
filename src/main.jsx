@@ -114,7 +114,7 @@ function FansClubPanel() {
         return bm;
       });
       setOverviewMap((m) => {
-        const next = { ...m, [label]: d };
+        const next = { ...m, [label]: { ...d, checked_at: Date.now() } };
         try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略容量异常 */ }
         return next;
       });
@@ -178,7 +178,7 @@ function FansClubPanel() {
         return bm;
       });
       setOverviewMap((m) => {
-        const next = { ...m, [label]: d };
+        const next = { ...m, [label]: { ...d, checked_at: Date.now() } };
         try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
         return next;
       });
@@ -221,6 +221,7 @@ function FansClubPanel() {
   }, [hasRunning, signingAll]);
 
   async function signOne(label) {
+    if (!label) return;
     setError('');
     try {
       const r = await fetch(`${API_BASE}/api/fansclub/sign/${encodeURIComponent(label)}`, { method: 'POST' });
@@ -244,6 +245,8 @@ function FansClubPanel() {
   const jobFor = (label) => signJobs.find((j) => j.label === label);
   const overview = overviewMap[selected] ?? null; // 当前账户的缓存结果
   const clubs = overview?.clubs || [];
+  // 上次检测时间 (该账户缓存写入时刻)
+  const checkedAt = (overview && overview.checked_at) || null;
   // 今日亲密度 = 当前 - 当天基线 (服务端 increased_intimacy_today 字段是死值, 不用)
   const todayKey = new Date().toISOString().slice(0, 10);
   const todayBase = (baseMap[todayKey] || {})[selected] || {};
@@ -296,8 +299,8 @@ function FansClubPanel() {
           </button>
           <button
             onClick={signAll}
-            disabled={accounts.length === 0 || signingAll || signJobs.some((j) => j.running)}
-            title="对全部账户执行一键签到（免费端点，幂等）"
+            disabled={accounts.length === 0 || signingAll}
+            title="并发签到全部账户（各账户独立线程, 互不阻塞; 免费 join 端点, 幂等）"
           >
             <Activity size={16} /> {signingAll || signJobs.some((j) => j.running) ? '签到中…' : '一键签到全部'}
           </button>
@@ -315,33 +318,38 @@ function FansClubPanel() {
         <div className="fansclub-toolbar">
           {accounts.map((a) => {
             const job = jobFor(a.label);
+            const isSel = selected === a.label;
             return (
-              <button
-                key={a.label}
-                className={`fansclub-tab${selected === a.label ? ' active' : ''}`}
-                onClick={() => setSelected(a.label)}
-              >
-                {a.label}
-                {checkedLabelRef.current.has(a.label) && <span className="tab-check-dot" title="已检查（结果保存在本机）" />}
-                {loadingLabel === a.label && <span className="tab-check-dot checking" title="检查中" />}
-                {job?.running && ' ⏳'}
-                {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
-              </button>
+              <div key={a.label} className={`fansclub-tab-wrap${isSel ? ' active' : ''}`}>
+                <button
+                  className={`fansclub-tab${isSel ? ' active' : ''}`}
+                  onClick={() => setSelected(a.label)}
+                >
+                  {a.label}
+                  {checkedLabelRef.current.has(a.label) && <span className="tab-check-dot" title="已检查（结果保存在本机）" />}
+                  {loadingLabel === a.label && <span className="tab-check-dot checking" title="检查中" />}
+                  {job?.running && ' ⏳'}
+                  {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
+                </button>
+                <button
+                  className="fansclub-tab-sign"
+                  onClick={() => signOne(a.label)}
+                  disabled={job?.running}
+                  title={`并发签到 ${a.label} 全部未签团（免费 join 端点, 幂等; 各账户独立线程, 互不阻塞）`}
+                >
+                  签
+                </button>
+              </div>
             );
           })}
           <button
             className="secondary fansclub-sign-one"
-            onClick={() => signOne(selected)}
-            disabled={!selected || signingAll || signJobs.some((j) => j.running)}
+            onClick={signAll}
+            disabled={accounts.length === 0 || signingAll}
+            title="并发签到全部账户（各账户独立线程, 互不阻塞）"
           >
-            签到当前账户
+            {signingAll || signJobs.some((j) => j.running) ? '签到中…' : '全部签到'}
           </button>
-        </div>
-      )}
-
-      {jobFor(selected)?.log?.length > 0 && (
-        <div className="fansclub-log">
-          {jobFor(selected).log.slice(-8).map((line, i) => <div key={i}>{line}</div>)}
         </div>
       )}
 
@@ -352,12 +360,12 @@ function FansClubPanel() {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>入团</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
             const distNext = (c.next_level_intimacy != null && c.next_level_intimacy > (c.intimacy || 0))
-              ? c.next_level_intimacy - c.intimacy : null;
+              ? c.next_level_intimacy - (c.intimacy || 0) : null;
             return (
               <div key={c.anchor_id} className="fansclub-row">
                 <span title={`${c.nickname}${c.progress_text ? ` · ${c.progress_text}` : ''}`}>
@@ -366,7 +374,7 @@ function FansClubPanel() {
                 {checking ? (
                   // 检查当前账户时: 保留行框架, 数值列写「检测中」
                   <>
-                    <span className="cell-checking" colSpan={7}>检测中…</span>
+                    <span className="cell-checking" colSpan={8}>检测中…</span>
                   </>
                 ) : (
                   <>
@@ -381,8 +389,11 @@ function FansClubPanel() {
                     <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}>
                       {todayGainFor(c) ?? '-'}
                     </span>
-                    <span title={distNext != null ? `距下一级还差 ${distNext.toLocaleString()}` : undefined}>
+                    <span title={distNext != null ? `下一级需 ${c.next_level_intimacy?.toLocaleString()} 亲密度` : undefined}>
                       {(c.intimacy || 0).toLocaleString()}
+                    </span>
+                    <span className="dist-next" title={distNext != null ? `距 LV${(c.level || 0) + 1} 还差 ${distNext.toLocaleString()} 亲密度` : '已到顶或未知'}>
+                      {distNext != null ? distNext.toLocaleString() : '—'}
                     </span>
                     <span>{c.join_days != null ? `${c.join_days}天` : '-'}</span>
                   </>
@@ -390,6 +401,12 @@ function FansClubPanel() {
               </div>
             );
           })}
+        </div>
+      )}
+      {checkedAt && (
+        <div className="fansclub-checked-at">
+          上次检测：{new Date(checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+          {checking && ' · 本次检测中…'}
         </div>
       )}
     </section>

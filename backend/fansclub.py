@@ -281,14 +281,14 @@ def sign_status() -> list[dict]:
         return [dict(v) for v in _sign_state.values()]
 
 
-# ---- 全账户检查 (后台线程串行; 每天0点前端触发 + 手动触发共用) ----
+# ---- 全账户检查 (后台线程池并发; 每天0点前端触发 + 手动触发共用) ----
 _check_state: dict = {"running": False, "done_labels": [], "current": None,
                       "labels": [], "started_at": None, "finished_at": None}
 _check_lock = threading.Lock()
 
 
 def start_check_all() -> dict:
-    """后台线程串行检查全部账户; 进行中重复启动直接拒绝。"""
+    """后台线程池并发检查全部账户; 进行中重复启动直接拒绝。"""
     with _check_lock:
         if _check_state["running"]:
             return {"started": False, "reason": "already running",
@@ -305,19 +305,25 @@ def start_check_all() -> dict:
 
 
 def _do_check_all() -> None:
+    from concurrent.futures import ThreadPoolExecutor
     tokens = {a["label"]: a["token"] for a in load_tokens()}
-    for label in list(_check_state["labels"]):
-        with _check_lock:
-            if not _check_state["running"]:  # 中途停止标记预留
-                return
-            _check_state["current"] = label
+
+    def one(label: str) -> None:
         try:
             account_overview(label, tokens[label])
-            with _check_lock:
-                _check_state["done_labels"].append(label)
         except Exception:
+            pass  # 失败也计入完成
+        with _check_lock:
+            _check_state["done_labels"].append(label)
+
+    # 全部账户并发 (各账户独立 token/连接, 无共享状态; 团数 12-33, 并发安全)
+    with ThreadPoolExecutor(max_workers=len(tokens) or 1) as ex:
+        for label in list(_check_state["labels"]):
             with _check_lock:
-                _check_state["done_labels"].append(label)  # 失败也计入完成
+                if not _check_state["running"]:
+                    return
+                _check_state["current"] = label
+            ex.submit(one, label)
     with _check_lock:
         _check_state.update(running=False, current=None, finished_at=time.time())
 
@@ -325,3 +331,33 @@ def _do_check_all() -> None:
 def check_all_status() -> dict:
     with _check_lock:
         return dict(_check_state)
+
+
+# ---- 每天 0 点后自动全量检测 (后端内置定时器, 不依赖前端开着) ----
+# 旧实现靠前端 setInterval 触发: 页面没开就不检测 → 用户看到"凌晨检测没实现"。
+# 改为后端每 10 分钟醒一次, 跨了北京日期 (且距上次完成 >=20 分钟) 就自动 start_check_all。
+_auto_check_day: str = ""  # 已自动检测过的日期 (YYYYMMDD)
+
+
+def _auto_check_loop() -> None:
+    global _auto_check_day
+    while True:
+        try:
+            _, day_str = _today_bj()
+            with _check_lock:
+                finished = _check_state.get("finished_at") or 0
+                running = _check_state["running"]
+            # 跨日 (含上午开机补跑) 且当前空闲 → 触发; start_check_all 内部抢 _check_lock,
+            # 必须在锁外调用 (Lock 不可重入, 锁内调 = 死锁, 2026-11-02 实测踩坑)
+            if day_str != _auto_check_day and not running and time.time() - finished > 1200:
+                started = start_check_all()
+                if started.get("started") or started.get("reason") == "no tokens":
+                    _auto_check_day = day_str  # 无凭证也标记, 不再空转重试
+        except Exception:
+            pass
+        time.sleep(600)  # 10 分钟
+
+
+def start_auto_check_daemon() -> None:
+    t = threading.Thread(target=_auto_check_loop, daemon=True, name="fansclub-auto-check")
+    t.start()

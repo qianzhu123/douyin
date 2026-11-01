@@ -1069,21 +1069,44 @@ button:disabled {
   border-color: #2f8cff;
 }
 
+.fansclub-tab-wrap {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
 .fansclub-sign-one {
   margin-left: auto;
 }
 
-.fansclub-log {
-  background: #f4f8fd;
-  border: 1px solid #e2ecf7;
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #3d5a75;
-  margin-bottom: 10px;
-  max-height: 140px;
-  overflow-y: auto;
+.fansclub-tab-sign {
+  background: #e8f3ec;
+  color: #1a7a4a;
+  border: 1px solid #cde8d8;
+  border-left: 0;
+  padding: 6px 10px;
+  font-weight: 700;
+  font-size: 12.5px;
+}
+
+.fansclub-tab-wrap.active .fansclub-tab-sign {
+  background: #2aa56b;
+  color: #fff;
+  border-color: #2aa56b;
+}
+
+.fansclub-tab-sign:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.fansclub-row .dist-next { color: #6a7f94; font-variant-numeric: tabular-nums; }
+
+.fansclub-checked-at {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #8a97a5;
 }
 
 .fansclub-table {
@@ -1096,7 +1119,7 @@ button:disabled {
 
 .fansclub-row {
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) 52px 48px 68px 76px 88px 88px 64px;
+  grid-template-columns: minmax(90px, 1fr) 48px 44px 62px 70px 80px 80px 84px 56px;
   gap: 8px;
   padding: 7px 12px;
   font-size: 13.5px;

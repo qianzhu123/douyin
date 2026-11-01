@@ -305,6 +305,8 @@ from .config import PROJECT_ROOT as _PROJECT_ROOT
 # ---- 粉丝团签到 (PC 直连, 凭证来自 data/fansclub_tokens/, 详见 backend/fansclub.py) ----
 from . import fansclub as _fc
 
+_fc.start_auto_check_daemon()  # 每天 0 点后自动全量检测 (后端内置定时器, 不依赖前端)
+
 
 @app.get("/api/fansclub/accounts")
 def fansclub_accounts() -> dict:
