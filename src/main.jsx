@@ -205,17 +205,33 @@ function FansClubPanel() {
     return () => clearInterval(t);
   }, [checkAll?.running]);
 
-  // 轮询签到任务状态 (运行中每 2s)
+  // 轮询签到任务状态 (运行中每 2s); 后端重启等导致 fetch 连续失败时自动解除禁用
   const hasRunning = signJobs.some((j) => j.running);
+  const pollFailRef = React.useRef(0);
   React.useEffect(() => {
-    if (!hasRunning && !signingAll) return undefined;
-    const t = setInterval(async () => {
+    // 挂载即同步一次: 防止后端重启后残留 signingAll=true 永久禁用按钮
+    (async () => {
       try {
         const r = await fetch(`${API_BASE}/api/fansclub/sign-status`);
         const d = await r.json();
         setSignJobs(d.jobs || []);
         if (!(d.jobs || []).some((j) => j.running)) setSigningAll(false);
       } catch { /* ignore */ }
+    })();
+  }, []);
+  React.useEffect(() => {
+    if (!hasRunning && !signingAll) return undefined;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/fansclub/sign-status`);
+        const d = await r.json();
+        pollFailRef.current = 0;
+        setSignJobs(d.jobs || []);
+        if (!(d.jobs || []).some((j) => j.running)) setSigningAll(false);
+      } catch {
+        pollFailRef.current += 1;
+        if (pollFailRef.current >= 3) setSigningAll(false); // 连续失败3次=后端不在, 解除禁用
+      }
     }, 2000);
     return () => clearInterval(t);
   }, [hasRunning, signingAll]);
@@ -326,8 +342,6 @@ function FansClubPanel() {
           <h2>粉丝团签到</h2>
           <p>
             凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => c.signed || c.pending).length}`}
-            {checkedAt && ` · 上次检测 ${new Date(checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`}
-            {checking && ' · 检测中…'}
           </p>
         </div>
         <div className="panel-actions">
@@ -392,6 +406,15 @@ function FansClubPanel() {
                   {job?.running && ' ⏳'}
                   {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
                 </button>
+                {/* 账户级信息挂在账户处: 上次检测时间 */}
+                {(() => {
+                  const ov = overviewMap[a.label];
+                  return ov?.checked_at && (
+                    <span className="tab-check-at" title={`${a.label} 上次检测时间`}>
+                      {new Date(ov.checked_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  );
+                })()}
               </div>
             );
           })}
@@ -413,7 +436,7 @@ function FansClubPanel() {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>上次签到</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -436,11 +459,9 @@ function FansClubPanel() {
                       {c.badge_status === 2 ? '熄' : '亮'}
                     </span>
                     <span>{c.streak}天</span>
-                    <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
+                    <span className={c.signed || c.pending ? 'signed' : 'unsigned'} title={`该团最近一次签到时刻${c.factor ? `: ${new Date(c.factor * 1000).toLocaleString('zh-CN')}` : '（无记录）'}`}>
                       {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
-                    </span>
-                    <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}>
-                      {todayGainFor(c) ?? '-'}
+                      {c.factor ? <span className="signed-at">{new Date(c.factor * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span> : null}
                     </span>
                     <span title={distNext != null ? `下一级需 ${c.next_level_intimacy?.toLocaleString()} 亲密度` : undefined}>
                       {(c.intimacy || 0).toLocaleString()}
@@ -453,7 +474,7 @@ function FansClubPanel() {
                       <button
                         className="club-check-btn"
                         disabled={!!clubCheckBusy}
-                        title="检测该主播粉丝团最新状态（等级/连签/亲密度/排名）"
+                        title={`检测该主播最新状态${c.factor ? `（上次签到 ${new Date(c.factor * 1000).toLocaleString('zh-CN')}）` : ''}`}
                         onClick={() => checkClub(selected, c)}
                       >
                         {clubCheckBusy === c.anchor_id ? '…' : '检'}

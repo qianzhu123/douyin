@@ -1119,7 +1119,7 @@ button:disabled {
 
 .fansclub-row {
   display: grid;
-  grid-template-columns: minmax(90px, 1fr) 48px 44px 62px 70px 80px 80px 84px 56px 78px;
+  grid-template-columns: minmax(90px, 1fr) 48px 44px 62px 92px 80px 80px 84px 56px 78px;
   gap: 8px;
   padding: 7px 12px;
   font-size: 13.5px;
@@ -1146,6 +1146,10 @@ button:disabled {
 
 .fansclub-row .signed { color: #1a9c5b; font-weight: 600; }
 .fansclub-row .pending { color: #d9940f; font-weight: 600; }
+.signed-at { color: #7a93a9; font-weight: 400; font-size: 11.5px; margin-left: 4px; }
+
+/* 账户 tab 旁的上次检测时间 */
+.tab-check-at { color: #7a93a9; font-size: 11px; margin-left: 5px; white-space: nowrap; }
 .fansclub-row .unsigned { color: #b0483c; }
 .fansclub-row .nocircle { color: #8a97a5; }
 .fansclub-row .badge-on { color: #1a9c5b; font-size: 12px; }

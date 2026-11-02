@@ -238,6 +238,8 @@ def check_club(label: str, token: str, anchor_id: str) -> dict:
         "has_join_circle": None, "heat": 0, "rank": None,
     }
     # 灯亮列表取基础字段 (昵称/等级/亲密度/勋章)
+    # 注意: 新加的粉丝团可能有同步延迟不在列表里, 此时仍继续检测 (日历/排名只认 anchor_id)
+    in_list = False
     try:
         for f in club_list(token):
             u = f.get("user_fansclub_info") or {}
@@ -255,11 +257,12 @@ def check_club(label: str, token: str, anchor_id: str) -> dict:
                 pt = u.get("participate_time") or 0
                 if pt:
                     row["join_days"] = int((time.time() - pt) / 86400)
+                in_list = True
                 break
     except Exception as exc:
         return {"ok": False, "msg": f"灯亮列表失败: {str(exc)[:100]}"}
-    if row["nickname"] is None:
-        return {"ok": False, "msg": "该主播不在本账户粉丝团列表"}
+    if not in_list:
+        row["nickname"] = "(新团, 详情待同步)"
     # 日历
     try:
         cm, info = calendar_map(token, aid)
