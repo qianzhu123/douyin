@@ -100,18 +100,19 @@ function FansClubPanel() {
         throw new Error(d.detail || r.statusText);
       }
       const d = await r.json();
-      // 今日基线: 同一天第一次见到该账户时, 记录各团亲密度
+      // 今日基线 (增量数据源): 每团独立, 当天还没有该团基线才记
       const todayKey = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京日期(UTC+8), 裸toISOString在早8点前算成昨天
       setBaseMap((bm) => {
         const day = bm[todayKey] || {};
-        if (!day[label]) {
-          const base = {};
-          (d.clubs || []).forEach((c) => { base[c.anchor_id] = c.intimacy || 0; });
-          const next = { ...bm, [todayKey]: { ...day, [label]: base } };
-          try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
-          return next;
-        }
-        return bm;
+        const base = { ...(day[label] || {}) };
+        let added = false;
+        (d.clubs || []).forEach((c) => {
+          if (base[c.anchor_id] == null) { base[c.anchor_id] = c.intimacy || 0; added = true; }
+        });
+        if (!added) return bm;
+        const next = { ...bm, [todayKey]: { ...day, [label]: base } };
+        try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+        return next;
       });
       setOverviewMap((m) => {
         const next = { ...m, [label]: { ...d, checked_at: Date.now() } };
@@ -199,14 +200,15 @@ function FansClubPanel() {
       const todayKey = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京日期(UTC+8), 裸toISOString在早8点前算成昨天
       setBaseMap((bm) => {
         const day = bm[todayKey] || {};
-        if (!day[label]) {
-          const base = {};
-          (d.clubs || []).forEach((c) => { base[c.anchor_id] = c.intimacy || 0; });
-          const next = { ...bm, [todayKey]: { ...day, [label]: base } };
-          try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
-          return next;
-        }
-        return bm;
+        const base = { ...(day[label] || {}) };
+        let added = false;
+        (d.clubs || []).forEach((c) => {
+          if (base[c.anchor_id] == null) { base[c.anchor_id] = c.intimacy || 0; added = true; }
+        });
+        if (!added) return bm;
+        const next = { ...bm, [todayKey]: { ...day, [label]: base } };
+        try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+        return next;
       });
       setOverviewMap((m) => {
         const next = { ...m, [label]: { ...d, checked_at: Date.now() } };
@@ -292,6 +294,18 @@ function FansClubPanel() {
   const jobFor = (label) => signJobs.find((j) => j.label === label);
   // 单团签到: 每主播行独立按钮, 状态 {aid: 'signing'|'ok:...'|'err:...'}
   const [clubSignState, setClubSignState] = React.useState({});
+  // 跨天重置: 北京日期变化时清空单团签到状态 (昨天的"已签"不能再禁今天的按钮)
+  const signStateDayRef = React.useRef(new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10));
+  React.useEffect(() => {
+    const t = setInterval(() => {
+      const d = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      if (d !== signStateDayRef.current) {
+        signStateDayRef.current = d;
+        setClubSignState({}); // 解开所有"已签"禁用, 以重新检测/签到结果为准
+      }
+    }, 30 * 1000);
+    return () => clearInterval(t);
+  }, []);
   // 单团检测: 行内按钮刷新该团最新状态
   const [clubCheckBusy, setClubCheckBusy] = React.useState('');
   async function checkClub(label, c) {
@@ -301,24 +315,27 @@ function FansClubPanel() {
       const r = await fetch(`${API_BASE}/api/fansclub/check-club/${encodeURIComponent(label)}?anchor_id=${encodeURIComponent(c.anchor_id)}`);
       const d = await r.json();
       if (!d.ok) throw new Error(d.msg || '检测失败');
-      // 用返回行替换缓存里对应团 + 同步该账户上次检测时间
+      // 只更新该团数据行; 账户级 checked_at 不动 (账户检测时间只随账户级检测变, 用户指定)
       setOverviewMap((m) => {
         const ov = m[label];
         if (!ov || !ov.clubs) return m;
         const clubs = ov.clubs.map((x) => (x.anchor_id === c.anchor_id ? { ...x, ...d.club } : x));
-        const next = { ...m, [label]: { ...ov, clubs, checked_at: Date.now() } };
+        const next = { ...m, [label]: { ...ov, clubs } };
         try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
         return next;
       });
-      // 今日基线: 该账户当天还没有基线时, 用本行亲密度记一条 (否则后续增量从0起算会漏掉本次变化)
+      // 今日基线 (增量数据源): 该团当天还没有基线时记一条
       const bjToday = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
       setBaseMap((bm) => {
         const day = bm[bjToday] || {};
-        if (day[label]) return bm; // 已有基线不动
-        const base = { [c.anchor_id]: d.club.intimacy || 0 };
-        const next = { ...bm, [bjToday]: { ...day, [label]: base } };
-        try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
-        return next;
+        const base = { ...(day[label] || {}) };
+        if (base[c.anchor_id] == null) {
+          base[c.anchor_id] = d.club.intimacy || 0;
+          const next = { ...bm, [bjToday]: { ...day, [label]: base } };
+          try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+          return next;
+        }
+        return bm;
       });
       showToast('ok', `${d.club?.nickname || c.nickname} 检测完成${d.club?.streak != null ? `（连签${d.club.streak}天）` : ''}`);
     } catch (e) {
@@ -396,7 +413,7 @@ function FansClubPanel() {
         <div>
           <h2>粉丝团签到</h2>
           <p>
-            凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => c.signed || c.pending).length}`}
+            凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => (c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`)) || clubSignState[c.anchor_id]?.startsWith('ok:')).length}`}
           </p>
         </div>
         <div className="panel-actions">
@@ -513,9 +530,15 @@ function FansClubPanel() {
                       {c.badge_status === 2 ? '熄' : '亮'}
                     </span>
                     <span>{c.streak}天</span>
-                    <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
-                      {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '已签' : '未签')}
-                    </span>
+                    {(() => {
+                      // 状态列按检测时刻的"当天"判定: 跨天后昨天的已签显示"昨签", 今日重置为可签
+                      const factorToday = c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`);
+                      const st = clubSignState[c.anchor_id] || '';
+                      const isOk = st.startsWith('ok:') || factorToday;
+                      const label = noCircle ? <span className="nocircle">未入圈</span>
+                        : isOk ? '已签' : (c.pending && !factorToday ? '待定' : '未签');
+                      return <span className={isOk ? 'signed' : 'unsigned'}>{label}</span>;
+                    })()}
                     <span className="signed-at-cell" title={c.factor ? `该团最近一次签到: ${new Date(c.factor * 1000).toLocaleString('zh-CN')}` : '无记录'}>
                       {c.factor ? new Date(c.factor * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '—'}
                     </span>
@@ -541,8 +564,10 @@ function FansClubPanel() {
                       </button>
                       {clubSignState[c.anchor_id]?.startsWith('signing') ? (
                         <button className="club-sign-btn" disabled>…</button>
-                      ) : clubSignState[c.anchor_id]?.startsWith('ok:') || c.signed || c.pending ? (
-                        // 成功/已签: 按钮置灰不可点 (不显示对号), 失败可重试
+                      ) : clubSignState[c.anchor_id]?.startsWith('ok:')
+                        || (c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`)) ? (
+                        // 今日已签(本会话签到成功, 或检测结果的上次签到时刻是今天): 置灰不可点
+                        // c.signed 是上次检测快照(可能是昨天), 不用于今天的按钮判断
                         <button className="club-sign-btn club-sign-disabled" disabled
                           title={clubSignState[c.anchor_id]?.slice(3) || '今日已签'}>
                           已签
