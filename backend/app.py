@@ -370,6 +370,12 @@ def fansclub_check_club(label: str, anchor_id: str) -> dict:
     return _fc.check_club(label, tokens[label], anchor_id)
 
 
+@app.get("/api/fansclub/overview-cache")
+def fansclub_overview_cache() -> dict:
+    """后端落盘的最新检测结果 (定时检测在页面没开时也有效)。"""
+    return {"cache": _fc.load_overview_cache()}
+
+
 @app.post("/api/fansclub/check-all")
 def fansclub_check_all() -> dict:
     """后台串行检查全部账户 (每天0点前端自动触发 + 手动按钮共用)。"""

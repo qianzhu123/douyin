@@ -131,6 +131,37 @@ function FansClubPanel() {
   }, []);
 
   React.useEffect(() => { loadAccounts(); }, [loadAccounts]);
+  // 挂载时同步后端落盘缓存 (断链修复: 定时检测在页面没开时也把结果存后端了,
+  // 打开页面取最新份覆盖比它旧的本地缓存)
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/fansclub/overview-cache`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const cache = d.cache || {};
+        setOverviewMap((m) => {
+          let changed = false;
+          const next = { ...m };
+          for (const [label, ov] of Object.entries(cache)) {
+            if (!ov || !ov.ok) continue;
+            const cur = m[label];
+            // 后端缓存更新才覆盖 (checked_at 后端存的是秒, 前端是毫秒)
+            const backendAt = (ov.checked_at || 0) * (ov.checked_at < 1e12 ? 1000 : 1);
+            if (!cur || (cur.checked_at || 0) < backendAt) {
+              next[label] = { ...ov, checked_at: backendAt || Date.now() };
+              changed = true;
+            }
+          }
+          if (changed) {
+            try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
+            return next;
+          }
+          return m;
+        });
+      } catch { /* ignore */ }
+    })();
+  }, []);
   // 切换账户不自动拉取也不清缓存: 已检查过的账户随时切回查看, 「检查」才更新
 
   // ---- 每天 0 点后首次见到时, 自动全量检查一遍 (后台串行, 前端只触发+轮询) ----

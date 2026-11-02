@@ -23,6 +23,9 @@ from pathlib import Path
 from .config import DATA_DIR
 
 TOKENS_DIR = DATA_DIR / "fansclub_tokens"
+# 检测结果落盘缓存: 后端定时检测的结果存这里, 页面打开直接读最新份,
+# 不再依赖"页面当时开着才能把结果拉回前端缓存" (2026-11-03 断链修复)
+OVERVIEW_CACHE_FILE = DATA_DIR / "fansclub_overview_cache.json"
 
 BASE_WEBCAST = "https://webcast.amemv.com"
 BASE_FANDOM = "https://fandom.starplaylet.com"
@@ -235,7 +238,7 @@ def check_club(label: str, token: str, anchor_id: str) -> dict:
         "signed": False, "pending": False, "makeup_card": None, "is_circle": False,
         "intimacy": 0, "next_level_intimacy": None, "badge_status": None,
         "watch_duration": 0, "progress_text": "", "join_days": None,
-        "has_join_circle": None, "heat": 0, "rank": None,
+        "has_join_circle": None, "heat": 0, "rank": None, "factor": None,
     }
     # 灯亮列表取基础字段 (昵称/等级/亲密度/勋章)
     # 注意: 新加的粉丝团可能有同步延迟不在列表里, 此时仍继续检测 (日历/排名只认 anchor_id)
@@ -389,13 +392,39 @@ def start_check_all() -> dict:
         return {"started": True}
 
 
+def _save_overview_cache(label: str, overview: dict) -> None:
+    """检测结果落盘 (断链修复: 定时检测的结果不再只存在于函数返回值)。"""
+    try:
+        data: dict = {}
+        if OVERVIEW_CACHE_FILE.exists():
+            data = json.loads(OVERVIEW_CACHE_FILE.read_text(encoding="utf-8"))
+        overview = dict(overview)
+        overview["checked_at"] = time.time()
+        data[label] = overview
+        OVERVIEW_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass  # 缓存失败不影响检测本身
+
+
+def load_overview_cache() -> dict:
+    """读落盘缓存 (页面打开时取最新检测结果用)。"""
+    try:
+        if OVERVIEW_CACHE_FILE.exists():
+            return json.loads(OVERVIEW_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
 def _do_check_all() -> None:
     from concurrent.futures import ThreadPoolExecutor
     tokens = {a["label"]: a["token"] for a in load_tokens()}
 
     def one(label: str) -> None:
         try:
-            account_overview(label, tokens[label])
+            ov = account_overview(label, tokens[label])
+            if ov.get("ok"):
+                _save_overview_cache(label, ov)  # 结果落盘, 页面打开可读
         except Exception:
             pass  # 失败也计入完成
         with _check_lock:
@@ -421,11 +450,11 @@ def check_all_status() -> dict:
 # ---- 每天北京时间 12 点自动全量检测 (后端内置定时器, 不依赖前端开着) ----
 # 用户指定固定时刻 (2026-11-02): 每天 12:00 检测一次, 不做高频轮询。
 # 实现每分钟醒一次看钟, 到点且当日未跑过就触发; 若凌晨时后端没开机,
-# 当天 00:05-23:59 之间任意时刻启动后端都会补跑一次 (跨日补跑语义)。
+# 当天任意时刻启动后端都会补跑一次 (跨日补跑语义)。
 _auto_check_day: str = ""  # 已自动检测过的日期 (YYYYMMDD)
 
-AUTO_CHECK_HOUR = 0   # 每天凌晨 00:05 自动全量检测 (用户指定凌晨; 12点旧版已废弃)
-AUTO_CHECK_MIN = 5
+AUTO_CHECK_HOUR = 0   # 每天凌晨 00:00 整点自动全量检测 (用户指定; 12点旧版已废弃)
+AUTO_CHECK_MIN = 0
 
 
 def _auto_check_loop() -> None:
