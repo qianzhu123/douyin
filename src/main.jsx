@@ -436,7 +436,7 @@ function FansClubPanel() {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>上次签到</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -459,9 +459,15 @@ function FansClubPanel() {
                       {c.badge_status === 2 ? '熄' : '亮'}
                     </span>
                     <span>{c.streak}天</span>
-                    <span className={c.signed || c.pending ? 'signed' : 'unsigned'} title={`该团最近一次签到时刻${c.factor ? `: ${new Date(c.factor * 1000).toLocaleString('zh-CN')}` : '（无记录）'}`}>
-                      {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '✓已签' : '未签')}
-                      {c.factor ? <span className="signed-at">{new Date(c.factor * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span> : null}
+                    <span className={c.signed || c.pending ? 'signed' : 'unsigned'}>
+                      {noCircle ? <span className="nocircle">未入圈</span> : (c.signed || c.pending ? '已签' : '未签')}
+                    </span>
+                    <span className="signed-at-cell" title={c.factor ? `该团最近一次签到: ${new Date(c.factor * 1000).toLocaleString('zh-CN')}` : '无记录'}>
+                      {c.factor ? new Date(c.factor * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '—'}
+                    </span>
+                    <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}
+                      title={todayGainFor(c) && todayGainFor(c) !== '0' ? '今日亲密度增量' : undefined}>
+                      {todayGainFor(c) ?? '-'}
                     </span>
                     <span title={distNext != null ? `下一级需 ${c.next_level_intimacy?.toLocaleString()} 亲密度` : undefined}>
                       {(c.intimacy || 0).toLocaleString()}
@@ -473,7 +479,7 @@ function FansClubPanel() {
                     <span className="club-sign-cell">
                       <button
                         className="club-check-btn"
-                        disabled={!!clubCheckBusy}
+                        disabled={clubCheckBusy === c.anchor_id}
                         title={`检测该主播最新状态${c.factor ? `（上次签到 ${new Date(c.factor * 1000).toLocaleString('zh-CN')}）` : ''}`}
                         onClick={() => checkClub(selected, c)}
                       >

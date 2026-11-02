@@ -1119,7 +1119,7 @@ button:disabled {
 
 .fansclub-row {
   display: grid;
-  grid-template-columns: minmax(90px, 1fr) 48px 44px 62px 92px 80px 80px 84px 56px 78px;
+  grid-template-columns: minmax(90px, 1fr) 44px 44px 56px 56px 68px 80px 80px 84px 52px 84px;
   gap: 8px;
   padding: 7px 12px;
   font-size: 13.5px;
