@@ -241,6 +241,15 @@ function FansClubPanel() {
   // 轮询签到任务状态 (运行中每 2s); 后端重启等导致 fetch 连续失败时自动解除禁用
   const hasRunning = signJobs.some((j) => j.running);
   const pollFailRef = React.useRef(0);
+  // 签到全部完成后自动刷新当前账户数据 (签到成功要反映到行数据/状态列)
+  const wasRunningRef = React.useRef(false);
+  React.useEffect(() => {
+    if (wasRunningRef.current && !hasRunning && !signingAll) {
+      wasRunningRef.current = false;
+      if (selected) loadOverview(selected);
+    }
+    if (hasRunning) wasRunningRef.current = true;
+  }, [hasRunning, signingAll, selected, loadOverview]);
   React.useEffect(() => {
     // 挂载即同步一次: 防止后端重启后残留 signingAll=true 永久禁用按钮
     (async () => {
@@ -319,7 +328,13 @@ function FansClubPanel() {
       setOverviewMap((m) => {
         const ov = m[label];
         if (!ov || !ov.clubs) return m;
-        const clubs = ov.clubs.map((x) => (x.anchor_id === c.anchor_id ? { ...x, ...d.club } : x));
+        const clubs = ov.clubs.map((x) => {
+          if (x.anchor_id !== c.anchor_id) return x;
+          const merged = { ...x, ...d.club };
+          // 日历有渲染延迟: 刚签的条目未出现时 factor 为空, 保留旧值不回退
+          if (d.club.factor == null && x.factor != null) merged.factor = x.factor;
+          return merged;
+        });
         const next = { ...m, [label]: { ...ov, clubs } };
         try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
         return next;
@@ -364,6 +379,16 @@ function FansClubPanel() {
       const d = await r.json();
       if (d.ok) {
         setClubSignState((s) => ({ ...s, [aid]: `ok:${d.msg || '已签'}` }));
+        // 签到成功即写上次签到时刻=现在 (日历接口有渲染延迟, 不等它)
+        setOverviewMap((m) => {
+          const ov = m[label];
+          if (!ov || !ov.clubs) return m;
+          const now = Math.floor(Date.now() / 1000);
+          const clubs = ov.clubs.map((x) => (x.anchor_id === aid ? { ...x, factor: now } : x));
+          const next = { ...m, [label]: { ...ov, clubs } };
+          try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
+          return next;
+        });
         showToast('ok', `${c.nickname} 签到成功${d.msg ? `（${d.msg}）` : ''}`);
       } else {
         setClubSignState((s) => ({ ...s, [aid]: `err:${d.msg || '失败'}` }));
