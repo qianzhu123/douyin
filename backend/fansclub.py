@@ -333,9 +333,10 @@ def check_all_status() -> dict:
         return dict(_check_state)
 
 
-# ---- 每天 0 点后自动全量检测 (后端内置定时器, 不依赖前端开着) ----
-# 旧实现靠前端 setInterval 触发: 页面没开就不检测 → 用户看到"凌晨检测没实现"。
-# 改为后端每 10 分钟醒一次, 跨了北京日期 (且距上次完成 >=20 分钟) 就自动 start_check_all。
+# ---- 每天北京时间 12 点自动全量检测 (后端内置定时器, 不依赖前端开着) ----
+# 用户指定固定时刻 (2026-11-02): 每天 12:00 检测一次, 不做高频轮询。
+# 实现每分钟醒一次看钟, 到点且当日未跑过就触发; 若 12 点时后端没开机,
+# 当天 12:00-23:59 之间任意时刻启动后端都会补跑一次 (跨日补跑语义)。
 _auto_check_day: str = ""  # 已自动检测过的日期 (YYYYMMDD)
 
 
@@ -343,19 +344,20 @@ def _auto_check_loop() -> None:
     global _auto_check_day
     while True:
         try:
-            _, day_str = _today_bj()
+            lt = time.localtime()
+            day_str = f"{lt.tm_year:04d}{lt.tm_mon:02d}{lt.tm_mday:02d}"
+            at_or_after_noon = lt.tm_hour >= 12
             with _check_lock:
-                finished = _check_state.get("finished_at") or 0
                 running = _check_state["running"]
-            # 跨日 (含上午开机补跑) 且当前空闲 → 触发; start_check_all 内部抢 _check_lock,
+            # 当天 12 点及以后且未跑过 → 触发; start_check_all 内部抢 _check_lock,
             # 必须在锁外调用 (Lock 不可重入, 锁内调 = 死锁, 2026-11-02 实测踩坑)
-            if day_str != _auto_check_day and not running and time.time() - finished > 1200:
+            if at_or_after_noon and day_str != _auto_check_day and not running:
                 started = start_check_all()
                 if started.get("started") or started.get("reason") == "no tokens":
                     _auto_check_day = day_str  # 无凭证也标记, 不再空转重试
         except Exception:
             pass
-        time.sleep(600)  # 10 分钟
+        time.sleep(60)  # 每分钟看一次钟
 
 
 def start_auto_check_daemon() -> None:
