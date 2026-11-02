@@ -349,6 +349,27 @@ def fansclub_sign_status() -> dict:
     return {"jobs": _fc.sign_status()}
 
 
+@app.post("/api/fansclub/sign-club/{label}")
+def fansclub_sign_club(label: str, payload: dict) -> dict:
+    """单团签到 (每主播行按钮; body {anchor_id}; bt=4 join, 幂等)。"""
+    tokens = {a["label"]: a["token"] for a in _fc.load_tokens()}
+    if label not in tokens:
+        raise HTTPException(status_code=404, detail=f"no token for label: {label}")
+    aid = str((payload or {}).get("anchor_id") or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="anchor_id required")
+    return _fc.sign_club(label, tokens[label], aid)
+
+
+@app.get("/api/fansclub/check-club/{label}")
+def fansclub_check_club(label: str, anchor_id: str) -> dict:
+    """单团检测 (每主播行按钮; 返回该团最新状态行)。"""
+    tokens = {a["label"]: a["token"] for a in _fc.load_tokens()}
+    if label not in tokens:
+        raise HTTPException(status_code=404, detail=f"no token for label: {label}")
+    return _fc.check_club(label, tokens[label], anchor_id)
+
+
 @app.post("/api/fansclub/check-all")
 def fansclub_check_all() -> dict:
     """后台串行检查全部账户 (每天0点前端自动触发 + 手动按钮共用)。"""

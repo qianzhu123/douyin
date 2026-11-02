@@ -203,6 +203,86 @@ def account_overview(label: str, token: str) -> dict:
             "signed_count": sum(1 for c in clubs if c["signed"])}
 
 
+def sign_club(label: str, token: str, anchor_id: str) -> dict:
+    """单团签到 (每主播行按钮; bt=4 join, 与全量签同形状, 幂等)。"""
+    aid = str(anchor_id or "").strip()
+    if not aid:
+        return {"ok": False, "msg": "anchor_id 为空"}
+    try:
+        r = _req("POST", BASE_FANDOM, "/ent/fandom/join/",
+                 {"business_id": aid, "join_type": 3, "action": 1,
+                  "business_type": 4, "fandom_id": aid, "level": 0}, token)
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)[:120]}
+    sc = r.get("status_code")
+    if sc == 0:
+        qt = r.get("qiandao_text") or {}
+        return {"ok": True, "msg": f"连签{qt.get('continues_sign_days')}天",
+                "continues_sign_days": qt.get("continues_sign_days")}
+    if sc == 14001:
+        return {"ok": True, "msg": "已签 (幂等兜底)"}
+    return {"ok": False, "msg": f"status={sc} {str(r.get('status_msg'))[:60]}"}
+
+
+def check_club(label: str, token: str, anchor_id: str) -> dict:
+    """单团检测 (每主播行按钮; 拉该团日历+排名, 返回与 overview 行同构的单行)。"""
+    aid = str(anchor_id or "").strip()
+    if not aid:
+        return {"ok": False, "msg": "anchor_id 为空"}
+    today_ts, _ = _today_bj()
+    row = {
+        "anchor_id": aid, "nickname": None, "level": None, "streak": 0,
+        "signed": False, "pending": False, "makeup_card": None, "is_circle": False,
+        "intimacy": 0, "next_level_intimacy": None, "badge_status": None,
+        "watch_duration": 0, "progress_text": "", "join_days": None,
+        "has_join_circle": None, "heat": 0, "rank": None,
+    }
+    # 灯亮列表取基础字段 (昵称/等级/亲密度/勋章)
+    try:
+        for f in club_list(token):
+            u = f.get("user_fansclub_info") or {}
+            if str(u.get("anchor_id") or "") == aid:
+                ai = f.get("anchor_info") or {}
+                row.update({
+                    "nickname": ai.get("nickname") or "?",
+                    "level": u.get("level"),
+                    "intimacy": u.get("intimacy") or 0,
+                    "next_level_intimacy": u.get("next_level_intimacy"),
+                    "badge_status": u.get("status"),
+                    "watch_duration": u.get("watching_duration") or 0,
+                    "progress_text": ((u.get("biz_extra") or {}).get("fansclub_progress_text") or ""),
+                })
+                pt = u.get("participate_time") or 0
+                if pt:
+                    row["join_days"] = int((time.time() - pt) / 86400)
+                break
+    except Exception as exc:
+        return {"ok": False, "msg": f"灯亮列表失败: {str(exc)[:100]}"}
+    if row["nickname"] is None:
+        return {"ok": False, "msg": "该主播不在本账户粉丝团列表"}
+    # 日历
+    try:
+        cm, info = calendar_map(token, aid)
+        row["streak"] = info.get("current_streak") or 0
+        row["makeup_card"] = info.get("makeup_card_count")
+        row["is_circle"] = bool(info.get("fandom_id"))
+        row["has_join_circle"] = info.get("has_join_circle")
+        if str(today_ts) in cm:
+            row["signed"] = True
+        if not row["signed"] and (row["streak"] or 0) >= 1:
+            row["pending"] = True
+    except Exception:
+        pass
+    # 排名
+    try:
+        si = rank_self(token, aid)
+        row["heat"] = si.get("score") or 0
+        row["rank"] = si.get("rank")
+    except Exception:
+        pass
+    return {"ok": True, "club": row, "checked_at": time.time()}
+
+
 def _do_sign(label: str, token: str) -> None:
     # 【2026-11-01 恢复】用户澄清: 禁用指"先不要直接对所有账户签", 不是废弃签到。
     # 恢复 join 签到 (保连签/灯牌), 但保留实测结论: PC join 不发亲密度(+5 不兑现),

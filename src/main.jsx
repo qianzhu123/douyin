@@ -243,6 +243,63 @@ function FansClubPanel() {
   }
 
   const jobFor = (label) => signJobs.find((j) => j.label === label);
+  // 单团签到: 每主播行独立按钮, 状态 {aid: 'signing'|'ok:...'|'err:...'}
+  const [clubSignState, setClubSignState] = React.useState({});
+  // 单团检测: 行内按钮刷新该团最新状态
+  const [clubCheckBusy, setClubCheckBusy] = React.useState('');
+  async function checkClub(label, c) {
+    if (clubCheckBusy) return;
+    setClubCheckBusy(c.anchor_id);
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/check-club/${encodeURIComponent(label)}?anchor_id=${encodeURIComponent(c.anchor_id)}`);
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.msg || '检测失败');
+      // 用返回行替换缓存里对应团
+      setOverviewMap((m) => {
+        const ov = m[label];
+        if (!ov || !ov.clubs) return m;
+        const clubs = ov.clubs.map((x) => (x.anchor_id === c.anchor_id ? { ...x, ...d.club } : x));
+        const next = { ...m, [label]: { ...ov, clubs, checked_at: Date.now() } };
+        try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
+        return next;
+      });
+      showToast('ok', `${d.club?.nickname || c.nickname} 检测完成`);
+    } catch (e) {
+      showToast('err', `${c.nickname} 检测失败：${e.message}`);
+    } finally {
+      setClubCheckBusy('');
+    }
+  }
+  // toast 提示 (签到成功/失败统一弹, 3.5s 自动消失)
+  const [toast, setToast] = React.useState(null); // {kind:'ok'|'err', text}
+  const toastTimer = React.useRef(null);
+  function showToast(kind, text) {
+    setToast({ kind, text });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3500);
+  }
+  async function signClub(label, c) {
+    const aid = c.anchor_id;
+    setClubSignState((s) => ({ ...s, [aid]: 'signing' }));
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/sign-club/${encodeURIComponent(label)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ anchor_id: aid }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setClubSignState((s) => ({ ...s, [aid]: `ok:${d.msg || '已签'}` }));
+        showToast('ok', `${c.nickname} 签到成功${d.msg ? `（${d.msg}）` : ''}`);
+      } else {
+        setClubSignState((s) => ({ ...s, [aid]: `err:${d.msg || '失败'}` }));
+        showToast('err', `${c.nickname} 签到失败：${d.msg || '未知错误'}`);
+      }
+    } catch (e) {
+      setClubSignState((s) => ({ ...s, [aid]: `err:${e.message}` }));
+      showToast('err', `${c.nickname} 签到失败：${e.message}`);
+    }
+  }
   const overview = overviewMap[selected] ?? null; // 当前账户的缓存结果
   const clubs = overview?.clubs || [];
   // 上次检测时间 (该账户缓存写入时刻)
@@ -267,7 +324,11 @@ function FansClubPanel() {
       <div className="panel-head">
         <div>
           <h2>粉丝团签到</h2>
-          <p>凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => c.signed || c.pending).length}`}</p>
+          <p>
+            凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => c.signed || c.pending).length}`}
+            {checkedAt && ` · 上次检测 ${new Date(checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`}
+            {checking && ' · 检测中…'}
+          </p>
         </div>
         <div className="panel-actions">
           <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
@@ -331,24 +392,16 @@ function FansClubPanel() {
                   {job?.running && ' ⏳'}
                   {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
                 </button>
-                <button
-                  className="fansclub-tab-sign"
-                  onClick={() => signOne(a.label)}
-                  disabled={job?.running}
-                  title={`并发签到 ${a.label} 全部未签团（免费 join 端点, 幂等; 各账户独立线程, 互不阻塞）`}
-                >
-                  签
-                </button>
               </div>
             );
           })}
           <button
             className="secondary fansclub-sign-one"
-            onClick={signAll}
-            disabled={accounts.length === 0 || signingAll}
-            title="并发签到全部账户（各账户独立线程, 互不阻塞）"
+            onClick={() => signOne(selected)}
+            disabled={!selected || signingAll || !!jobFor(selected)?.running}
+            title={`并发签到 ${selected || ''} 全部未签团（免费 join 端点, 幂等; 后台线程, 不阻塞页面）`}
           >
-            {signingAll || signJobs.some((j) => j.running) ? '签到中…' : '全部签到'}
+            {jobFor(selected)?.running ? '签到中…' : '签到本账户'}
           </button>
         </div>
       )}
@@ -360,7 +413,7 @@ function FansClubPanel() {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>今日</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -396,11 +449,46 @@ function FansClubPanel() {
                       {distNext != null ? distNext.toLocaleString() : '—'}
                     </span>
                     <span>{c.join_days != null ? `${c.join_days}天` : '-'}</span>
+                    <span className="club-sign-cell">
+                      <button
+                        className="club-check-btn"
+                        disabled={!!clubCheckBusy}
+                        title="检测该主播粉丝团最新状态（等级/连签/亲密度/排名）"
+                        onClick={() => checkClub(selected, c)}
+                      >
+                        {clubCheckBusy === c.anchor_id ? '…' : '检'}
+                      </button>
+                      {clubSignState[c.anchor_id]?.startsWith('signing') ? (
+                        <button className="club-sign-btn" disabled>…</button>
+                      ) : clubSignState[c.anchor_id]?.startsWith('ok:') || c.signed || c.pending ? (
+                        // 成功/已签: 按钮置灰不可点 (不显示对号), 失败可重试
+                        <button className="club-sign-btn club-sign-disabled" disabled
+                          title={clubSignState[c.anchor_id]?.slice(3) || '今日已签'}>
+                          已签
+                        </button>
+                      ) : (
+                        <button
+                          className="club-sign-btn"
+                          title="签到该主播粉丝团（免费 join，幂等）"
+                          onClick={() => signClub(selected, c)}
+                        >
+                          签
+                        </button>
+                      )}
+                      {clubSignState[c.anchor_id]?.startsWith('err:') && (
+                        <span className="club-sign-err" title={clubSignState[c.anchor_id].slice(4)}>!</span>
+                      )}
+                    </span>
                   </>
                 )}
               </div>
             );
           })}
+        </div>
+      )}
+      {toast && (
+        <div className={`fc-toast ${toast.kind}`} role="status">
+          {toast.kind === 'ok' ? '✓ ' : '✗ '}{toast.text}
         </div>
       )}
       {checkedAt && (

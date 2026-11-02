@@ -1119,7 +1119,7 @@ button:disabled {
 
 .fansclub-row {
   display: grid;
-  grid-template-columns: minmax(90px, 1fr) 48px 44px 62px 70px 80px 80px 84px 56px;
+  grid-template-columns: minmax(90px, 1fr) 48px 44px 62px 70px 80px 80px 84px 56px 78px;
   gap: 8px;
   padding: 7px 12px;
   font-size: 13.5px;
@@ -1156,6 +1156,39 @@ button:disabled {
 /* 检查中: 保留表格框架, 数值区显示检测中 */
 .fansclub-row .cell-checking { color: #d9940f; font-size: 12.5px; grid-column: 2 / -1; }
 .fansclub-table.checking { opacity: 0.75; }
+
+/* 单团签到按钮 (每主播行最后一列) */
+.club-sign-cell { display: flex; align-items: center; gap: 4px; }
+.club-sign-btn {
+  padding: 1px 9px; font-size: 12px; line-height: 18px;
+  border: 1px solid #b8d4ee; border-radius: 4px;
+  background: #eef6ff; color: #1f6fb2; cursor: pointer;
+}
+.club-sign-btn:hover { background: #dcEDfb; border-color: #8fc0e8; }
+.club-sign-btn.club-sign-disabled,
+.club-sign-btn:disabled { background: #f1f4f8; color: #9aa7b3; border-color: #dde5ee; cursor: not-allowed; }
+.club-check-btn {
+  padding: 1px 7px; font-size: 12px; line-height: 18px;
+  border: 1px solid #cfe3d8; border-radius: 4px;
+  background: #eff8f2; color: #1a9c5b; cursor: pointer;
+}
+.club-check-btn:hover { background: #ddefe4; }
+.club-check-btn:disabled { opacity: 0.55; cursor: wait; }
+.club-sign-busy { color: #d9940f; font-size: 13px; }
+.club-sign-done { color: #1a9c5b; font-weight: 600; }
+.club-sign-err { color: #b0483c; font-weight: 700; cursor: help; }
+
+/* 面板内 toast (签到/检测结果, 3.5s 自动消失) */
+.fc-toast {
+  position: fixed; right: 22px; bottom: 26px; z-index: 90;
+  padding: 9px 16px; border-radius: 6px; font-size: 13.5px;
+  box-shadow: 0 4px 16px rgba(30, 50, 80, 0.18);
+  animation: fc-toast-in 0.18s ease-out;
+  max-width: 420px;
+}
+.fc-toast.ok { background: #123d2b; color: #7ce0ac; border: 1px solid #1f6b4a; }
+.fc-toast.err { background: #45191a; color: #f3a6a0; border: 1px solid #7c3a38; }
+@keyframes fc-toast-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* 账户 tab 的已检查/检查中小圆点标记 (非文字) */
 .fansclub-tab { position: relative; }
