@@ -1071,9 +1071,10 @@ button:disabled {
 
 .fansclub-tab-wrap {
   display: inline-flex;
-  align-items: stretch;
+  flex-direction: column; /* 账户名在上, 上次检测时间在下(用户指定下侧) */
+  align-items: center;
+  gap: 1px;
   border-radius: 8px;
-  overflow: hidden;
 }
 
 .fansclub-sign-one {

@@ -274,6 +274,9 @@ def check_club(label: str, token: str, anchor_id: str) -> dict:
             row["signed"] = True
         if not row["signed"] and (row["streak"] or 0) >= 1:
             row["pending"] = True
+        if cm:
+            latest_key = max(cm.keys())  # date ts 字符串, 字典序=时间序
+            row["factor"] = cm[latest_key].get("time")  # 签到时刻 (上次签到列)
     except Exception:
         pass
     # 排名
@@ -417,9 +420,12 @@ def check_all_status() -> dict:
 
 # ---- 每天北京时间 12 点自动全量检测 (后端内置定时器, 不依赖前端开着) ----
 # 用户指定固定时刻 (2026-11-02): 每天 12:00 检测一次, 不做高频轮询。
-# 实现每分钟醒一次看钟, 到点且当日未跑过就触发; 若 12 点时后端没开机,
-# 当天 12:00-23:59 之间任意时刻启动后端都会补跑一次 (跨日补跑语义)。
+# 实现每分钟醒一次看钟, 到点且当日未跑过就触发; 若凌晨时后端没开机,
+# 当天 00:05-23:59 之间任意时刻启动后端都会补跑一次 (跨日补跑语义)。
 _auto_check_day: str = ""  # 已自动检测过的日期 (YYYYMMDD)
+
+AUTO_CHECK_HOUR = 0   # 每天凌晨 00:05 自动全量检测 (用户指定凌晨; 12点旧版已废弃)
+AUTO_CHECK_MIN = 5
 
 
 def _auto_check_loop() -> None:
@@ -428,12 +434,12 @@ def _auto_check_loop() -> None:
         try:
             lt = time.localtime()
             day_str = f"{lt.tm_year:04d}{lt.tm_mon:02d}{lt.tm_mday:02d}"
-            at_or_after_noon = lt.tm_hour >= 12
+            due = (lt.tm_hour, lt.tm_min) >= (AUTO_CHECK_HOUR, AUTO_CHECK_MIN)
             with _check_lock:
                 running = _check_state["running"]
-            # 当天 12 点及以后且未跑过 → 触发; start_check_all 内部抢 _check_lock,
+            # 当天 00:05 及以后且未跑过 → 触发; start_check_all 内部抢 _check_lock,
             # 必须在锁外调用 (Lock 不可重入, 锁内调 = 死锁, 2026-11-02 实测踩坑)
-            if at_or_after_noon and day_str != _auto_check_day and not running:
+            if due and day_str != _auto_check_day and not running:
                 started = start_check_all()
                 if started.get("started") or started.get("reason") == "no tokens":
                     _auto_check_day = day_str  # 无凭证也标记, 不再空转重试

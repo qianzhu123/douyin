@@ -101,7 +101,7 @@ function FansClubPanel() {
       }
       const d = await r.json();
       // 今日基线: 同一天第一次见到该账户时, 记录各团亲密度
-      const todayKey = new Date().toISOString().slice(0, 10);
+      const todayKey = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京日期(UTC+8), 裸toISOString在早8点前算成昨天
       setBaseMap((bm) => {
         const day = bm[todayKey] || {};
         if (!day[label]) {
@@ -138,7 +138,7 @@ function FansClubPanel() {
   const autoCheckRef = React.useRef('');
   React.useEffect(() => {
     const tick = async () => {
-      const todayKey = new Date().toISOString().slice(0, 10);
+      const todayKey = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京日期(UTC+8), 裸toISOString在早8点前算成昨天
       const flagKey = 'fansclub_autocheck_day';
       let lastDay = '';
       try { lastDay = localStorage.getItem(flagKey) || ''; } catch { /* ignore */ }
@@ -165,7 +165,7 @@ function FansClubPanel() {
       const r = await fetch(`${API_BASE}/api/fansclub/overview?label=${encodeURIComponent(label)}`);
       if (!r.ok) return;
       const d = await r.json();
-      const todayKey = new Date().toISOString().slice(0, 10);
+      const todayKey = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京日期(UTC+8), 裸toISOString在早8点前算成昨天
       setBaseMap((bm) => {
         const day = bm[todayKey] || {};
         if (!day[label]) {
@@ -270,7 +270,7 @@ function FansClubPanel() {
       const r = await fetch(`${API_BASE}/api/fansclub/check-club/${encodeURIComponent(label)}?anchor_id=${encodeURIComponent(c.anchor_id)}`);
       const d = await r.json();
       if (!d.ok) throw new Error(d.msg || '检测失败');
-      // 用返回行替换缓存里对应团
+      // 用返回行替换缓存里对应团 + 同步该账户上次检测时间
       setOverviewMap((m) => {
         const ov = m[label];
         if (!ov || !ov.clubs) return m;
@@ -279,7 +279,17 @@ function FansClubPanel() {
         try { localStorage.setItem('fansclub_overview', JSON.stringify(next)); } catch { /* 忽略 */ }
         return next;
       });
-      showToast('ok', `${d.club?.nickname || c.nickname} 检测完成`);
+      // 今日基线: 该账户当天还没有基线时, 用本行亲密度记一条 (否则后续增量从0起算会漏掉本次变化)
+      const bjToday = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      setBaseMap((bm) => {
+        const day = bm[bjToday] || {};
+        if (day[label]) return bm; // 已有基线不动
+        const base = { [c.anchor_id]: d.club.intimacy || 0 };
+        const next = { ...bm, [bjToday]: { ...day, [label]: base } };
+        try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+        return next;
+      });
+      showToast('ok', `${d.club?.nickname || c.nickname} 检测完成${d.club?.streak != null ? `（连签${d.club.streak}天）` : ''}`);
     } catch (e) {
       showToast('err', `${c.nickname} 检测失败：${e.message}`);
     } finally {
@@ -321,7 +331,21 @@ function FansClubPanel() {
   // 上次检测时间 (该账户缓存写入时刻)
   const checkedAt = (overview && overview.checked_at) || null;
   // 今日亲密度 = 当前 - 当天基线 (服务端 increased_intimacy_today 字段是死值, 不用)
-  const todayKey = new Date().toISOString().slice(0, 10);
+  // 注意用北京日期: toISOString 是 UTC, 北京早上8点前会算成昨天 → 增量错天恒0
+  const todayKey = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10); // 北京日期(UTC+8), 裸toISOString在早8点前算成昨天
+  // 跨天清理: 只留今天(和昨天兜底)的基线, 防无限增长
+  React.useEffect(() => {
+    setBaseMap((bm) => {
+      if (bm[todayKey]) return bm;
+      const keep = {};
+      if (bm[todayKey]) keep[todayKey] = bm[todayKey];
+      const yesterday = new Date(Date.now() - 16 * 3600 * 1000 + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      if (bm[yesterday]) keep[yesterday] = bm[yesterday];
+      const next = keep;
+      try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+      return next;
+    });
+  }, [todayKey]);
   const todayBase = (baseMap[todayKey] || {})[selected] || {};
   const todayGainFor = (c) => {
     const b = todayBase[c.anchor_id];
@@ -406,14 +430,13 @@ function FansClubPanel() {
                   {job?.running && ' ⏳'}
                   {job?.done && !job.running && ` ✓${job.ok}/${job.ok + job.fail}`}
                 </button>
-                {/* 账户级信息挂在账户处: 上次检测时间 */}
+                {/* 账户级信息挂在账户正下方: 上次检测时间 */}
                 {(() => {
                   const ov = overviewMap[a.label];
-                  return ov?.checked_at && (
-                    <span className="tab-check-at" title={`${a.label} 上次检测时间`}>
-                      {new Date(ov.checked_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  );
+                  if (loadingLabel === a.label) return <span className="tab-check-at">检测中…</span>;
+                  return ov?.checked_at
+                    ? <span className="tab-check-at">{new Date(ov.checked_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                    : <span className="tab-check-at">未检测</span>;
                 })()}
               </div>
             );
