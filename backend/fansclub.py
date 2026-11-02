@@ -223,11 +223,8 @@ def _do_sign(label: str, token: str) -> None:
         name = ((f.get("anchor_info") or {}).get("nickname") or "?")[:14]
         try:
             cm, info = calendar_map(token, aid)
-            # 未入圈的团 (has_join_circle=False) 日历不适用, 直接跳过不签
-            if info.get("has_join_circle") is False:
-                skip += 1
-                state["log"].append(f"跳过 {name} (未入圈)")
-                continue
+            # 未入圈团 bt=4 join 也能签上 (2026-11-02 复仇学姐实证, 保连签),
+            # 只是灯灭(badge=2)不发亲密度, 不再跳过
             if str(today_ts) in cm:
                 skip += 1
                 state["log"].append(f"跳过 {name} (已签)")
@@ -237,9 +234,11 @@ def _do_sign(label: str, token: str) -> None:
             state["log"].append(f"[error] {name} 日历失败: {str(exc)[:80]}")
             continue
         try:
+            # business_type=4 = 正常签到发亲密度(+5); =3 是入圈类不发分
+            # (2026-11-02 e95: coke老师 bt=4 PC join +5 实证, APP 抓包 e90 同形状)
             r = _req("POST", BASE_FANDOM, "/ent/fandom/join/",
                      {"business_id": aid, "join_type": 3, "action": 1,
-                      "business_type": 3, "fandom_id": aid, "level": 0}, token)
+                      "business_type": 4, "fandom_id": aid, "level": 0}, token)
             sc = r.get("status_code")
             if sc == 0:
                 ok += 1
