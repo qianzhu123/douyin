@@ -633,8 +633,188 @@ function FansClubPanel() {
 }
 
 // ---- 直播间分析面板 (PC 直连两头配方, 只读; §81/§83) ----
-function LiveAnalysisPanel() {
-  const [input, setInput] = React.useState('');
+function PostsPanel({ accounts }) {
+  const [secUid, setSecUid] = React.useState('');
+  const [maxCount, setMaxCount] = React.useState(50);
+  const [posts, setPosts] = React.useState(null);
+  const [meta, setMeta] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [checked, setChecked] = React.useState(new Set());
+  const [commentsFor, setCommentsFor] = React.useState(null); // {aweme_id, desc}
+  const [comments, setComments] = React.useState(null);
+  const [commentsBusy, setCommentsBusy] = React.useState(false);
+  const [commentsError, setCommentsError] = React.useState('');
+  const [batchBusy, setBatchBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    if (!secUid) return;
+    setBusy(true);
+    setError('');
+    setPosts(null);
+    setMeta(null);
+    setChecked(new Set());
+    setCommentsFor(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/posts/list`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_uid: secUid, max_count: maxCount }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      setPosts(d.posts || []);
+      setMeta(d);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [secUid, maxCount]);
+
+  const batchDownload = React.useCallback(async () => {
+    const urls = (posts || []).filter((p) => checked.has(p.aweme_id)).map((p) => p.page_url);
+    if (!urls.length) return;
+    setBatchBusy(true);
+    setError('');
+    try {
+      const label = (accounts.find((a) => a.sec_uid === secUid)?.label) || secUid.slice(0, 12);
+      const r = await fetch(`${API_BASE}/api/posts/batch-download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls, label, mode: 1 }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      setError(`已投递下载任务 (${urls.length} 个作品), 到视频下载面板看进度`);
+    } catch (e) {
+      setError('批量下载失败: ' + e.message);
+    } finally {
+      setBatchBusy(false);
+    }
+  }, [posts, checked, secUid, accounts]);
+
+  const openComments = React.useCallback(async (post) => {
+    setCommentsFor({ aweme_id: post.aweme_id, desc: post.desc });
+    setComments(null);
+    setCommentsError('');
+    setCommentsBusy(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/comments/list`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ aweme_id: post.aweme_id, max_count: 50 }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      setComments(d);
+    } catch (e) {
+      setCommentsError(e.message);
+    } finally {
+      setCommentsBusy(false);
+    }
+  }, []);
+
+  const toggleCheck = (awemeId) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(awemeId)) next.delete(awemeId);
+      else next.add(awemeId);
+      return next;
+    });
+  };
+
+  return (
+    <section className="panel posts-panel">
+      <div className="panel-head">
+        <div>
+          <h2>作品列表 / 评论</h2>
+          <p>拉取账户作品列表 (直连→浏览器降级链)，可勾选一键批量投喂下载器；每条作品可看评论</p>
+        </div>
+        <FileSearch size={18} />
+      </div>
+      <div className="live-analysis-form">
+        <select value={secUid} onChange={(e) => setSecUid(e.target.value)} disabled={busy}>
+          <option value="">选择账户…</option>
+          {(accounts || []).map((a) => (
+            <option key={a.sec_uid} value={a.sec_uid}>{a.label || a.nickname || a.sec_uid.slice(0, 16)}</option>
+          ))}
+        </select>
+        <select value={maxCount} onChange={(e) => setMaxCount(Number(e.target.value))} disabled={busy}>
+          <option value={20}>20 条</option>
+          <option value={50}>50 条</option>
+          <option value={100}>100 条</option>
+          <option value={200}>200 条</option>
+        </select>
+        <button onClick={load} disabled={busy || !secUid}>
+          {busy ? '拉取中…' : '拉取作品'}
+        </button>
+      </div>
+      {error && <div className="notice">{error}</div>}
+      {meta && posts && (
+        <div className="posts-meta">
+          共 {posts.length} 条 · 数据来源: {meta.via === 'direct' ? '直连' : '浏览器'}
+          {checked.size > 0 && (
+            <button className="posts-batch-btn" onClick={batchDownload} disabled={batchBusy}>
+              <Download size={14} /> 批量下载已选 ({checked.size})
+            </button>
+          )}
+        </div>
+      )}
+      {posts && posts.length > 0 && (
+        <div className="posts-table">
+          {posts.map((p) => (
+            <div key={p.aweme_id} className={`posts-row${checked.has(p.aweme_id) ? ' checked' : ''}`}>
+              <label className="posts-check">
+                <input type="checkbox" checked={checked.has(p.aweme_id)} onChange={() => toggleCheck(p.aweme_id)} />
+              </label>
+              <div className="posts-main">
+                <div className="posts-desc" title={p.desc}>{p.desc || '(无文案)'}</div>
+                <div className="posts-stats">
+                  {p.is_image_post ? `图集×${p.image_count}` : formatNumber(p.digg_count) + ' 赞'}
+                  {' · '}评 {formatNumber(p.comment_count)}{' · '}藏 {formatNumber(p.collect_count)}
+                  {' · '}{p.aweme_id}
+                </div>
+              </div>
+              <div className="posts-actions">
+                <button onClick={() => openComments(p)} title="查看评论">评论</button>
+                <a href={p.page_url} target="_blank" rel="noreferrer" title="打开原页"><ExternalLink size={14} /></a>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {posts && posts.length === 0 && <div className="empty">未拉到作品 (可能全部仅粉丝可见或被风控)</div>}
+      {commentsFor && (
+        <div className="comments-drawer">
+          <div className="comments-head">
+            <span title={commentsFor.desc}>{commentsFor.desc || commentsFor.aweme_id}</span>
+            <button onClick={() => { setCommentsFor(null); setComments(null); }}>收起</button>
+          </div>
+          {commentsBusy && <div className="empty">评论拉取中…</div>}
+          {commentsError && <div className="notice">{commentsError}</div>}
+          {comments && (
+            <div className="comments-list">
+              {comments.comments.map((c) => (
+                <div key={c.cid} className="comment-row">
+                  <div className="comment-text">{c.text}</div>
+                  <div className="comment-meta">
+                    {c.user_nickname} · 赞 {formatNumber(c.digg_count)}
+                    {c.reply_comment_total > 0 && ` · 回复 ${c.reply_comment_total}`}
+                    {c.ip_label && ` · ${c.ip_label}`}
+                  </div>
+                </div>
+              ))}
+              {comments.comments.length === 0 && <div className="empty">无评论</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LiveAnalysisPanel() {  const [input, setInput] = React.useState('');
   const [result, setResult] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
@@ -1576,6 +1756,8 @@ function App() {
 
         <FansClubPanel />
         {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
+
+        <PostsPanel accounts={accounts} />
 
         <section className="panel download-panel">
           <div className="panel-head">
