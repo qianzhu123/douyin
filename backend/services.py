@@ -922,6 +922,33 @@ class DownloadService:
         items = [self._preview_item(url, index, deep) for index, url in enumerate(urls, 1)]
         return {"items": items}
 
+    def create_job_from_post_list(self, urls: list[str], label: str, mode: int, output_dir: str, comments: bool, wrap_folder: bool = False, image_format: str = "auto", video_format: str = "auto") -> DownloadJob:
+        """作品列表一键批量下载: 跳过 extract_douyin_urls 文本解析,
+        直接吃 aweme_read 给出的 /video/{id} URL 列表."""
+        urls = [u.strip() for u in urls if u and u.strip()]
+        if not urls:
+            raise ValueError("No post URLs provided.")
+
+        resolved_output = normalize_download_dir(output_dir or load_app_settings().download_output_dir)
+        job = DownloadJob(
+            id=str(uuid.uuid4()),
+            status="queued",
+            created_at=now_iso(),
+            updated_at=now_iso(),
+            input=f"[作品列表批量] {label} ({len(urls)} 个作品)",
+            urls=urls,
+            mode=mode,
+            output_dir=resolved_output,
+            wrap_folder=wrap_folder,
+            comments=comments,
+            image_format=image_format if image_format in ("auto", "jpg", "jpeg", "png", "webp", "avif") else "auto",
+            video_format=video_format if video_format in ("auto", "mp4", "webm", "audio") else "auto",
+        )
+        self.jobs[job.id] = job
+        self._add_job_log(job.id, "info", f"Queued {len(urls)} post URL(s) from {label}.")
+        self._ensure_executor().submit(self._dispatch_job, job.id)
+        return job
+
     def list_jobs(self) -> list[DownloadJob]:
         return sorted(self.jobs.values(), key=lambda job: job.created_at, reverse=True)
 

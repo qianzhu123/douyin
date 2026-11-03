@@ -405,7 +405,7 @@ def posts_list(payload: PostListRequest) -> dict:
 
 # ---- 作品评论采集 (只读, 见 backend/comments.py) ----
 from . import comments as _cm
-from .schemas import CommentListRequest
+from .schemas import CommentListRequest, PostListDownloadRequest
 
 
 @app.post("/api/comments/list")
@@ -415,6 +415,29 @@ def comments_list(payload: CommentListRequest) -> dict:
         return _cm.list_comments(payload.aweme_id.strip(), max_count=payload.max_count)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
+# ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----
+from .schemas import PostBatchDownloadRequest
+
+
+@app.post("/api/posts/batch-download")
+def posts_batch_download(payload: PostBatchDownloadRequest) -> dict:
+    """把作品列表拿到的 /video/{id} URL 一次性投给下载器."""
+    try:
+        job = download_service.create_job_from_post_list(
+            payload.urls,
+            payload.label,
+            payload.mode,
+            payload.output_dir,
+            payload.comments,
+            payload.wrap_folder,
+            payload.image_format,
+            payload.video_format,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"job": job}
 
 
 # ---- 关注/粉丝列表 (只读, 见 backend/user_lists.py; 2026-11 直连被收紧, 端点保留) ----

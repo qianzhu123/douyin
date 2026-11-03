@@ -79,6 +79,17 @@ class UserListRequest(BaseModel):
     max_count: int = Field(default=100, ge=1, le=200)
 
 
+class PostBatchDownloadRequest(BaseModel):
+    urls: list[str] = Field(default_factory=list)
+    label: str = ""
+    mode: int = Field(default=1, ge=1, le=3)
+    output_dir: str = ""
+    wrap_folder: bool = False
+    comments: bool = False
+    image_format: str = Field(default="auto", pattern="^(auto|jpg|jpeg|png|webp|avif)$")
+    video_format: str = Field(default="auto", pattern="^(auto|mp4|webm|audio)$")
+
+
 class LiveViewersRequest(BaseModel):
     sec_uid: str
 
