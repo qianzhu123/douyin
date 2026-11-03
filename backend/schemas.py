@@ -73,6 +73,12 @@ class CommentListRequest(BaseModel):
     max_count: int = Field(default=100, ge=1, le=300)
 
 
+class UserListRequest(BaseModel):
+    sec_uid: str
+    kind: str = Field(default="following", pattern="^(following|follower)$")
+    max_count: int = Field(default=100, ge=1, le=200)
+
+
 class LiveViewersRequest(BaseModel):
     sec_uid: str
 

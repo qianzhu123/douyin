@@ -417,6 +417,23 @@ def comments_list(payload: CommentListRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
 
 
+# ---- 关注/粉丝列表 (只读, 见 backend/user_lists.py; 2026-11 直连被收紧, 端点保留) ----
+from . import user_lists as _ul
+from .schemas import UserListRequest
+
+
+@app.post("/api/user-lists")
+def user_lists(payload: UserListRequest) -> dict:
+    """拉取关注/粉丝列表 (直连; 被收紧时报 error)."""
+    try:
+        return _ul.list_user_list(payload.sec_uid.strip(), payload.kind.strip(),
+                                  max_count=payload.max_count)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
 # ---- 直播间 PC 直连分析 (两头配方 2.0, 只读, 见 backend/live_analysis.py) ----
 from . import live_analysis as _la
 from .schemas import LiveAnalysisRequest
