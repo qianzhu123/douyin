@@ -1290,3 +1290,26 @@ button:disabled {
 .comment-row { padding: 6px 9px; border: 1px solid #eef3f9; border-radius: 5px; background: #fff; }
 .comment-text { font-size: 13px; color: #223a52; }
 .comment-meta { font-size: 11.5px; color: #8a97a5; margin-top: 3px; }
+
+/* 左侧快速导航 (2026-11-04) */
+.side-nav {
+  position: fixed; left: 0; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 4px; z-index: 50;
+  background: rgba(248, 251, 255, 0.92);
+  border: 1px solid #e2ecf7; border-radius: 0 8px 8px 0;
+  box-shadow: 0 1px 4px rgba(30, 60, 90, 0.08);
+}
+.side-nav-item {
+  padding: 5px 10px; font-size: 12px; text-align: left;
+  border: none; background: transparent; color: #5a7488;
+  border-radius: 5px; cursor: pointer; white-space: nowrap;
+}
+.side-nav-item:hover { background: #eef6ff; color: #1d5fa8; }
+.side-nav-item.active { background: #dcecfb; color: #1d5fa8; font-weight: 600; }
+
+/* 作品数量自定义输入 */
+.posts-count-input {
+  width: 110px; padding: 7px 10px;
+  border: 1px solid #d5e2f0; border-radius: 6px; font-size: 13px;
+}

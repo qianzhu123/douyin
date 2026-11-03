@@ -163,7 +163,6 @@ def account_overview(label: str, token: str) -> dict:
             "factor": None,
             "makeup_card": None,
             "is_circle": False,
-            "pending": False,
             # 亲密度数据源: user_auto_light_up_list (§08-fansclub 4.3/§6)
             "intimacy": u.get("intimacy") or 0,
             "next_level_intimacy": u.get("next_level_intimacy"),
@@ -185,9 +184,8 @@ def account_overview(label: str, token: str) -> dict:
             row["has_join_circle"] = info.get("has_join_circle")
             if str(today_ts) in cm:
                 row["signed"] = True
-            # 日历渲染延迟 (§80): 今日条目未出但 streak>=1 → 可能已签, 标 pending
-            if not row["signed"] and (row["streak"] or 0) >= 1:
-                row["pending"] = True
+            # 状态只有已签/未签两种 (用户指定 2026-11-04): 旧 pending 语义
+            # (streak>=1 且日历未出今日条目) 实为"昨天签过", 不是待定, 已删
             if cm:
                 latest_key = max(cm.keys())  # date ts 字符串, 字典序=时间序
                 row["factor"] = cm[latest_key].get("time")  # 签到时刻
@@ -235,7 +233,7 @@ def check_club(label: str, token: str, anchor_id: str) -> dict:
     today_ts, _ = _today_bj()
     row = {
         "anchor_id": aid, "nickname": None, "level": None, "streak": 0,
-        "signed": False, "pending": False, "makeup_card": None, "is_circle": False,
+        "signed": False, "makeup_card": None, "is_circle": False,
         "intimacy": 0, "next_level_intimacy": None, "badge_status": None,
         "watch_duration": 0, "progress_text": "", "join_days": None,
         "has_join_circle": None, "heat": 0, "rank": None, "factor": None,
@@ -275,8 +273,6 @@ def check_club(label: str, token: str, anchor_id: str) -> dict:
         row["has_join_circle"] = info.get("has_join_circle")
         if str(today_ts) in cm:
             row["signed"] = True
-        if not row["signed"] and (row["streak"] or 0) >= 1:
-            row["pending"] = True
         if cm:
             latest_key = max(cm.keys())  # date ts 字符串, 字典序=时间序
             row["factor"] = cm[latest_key].get("time")  # 签到时刻 (上次签到列)
@@ -310,6 +306,11 @@ def _do_sign(label: str, token: str) -> None:
         u = f.get("user_fansclub_info") or {}
         aid = str(u.get("anchor_id") or "")
         name = ((f.get("anchor_info") or {}).get("nickname") or "?")[:14]
+        # 只签灯牌点亮的团 (用户指定 2026-11-04): badge status 1=点亮 2=熄灭
+        if (u.get("status") or 0) != 1:
+            skip += 1
+            state["log"].append(f"跳过 {name} (灯牌熄灭)")
+            continue
         try:
             cm, info = calendar_map(token, aid)
             # 未入圈团 bt=4 join 也能签上 (2026-11-02 复仇学姐实证, 保连签),

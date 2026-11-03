@@ -38,6 +38,16 @@ function formatNumber(value) {
   return numeric.toLocaleString();
 }
 
+// 检测/签到时刻展示: MM-DD HH:mm (带日期不带年份, 用户指定 2026-11-04)
+function fmtDayTime(ms) {
+  const d = new Date(ms);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+
 function formatTime(value) {
   if (!value) return '-';
   return String(value).replace('T', ' ');
@@ -61,6 +71,50 @@ function mergeAccount(account, watch) {
 }
 
 // ---- 粉丝团签到面板 (PC 直连, 凭证来自 data/fansclub_tokens/) ----
+// ---- 左侧快速导航 (用户指定 2026-11-04: 项目内容过多, 侧边栏跳转) ----
+const NAV_ITEMS = [
+  { id: 'sec-accounts', label: '账户列表' },
+  { id: 'sec-fansclub', label: '粉丝团' },
+  { id: 'sec-posts', label: '作品/评论' },
+  { id: 'sec-download', label: '视频下载' },
+  { id: 'sec-logs', label: '日志' },
+];
+
+function SideNav() {
+  const [active, setActive] = React.useState('');
+  React.useEffect(() => {
+    const onScroll = () => {
+      // 以"最后一个滚过视口上沿 1/3 的 section"为当前项
+      let cur = '';
+      for (const item of NAV_ITEMS) {
+        const el = document.getElementById(item.id);
+        if (el && el.getBoundingClientRect().top < window.innerHeight / 3) cur = item.id;
+      }
+      setActive(cur);
+    };
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+  const jump = (id) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  return (
+    <nav className="side-nav">
+      {NAV_ITEMS.map((item) => (
+        <button
+          key={item.id}
+          className={`side-nav-item${active === item.id ? ' active' : ''}`}
+          onClick={() => jump(item.id)}
+        >
+          {item.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 function FansClubPanel() {
   const [accounts, setAccounts] = React.useState([]);
   const [selected, setSelected] = React.useState('');
@@ -133,7 +187,8 @@ function FansClubPanel() {
 
   React.useEffect(() => { loadAccounts(); }, [loadAccounts]);
   // 挂载时同步后端落盘缓存 (断链修复: 定时检测在页面没开时也把结果存后端了,
-  // 打开页面取最新份覆盖比它旧的本地缓存)
+  // 打开页面取最新份覆盖比它旧的本地缓存; 同步时同时记今日基线, 否则
+  // "今日亲密度"列因无基线显示 '-' — 后端 0 点检测的数据同样构成基线)
   React.useEffect(() => {
     (async () => {
       try {
@@ -141,6 +196,24 @@ function FansClubPanel() {
         if (!r.ok) return;
         const d = await r.json();
         const cache = d.cache || {};
+        const bjToday = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+        setBaseMap((bm) => {
+          // 每个账户: 当天还没有该账户基线时, 用后端缓存结果记基线
+          const day = bm[bjToday] || {};
+          let added = false;
+          const nextDay = { ...day };
+          for (const [label, ov] of Object.entries(cache)) {
+            if (!ov || !ov.ok || nextDay[label]) continue;
+            const base = {};
+            (ov.clubs || []).forEach((c) => { base[c.anchor_id] = c.intimacy || 0; });
+            nextDay[label] = base;
+            added = true;
+          }
+          if (!added) return bm;
+          const next = { ...bm, [bjToday]: nextDay };
+          try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
+          return next;
+        });
         setOverviewMap((m) => {
           let changed = false;
           const next = { ...m };
@@ -246,10 +319,21 @@ function FansClubPanel() {
   React.useEffect(() => {
     if (wasRunningRef.current && !hasRunning && !signingAll) {
       wasRunningRef.current = false;
+      // 本会话签到的团直接置已签 (不等 loadOverview; 日历渲染延迟会拖几秒,
+      // 立刻重拉反而可能把状态拉回未签 — 用户指定: 签到就直接改状态)
+      setOverviewMap((m) => {
+        const ov = m[selected];
+        if (!ov || !ov.clubs) return m;
+        const clubs = ov.clubs.map((x) => {
+          const st = clubSignState[x.anchor_id] || '';
+          return st.startsWith('ok:') ? { ...x, signed: true } : x;
+        });
+        return { ...m, [selected]: { ...ov, clubs } };
+      });
       if (selected) loadOverview(selected);
     }
     if (hasRunning) wasRunningRef.current = true;
-  }, [hasRunning, signingAll, selected, loadOverview]);
+  }, [hasRunning, signingAll, selected, loadOverview, clubSignState]);
   React.useEffect(() => {
     // 挂载即同步一次: 防止后端重启后残留 signingAll=true 永久禁用按钮
     (async () => {
@@ -410,11 +494,10 @@ function FansClubPanel() {
   React.useEffect(() => {
     setBaseMap((bm) => {
       if (bm[todayKey]) return bm;
-      const keep = {};
-      if (bm[todayKey]) keep[todayKey] = bm[todayKey];
-      const yesterday = new Date(Date.now() - 16 * 3600 * 1000 + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      if (bm[yesterday]) keep[yesterday] = bm[yesterday];
-      const next = keep;
+      // 昨天的北京日期: 北京今天 0 点往前推 24h (now-16h 的 UTC 即北京昨天)
+      const yesterday = new Date(Date.now() - 16 * 3600 * 1000).toISOString().slice(0, 10);
+      const next = {};
+      if (bm[yesterday]) next[yesterday] = bm[yesterday];
       try { localStorage.setItem('fansclub_today_base', JSON.stringify(next)); } catch { /* 忽略 */ }
       return next;
     });
@@ -422,7 +505,7 @@ function FansClubPanel() {
   const todayBase = (baseMap[todayKey] || {})[selected] || {};
   const todayGainFor = (c) => {
     const b = todayBase[c.anchor_id];
-    if (b == null) return null; // 无基线(本账户今天第一次检查前), 显示 '-'
+    if (b == null) return 0; // 无基线 (账户今天从未检测过) → 显示 0 (用户指定, 不展示空)
     const g = (c.intimacy || 0) - b;
     return g > 0 ? `+${g}` : '0';
   };
@@ -433,7 +516,7 @@ function FansClubPanel() {
   Object.keys(overviewMap).forEach((k) => { if (overviewMap[k]) checkedLabelRef.current.add(k); });
 
   return (
-    <section className="panel fansclub-panel">
+    <section className="panel fansclub-panel" id="sec-fansclub">
       <div className="panel-head">
         <div>
           <h2>粉丝团签到</h2>
@@ -508,7 +591,7 @@ function FansClubPanel() {
                   const ov = overviewMap[a.label];
                   if (loadingLabel === a.label) return <span className="tab-check-at">检测中…</span>;
                   return ov?.checked_at
-                    ? <span className="tab-check-at">{new Date(ov.checked_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                    ? <span className="tab-check-at">{fmtDayTime(ov.checked_at)}</span>
                     : <span className="tab-check-at">未检测</span>;
                 })()}
               </div>
@@ -532,7 +615,7 @@ function FansClubPanel() {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -546,7 +629,7 @@ function FansClubPanel() {
                 {checking ? (
                   // 检查当前账户时: 保留行框架, 数值列写「检测中」
                   <>
-                    <span className="cell-checking" colSpan={8}>检测中…</span>
+                    <span className="cell-checking" colSpan={9}>检测中…</span>
                   </>
                 ) : (
                   <>
@@ -560,16 +643,20 @@ function FansClubPanel() {
                       const factorToday = c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`);
                       const st = clubSignState[c.anchor_id] || '';
                       const isOk = st.startsWith('ok:') || factorToday;
+                      // 状态只有已签/未签两种 (用户指定 2026-11-04, 旧"待定"已从后端删除)
                       const label = noCircle ? <span className="nocircle">未入圈</span>
-                        : isOk ? '已签' : (c.pending && !factorToday ? '待定' : '未签');
+                        : isOk ? '已签' : '未签';
                       return <span className={isOk ? 'signed' : 'unsigned'}>{label}</span>;
                     })()}
                     <span className="signed-at-cell" title={c.factor ? `该团最近一次签到: ${new Date(c.factor * 1000).toLocaleString('zh-CN')}` : '无记录'}>
-                      {c.factor ? new Date(c.factor * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '—'}
+                      {c.factor ? fmtDayTime(c.factor * 1000) : '—'}
+                    </span>
+                    <span className="signed-at-cell" title="该团最近一次检测时刻">
+                      {checkedAt ? fmtDayTime(checkedAt) : '—'}
                     </span>
                     <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}
                       title={todayGainFor(c) && todayGainFor(c) !== '0' ? '今日亲密度增量' : undefined}>
-                      {todayGainFor(c) ?? '-'}
+                      {todayGainFor(c)}
                     </span>
                     <span title={distNext != null ? `下一级需 ${c.next_level_intimacy?.toLocaleString()} 亲密度` : undefined}>
                       {(c.intimacy || 0).toLocaleString()}
@@ -582,7 +669,7 @@ function FansClubPanel() {
                       <button
                         className="club-check-btn"
                         disabled={clubCheckBusy === c.anchor_id}
-                        title={`检测该主播最新状态${c.factor ? `（上次签到 ${new Date(c.factor * 1000).toLocaleString('zh-CN')}）` : ''}`}
+                        title={`检测该主播最新状态${c.factor ? `（上次签到 ${fmtDayTime(c.factor * 1000)}）` : ''}`}
                         onClick={() => checkClub(selected, c)}
                       >
                         {clubCheckBusy === c.anchor_id ? '…' : '检'}
@@ -624,7 +711,7 @@ function FansClubPanel() {
       )}
       {checkedAt && (
         <div className="fansclub-checked-at">
-          上次检测：{new Date(checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+          上次检测：{fmtDayTime(checkedAt)}
           {checking && ' · 本次检测中…'}
         </div>
       )}
@@ -635,7 +722,8 @@ function FansClubPanel() {
 // ---- 直播间分析面板 (PC 直连两头配方, 只读; §81/§83) ----
 function PostsPanel({ accounts }) {
   const [secUid, setSecUid] = React.useState('');
-  const [maxCount, setMaxCount] = React.useState(50);
+  // 自定义数量 (用户指定 2026-11-04: 仅支持自定义, 不做预设档位)
+  const [maxCount, setMaxCount] = React.useState('50');
   const [posts, setPosts] = React.useState(null);
   const [meta, setMeta] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -656,10 +744,12 @@ function PostsPanel({ accounts }) {
     setChecked(new Set());
     setCommentsFor(null);
     try {
+      const n = Math.max(1, Math.min(400, parseInt(maxCount, 10) || 0));
+      if (!n) throw new Error('数量必须是 1-400 的数字');
       const r = await fetch(`${API_BASE}/api/posts/list`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sec_uid: secUid, max_count: maxCount }),
+        body: JSON.stringify({ sec_uid: secUid, max_count: n }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || r.statusText);
@@ -725,7 +815,7 @@ function PostsPanel({ accounts }) {
   };
 
   return (
-    <section className="panel posts-panel">
+    <section className="panel posts-panel" id="sec-posts">
       <div className="panel-head">
         <div>
           <h2>作品列表 / 评论</h2>
@@ -740,12 +830,16 @@ function PostsPanel({ accounts }) {
             <option key={a.sec_uid} value={a.sec_uid}>{a.label || a.nickname || a.sec_uid.slice(0, 16)}</option>
           ))}
         </select>
-        <select value={maxCount} onChange={(e) => setMaxCount(Number(e.target.value))} disabled={busy}>
-          <option value={20}>20 条</option>
-          <option value={50}>50 条</option>
-          <option value={100}>100 条</option>
-          <option value={200}>200 条</option>
-        </select>
+        <input
+          className="posts-count-input"
+          value={maxCount}
+          onChange={(e) => setMaxCount(e.target.value.replace(/\D/g, ''))}
+          onKeyDown={(e) => { if (e.key === 'Enter') load(); }}
+          placeholder="数量(1-400)"
+          inputMode="numeric"
+          disabled={busy}
+          title="自定义拉取条数 (1-400)"
+        />
         <button onClick={load} disabled={busy || !secUid}>
           {busy ? '拉取中…' : '拉取作品'}
         </button>
@@ -1640,6 +1734,7 @@ function App() {
 
   return (
     <main className="app-shell">
+      <SideNav />
       <header className="topbar">
         <div>
           <h1>Douyin Monitor</h1>
@@ -1680,7 +1775,7 @@ function App() {
           </div>
         )}
 
-        <section className="panel account-panel">
+        <section className="panel account-panel" id="sec-accounts">
           <div className="panel-head">
             <div>
               <h2>账户列表</h2>
@@ -1759,7 +1854,7 @@ function App() {
 
         <PostsPanel accounts={accounts} />
 
-        <section className="panel download-panel">
+        <section className="panel download-panel" id="sec-download">
           <div className="panel-head">
             <div>
               <h2>视频下载</h2>
@@ -1899,7 +1994,7 @@ function App() {
           </div>
         </section>
 
-        <div className="log-grid">
+        <div className="log-grid" id="sec-logs">
           <LogPanel title="检测日志" description="单次账户信息与直播信息检测结果。" logs={detectLogs} />
           <LogPanel title="轮询日志" description="轮询启动、停止、每轮检测摘要和开播/下播事件。" logs={pollingLogs} />
           <LogPanel title="下载日志" description="下载任务的解析、执行和失败信息。" logs={downloadLogs} />
