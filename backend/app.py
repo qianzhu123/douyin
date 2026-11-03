@@ -387,6 +387,22 @@ def fansclub_check_status() -> dict:
     return _fc.check_all_status()
 
 
+# ---- 用户作品列表 (两头配方直连, 只读, 见 backend/aweme_read.py) ----
+from . import aweme_read as _ar
+from .schemas import PostListRequest
+
+
+@app.post("/api/posts/list")
+def posts_list(payload: PostListRequest) -> dict:
+    """拉取指定用户作品列表 (cursor 翻页; 只读; 凭证同粉丝团 tokens)."""
+    try:
+        return _ar.list_posts(payload.sec_uid.strip(), max_count=payload.max_count,
+                              label=payload.label.strip() or None,
+                              fetch_all=payload.fetch_all)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
 # ---- 直播间 PC 直连分析 (两头配方 2.0, 只读, 见 backend/live_analysis.py) ----
 from . import live_analysis as _la
 from .schemas import LiveAnalysisRequest

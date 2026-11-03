@@ -61,6 +61,13 @@ class LiveAnalysisRequest(BaseModel):
     label: str = ""
 
 
+class PostListRequest(BaseModel):
+    sec_uid: str
+    max_count: int = Field(default=100, ge=1, le=400)
+    label: str = ""
+    fetch_all: bool = False
+
+
 class LiveViewersRequest(BaseModel):
     sec_uid: str
 
