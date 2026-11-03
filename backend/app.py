@@ -403,6 +403,20 @@ def posts_list(payload: PostListRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
 
 
+# ---- 作品评论采集 (只读, 见 backend/comments.py) ----
+from . import comments as _cm
+from .schemas import CommentListRequest
+
+
+@app.post("/api/comments/list")
+def comments_list(payload: CommentListRequest) -> dict:
+    """拉取作品评论 (直连→浏览器降级链; 只读)."""
+    try:
+        return _cm.list_comments(payload.aweme_id.strip(), max_count=payload.max_count)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
 # ---- 直播间 PC 直连分析 (两头配方 2.0, 只读, 见 backend/live_analysis.py) ----
 from . import live_analysis as _la
 from .schemas import LiveAnalysisRequest

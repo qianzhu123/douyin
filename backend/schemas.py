@@ -68,6 +68,11 @@ class PostListRequest(BaseModel):
     fetch_all: bool = False
 
 
+class CommentListRequest(BaseModel):
+    aweme_id: str
+    max_count: int = Field(default=100, ge=1, le=300)
+
+
 class LiveViewersRequest(BaseModel):
     sec_uid: str
 
