@@ -73,7 +73,7 @@ function mergeAccount(account, watch) {
 // ---- 粉丝团签到面板 (PC 直连, 凭证来自 data/fansclub_tokens/) ----
 // ---- 左侧快速导航 (用户指定 2026-11-04: 项目内容过多, 侧边栏跳转) ----
 const NAV_ITEMS = [
-  { id: 'sec-accounts', label: '账户列表' },
+  { id: 'sec-accounts', label: '账户与直播' },
   { id: 'sec-fansclub', label: '粉丝团' },
   { id: 'sec-posts', label: '作品/评论' },
   { id: 'sec-download', label: '视频下载' },
@@ -893,7 +893,7 @@ function LiveMonitorPanel({ embedded }) {
             </div>
           )}
           {candidates.length === 0 && (
-            <div className="empty">暂无候选 — 在上方输入框手动添加，或先在账户列表添加账户</div>
+            <div className="empty">暂无候选 — 在上方输入框手动添加，或先在「账户与直播」添加账户</div>
           )}
         </>
       )}
@@ -1950,7 +1950,7 @@ function App() {
       <header className="topbar">
         <div>
           <h1>Douyin Monitor</h1>
-          <p>账户主页信息与直播状态列表</p>
+          <p>账户信息 + 实时直播监控</p>
         </div>
         {activeSection === 'sec-fansclub' && fansclubApi.current ? (
           /* 粉丝团区域: 顶栏按钮组切换为粉丝团操作 (检测类+签到) */
@@ -2014,8 +2014,8 @@ function App() {
         <section className="panel account-panel" id="sec-accounts">
           <div className="panel-head">
             <div>
-              <h2>账户列表</h2>
-              <p>{watch.running ? `轮询中，第 ${watch.round || 0} 轮，间隔 ${watch.interval}s，持续 ${watch.duration_minutes || 30} 分钟，上次 ${formatTime(watch.last_checked_at)}` : '账户主页信息与直播信息（含直播实时监控）'}</p>
+              <h2>账户与直播</h2>
+              <p>{watch.running ? `轮询中，第 ${watch.round || 0} 轮，间隔 ${watch.interval}s，持续 ${watch.duration_minutes || 30} 分钟，上次 ${formatTime(watch.last_checked_at)}` : '账户信息 + 实时直播监控（开播跟踪 / 观众变化 / 事件流）'}</p>
             </div>
             <div className="panel-actions">
               {hiddenUids.size > 0 && (
