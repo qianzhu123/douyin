@@ -314,6 +314,9 @@ function FansClubPanel() {
   // 轮询签到任务状态 (运行中每 2s); 后端重启等导致 fetch 连续失败时自动解除禁用
   const hasRunning = signJobs.some((j) => j.running);
   const pollFailRef = React.useRef(0);
+  // 单团签到: 每主播行独立按钮, 状态 {aid: 'signing'|'ok:...'|'err:...'}
+  // (声明必须在下面的 sign-all effect 之前 — 它的依赖数组引用了 clubSignState)
+  const [clubSignState, setClubSignState] = React.useState({});
   // 签到全部完成后自动刷新当前账户数据 (签到成功要反映到行数据/状态列)
   const wasRunningRef = React.useRef(false);
   React.useEffect(() => {
@@ -385,8 +388,7 @@ function FansClubPanel() {
   }
 
   const jobFor = (label) => signJobs.find((j) => j.label === label);
-  // 单团签到: 每主播行独立按钮, 状态 {aid: 'signing'|'ok:...'|'err:...'}
-  const [clubSignState, setClubSignState] = React.useState({});
+  // (clubSignState 已在上方 sign-all effect 前声明, 此处不重复)
   // 跨天重置: 北京日期变化时清空单团签到状态 (昨天的"已签"不能再禁今天的按钮)
   const signStateDayRef = React.useRef(new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10));
   React.useEffect(() => {
