@@ -405,7 +405,7 @@ def posts_list(payload: PostListRequest) -> dict:
 
 # ---- 作品评论采集 (只读, 见 backend/comments.py) ----
 from . import comments as _cm
-from .schemas import CommentListRequest, PostListDownloadRequest
+from .schemas import CommentListRequest
 
 
 @app.post("/api/comments/list")

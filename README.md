@@ -9,6 +9,7 @@ This project bundles the `douyin-monitor`, `douyin-downloader`, and `douyin-user
 - Search tool: `external/douyin-user-search`
 - Project accounts: `data/users.json`
 - Runtime profile cache: `data/profile_cache.json`
+- Fansclub tokens: `data/fansclub_tokens/` (per-account `{label, x_tt_token}`)
 - Download settings: `data/settings.json`
 - Default download output: the current user's `Downloads` directory
 
@@ -39,35 +40,36 @@ If frontend dependencies are missing, the launcher runs `npm install` before sta
 - Run selected users as a one-time profile query.
 - Start/stop selected live polling with a refresh interval.
 - Search Douyin users from the web UI and save selected accounts to `data/users.json`.
-- Submit Douyin video/share URLs to the downloader as background jobs. Aggregation-page URLs (发现页 `/jingxuan?modal_id=`, 搜索页 `/jingxuan/search/...?...&modal_id=`, 喜欢列表 `/user/self?...&modal_id=`) are auto-rewritten to the canonical `/video/{aweme_id}` detail page before parsing.
+- Submit Douyin video/share URLs to the downloader as background jobs. Aggregation-page URLs (discover page `/jingxuan?modal_id=`, search page `/jingxuan/search/...?...&modal_id=`, likes list `/user/self?...&modal_id=`) are auto-rewritten to the canonical `/video/{aweme_id}` detail page before parsing.
 - Choose a custom download root directory and whether each work should be wrapped in a title folder.
+- Post lists and comments for any configured account (custom count input), with one-click batch download of fetched posts.
+- Fansclub signing dashboard: per-account club overview (level / streak / intimacy / rank), per-club sign and check buttons, sign-all (lamp-lit clubs only), and a daily automatic full check at 00:00 Beijing time that persists results to `data/fansclub_overview_cache.json`.
+- Direct-connection recipes (two-headed token + origin-host) with automatic browser fallback for blocked read endpoints.
 
 ## Browser Extensions
 
-单 Chrome/Edge Manifest V3 扩展位于 `tools/douyin_extensions/douyin-helper/`：
+A single Chrome/Edge Manifest V3 extension lives at `tools/douyin_extensions/douyin-helper/`:
 
-- 自动识别当前页面（视频/笔记/直播间/个人主页/短链/聚合页），右上角显示圆形悬浮按钮；
-- 视频/笔记场景 → 一键提交下载；个人主页 → 一键导入本地账户列表；
-  直播间 → 就地检测展示房间/主播/当前观看/累计观看/本场点赞（MAIN world 捕获
-  `webcast/room/web/enter/`；累计观看达 10万 后永远展示 `10万+`）；
-- 提供 "打开本地控制台" 和 "重启本地后端" 两个共用动作。
-- 所有本地后端调用走扩展的 background service worker，避开 HTTPS 页面的 mixed-content 限制。
+- Recognizes the current page type (video / note / live room / user profile / short link / aggregation page) and shows a floating action button in the top-right corner;
+- Video / note pages → one-click download submission; user profiles → one-click import into the local account list;
+  live rooms → in-place detection showing room / anchor / current viewers / total viewers / session likes
+  (captures `webcast/room/web/enter/` in MAIN world; total viewers permanently shows `10万+` after reaching 100k);
+- Provides two shared actions: "open local dashboard" and "restart local backend".
+- All local backend calls go through the extension's background service worker to avoid mixed-content restrictions on HTTPS pages.
 
-扩展只调用 `http://127.0.0.1:8000`，不直接下载媒体。
+The extension only calls `http://127.0.0.1:8000` and never downloads media itself.
 
 ## Polling Steps & Progress
 
-每个检测接口（搜索 / 添加 / 单检 / 直播间 / 观看人数 / 轮询）都会返回结构化的 `progress`
-步骤流，前端把它附在 `message` 上方，告诉你当前正在执行哪一步、是否已报错。
-轮询任务本身也有一个滚动进度窗（`watch_jobs[i].progress`），每轮显示
-basic / live 两段是否完成。
+Every detection endpoint (search / add / single check / live room / viewer count / polling) returns a structured `progress` step stream, which the frontend renders above the `message` so you can see which step is running and whether it errored.
+Polling jobs also keep a scrolling progress window (`watch_jobs[i].progress`) showing whether the basic / live phases of each round completed.
 
 ## Polling Scope
 
-启动轮询时可在弹窗里勾选 "基本信息 / 直播间" 中的部分，
-不勾选 = 全部跑（旧行为，向后兼容）。后端 `_watch_loop` 会按所选类型跳过对应探测，
-避免在已知的"从未开播"账户上白跑直播间探测。粉丝团探测已整体舍弃
-（实测 max_level 全 20 / club_level 都 0，区分度无价值）。
+When starting a polling job you can tick a subset of "basic info / live room" in the dialog.
+Nothing ticked = run everything (old behavior, backward compatible). The backend `_watch_loop` skips the corresponding probe for unselected types,
+avoiding wasted live-room probes on accounts known to never stream. Fansclub probing has been dropped from polling entirely
+(in practice `max_level` is always 20 and `club_level` always 0 — no signal).
 
 ## Account Data
 
