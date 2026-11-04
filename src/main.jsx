@@ -543,38 +543,27 @@ function FansClubPanel({ apiRef }) {
           <p>
             凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => (c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`)) || clubSignState[c.anchor_id]?.startsWith('ok:')).length}`}
           </p>
-          {/* 检测类操作在标题同侧 (用户指定 2026-11-04: 签到类独占右上角) */}
-          <div className="panel-actions panel-actions-left">
-            <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
-              <RotateCw size={16} /> 重载凭证
-            </button>
-            <button
-              className="secondary"
-              onClick={() => loadOverview(selected)}
-              disabled={!selected || checking}
-              title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），其他账户检查中也可并发检查"
-            >
-              <Search size={16} /> {checking ? '检查中…' : '检查'}
-            </button>
-            <button
-              className="secondary"
-              onClick={async () => {
-                try {
-                  const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
-                  const d = await r.json();
-                  if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
-                  else if (d.reason === 'already running') setCheckAll(d.state);
-                  else setError(d.reason || '未能启动');
-                } catch (e) { setError(e.message); }
-              }}
-              disabled={!!checkAll?.running}
-              title="后台串行检查全部账户（每天 0 点后打开页面也会自动执行一次）"
-            >
-              <Search size={16} /> {checkAll?.running ? '全量检测中…' : '检查全部'}
-            </button>
-          </div>
         </div>
         <div className="panel-actions">
+          <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
+            <RotateCw size={16} /> 重载凭证
+          </button>
+          <button
+            className="secondary"
+            onClick={async () => {
+              try {
+                const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
+                const d = await r.json();
+                if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
+                else if (d.reason === 'already running') setCheckAll(d.state);
+                else setError(d.reason || '未能启动');
+              } catch (e) { setError(e.message); }
+            }}
+            disabled={!!checkAll?.running}
+            title="后台串行检查全部账户（每天 0 点后打开页面也会自动执行一次）"
+          >
+            <Search size={16} /> {checkAll?.running ? '全量检测中…' : '检查全部'}
+          </button>
           <button
             onClick={signAll}
             disabled={accounts.length === 0 || signingAll}
@@ -622,6 +611,14 @@ function FansClubPanel({ apiRef }) {
           })}
           <button
             className="secondary fansclub-sign-one"
+            onClick={() => loadOverview(selected)}
+            disabled={!selected || checking}
+            title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），其他账户检查中也可并发检查"
+          >
+            <Search size={16} /> {checking ? '检查中…' : '检查'}
+          </button>
+          <button
+            className="secondary"
             onClick={() => signOne(selected)}
             disabled={!selected || signingAll || !!jobFor(selected)?.running}
             title={`并发签到 ${selected || ''} 全部未签团（免费 join 端点, 幂等; 后台线程, 不阻塞页面）`}
