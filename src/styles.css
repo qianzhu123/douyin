@@ -1357,3 +1357,19 @@ button:disabled {
 .lm-event.lm-off .lm-ev-msg { color: #b0483c; }
 .lm-event.lm-err .lm-ev-msg { color: #c2872b; }
 .lm-cand.stale { opacity: 0.55; }
+
+/* 直播监控嵌入账户列表形态 */
+.live-monitor-box.embedded {
+  border: 1px solid #e3eef9; border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 14px; background: #fbfdff;
+}
+.lm-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.lm-bar .lm-name { font-size: 14.5px; color: #17324d; }
+.lm-bar .lm-sub { font-size: 12.5px; color: #64839d; }
+.lm-bar .lm-spacer { flex: 1; }
+.lm-add-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.lm-add-input {
+  flex: 1; min-width: 200px; padding: 6px 10px; font-size: 13px;
+  border: 1px solid #d4e3f5; border-radius: 6px;
+}
+.lm-cand.acct { border-color: #b8d4ee; background: #eef6ff; }

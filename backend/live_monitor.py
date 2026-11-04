@@ -4,6 +4,12 @@
 live_analysis.py, lab §81 验证): 定时对房间 POST /webcast/room/enter/ 取快照,
 礼貌 leave。全程直连, 不开浏览器 — 与旧 watch 轮询 (浏览器探测) 互补。
 
+目标两种 (用户 2026-11-04: 账户维度优先):
+- {sec_uid}  账户维度 — 每轮先直连 profile/other 轻量版 (/aweme/v1/user/,
+  阶段一验证通) 解析**当前场次** room_id, 主播重新开播换房间号也跟得住。
+  room_id 解析带 10 分钟缓存, 未开播轮空。
+- {room_id}  房间维度 — 旧方式, 下播后 room_id 失效 (enter 30003)。
+
 事件: 开播 / 下播 / 标题变化 / 观众数变化 (上次→本次, 抖动抑制: 变化<5% 不报)。
 """
 from __future__ import annotations
@@ -13,6 +19,7 @@ import time
 from collections import deque
 
 from .live_analysis import _http, common_q, _room_brief, _pick_token
+from .aweme_read import _req_direct_lab
 
 # 观众数变化超过该比例才报事件 (抑制高频抖动)
 VIEWERS_DELTA_RATIO = 0.05
@@ -20,6 +27,8 @@ VIEWERS_DELTA_RATIO = 0.05
 MIN_ROOM_INTERVAL_S = 60
 HISTORY_MAX = 360          # 每房间快照环 (默认 120s 间隔 = 12h)
 EVENTS_MAX = 200
+# sec_uid -> room_id 解析缓存时长 (主播重新开播频率低, 10 分钟够)
+_ROOM_RESOLVE_TTL_S = 600
 
 
 class LiveMonitor:
@@ -38,16 +47,22 @@ class LiveMonitor:
     # ---- 对外 API ----
     def start(self, rooms: list[dict], interval: int = 120,
               duration_minutes: int = 0, label: str = "") -> dict:
-        """rooms: [{room_id, label?}]; duration_minutes=0 表示一直跑到 stop。"""
+        """rooms: [{room_id, label?}] 或 [{sec_uid, label?}] (账户维度优先);
+        duration_minutes=0 表示一直跑到 stop。"""
         with self._lock:
             if self._state["running"]:
                 return {"started": False, "reason": "already running"}
             clean = []
             for r in rooms or []:
-                rid = str((r or {}).get("room_id") or "").strip()
-                if rid:
-                    clean.append({"room_id": rid,
-                                  "label": str((r or {}).get("label") or rid)})
+                r = r or {}
+                sec = str(r.get("sec_uid") or "").strip()
+                rid = str(r.get("room_id") or "").strip()
+                if sec:
+                    clean.append({"sec_uid": sec, "room_id": "",
+                                  "label": str(r.get("label") or sec[:16])})
+                elif rid:
+                    clean.append({"sec_uid": "", "room_id": rid,
+                                  "label": str(r.get("label") or rid)})
             if not clean:
                 return {"started": False, "reason": "no valid rooms"}
             interval = max(MIN_ROOM_INTERVAL_S, int(interval or 120))
@@ -55,11 +70,18 @@ class LiveMonitor:
                            "rooms": clean, "started_at": time.time(),
                            "ended_at": None, "duration_minutes": duration_minutes,
                            "label": label or "直播监控"}
-            self._rooms = {r["room_id"]: {"label": r["label"], "last": None,
-                                          "history": deque(maxlen=HISTORY_MAX),
-                                          "last_tick": 0.0, "was_live": False,
-                                          "title": "", "viewers": None}
-                           for r in clean}
+            # 内部状态以 sec_uid 或 room_id 为主键 (二者必有其一)
+            self._rooms = {}
+            for r in clean:
+                key = r["sec_uid"] or r["room_id"]
+                self._rooms[key] = {"label": r["label"], "sec_uid": r["sec_uid"],
+                                    "room_id": r["room_id"],
+                                    "resolved_rid": r["room_id"],
+                                    "resolved_at": time.time() if r["room_id"] else 0.0,
+                                    "last": None,
+                                    "history": deque(maxlen=HISTORY_MAX),
+                                    "last_tick": 0.0, "was_live": False,
+                                    "title": "", "viewers": None}
             self._events.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True,
                                             name="live-monitor")
@@ -77,9 +99,12 @@ class LiveMonitor:
     def status(self) -> dict:
         with self._lock:
             rooms = []
-            for rid, st in self._rooms.items():
+            for key, st in self._rooms.items():
                 rooms.append({
-                    "room_id": rid, "label": st["label"],
+                    "key": key,
+                    "sec_uid": st["sec_uid"],
+                    "room_id": st["resolved_rid"] or st["room_id"],
+                    "label": st["label"],
                     "last": st["last"],
                     "viewers": st["viewers"],
                     "title": st["title"],
@@ -98,13 +123,29 @@ class LiveMonitor:
             }
 
     def candidates(self) -> list[dict]:
-        """监控候选双来源 (2026-11-04):
-        ① feed 在播房 (两头配方 /webcast/feed/, 实时可播房间) — 主来源;
-        ② profile_cache 已知 room_id (历史场次, 下播后 room_id 失效 enter 30003,
-           仅标注 stale 供参考)。
+        """监控候选三来源 (2026-11-04 改版: 账户维度为主):
+        ① 账户列表 (users.json 全部账户, sec_uid 维度 — 推荐主来源, 不受场次失效影响);
+        ② feed 在播房 (两头配方 /webcast/feed/, 即时在播的陌生房间);
+        ③ profile_cache 历史房间号 (标 stale, 仅参考)。
         """
-        out: dict[str, dict] = {}
-        # ① feed 在播房
+        out: list[dict] = []
+        seen_sec: set[str] = set()
+        # ① 账户列表全部账户 (账户维度, 永不 stale)
+        try:
+            from .config import PROFILE_CACHE_FILE, USERS_FILE
+            from .services import read_project_users, read_profile_cache
+            cache = read_profile_cache(PROFILE_CACHE_FILE)
+            for u in read_project_users(USERS_FILE):
+                if u.sec_uid in seen_sec:
+                    continue
+                seen_sec.add(u.sec_uid)
+                p = (cache.get(u.sec_uid) or {}).get("profile") or {}
+                out.append({"sec_uid": u.sec_uid, "room_id": "",
+                            "label": u.label or p.get("nickname") or u.sec_uid[:10],
+                            "viewers": None, "stale": False, "account": True})
+        except Exception:
+            pass
+        # ② feed 在播房 (不在账户列表里的陌生在播主播)
         try:
             tok = _pick_token(None)
             for pull in ("1", "2", "3"):
@@ -113,37 +154,19 @@ class LiveMonitor:
                 for it in (d.get("data") or []):
                     r = it.get("data") or {}
                     rid = r.get("id_str")
-                    if not rid or r.get("status") != 2:
-                        continue
                     owner = r.get("owner") or {}
-                    out[str(rid)] = {
-                        "room_id": str(rid),
-                        "label": owner.get("nickname") or rid,
-                        "sec_uid": owner.get("sec_uid") or "",
-                        "viewers": (r.get("room_view_stats") or {}).get("display_value"),
-                        "stale": False,
-                    }
+                    sec = owner.get("sec_uid") or ""
+                    if not rid or r.get("status") != 2 or sec in seen_sec:
+                        continue
+                    seen_sec.add(sec)
+                    out.append({"room_id": str(rid), "sec_uid": sec,
+                                "label": owner.get("nickname") or rid,
+                                "viewers": (r.get("room_view_stats") or {}).get("display_value"),
+                                "stale": False, "account": False})
                 time.sleep(0.5)
         except Exception:
             pass
-        # ② 缓存房间 (标 stale; feed 已收录的不重复)
-        try:
-            from .config import PROFILE_CACHE_FILE, USERS_FILE
-            from .services import read_project_users, read_profile_cache
-            users = {u.sec_uid: u.label for u in read_project_users(USERS_FILE)}
-            cache = read_profile_cache(PROFILE_CACHE_FILE)
-            for sec_uid, entry in (cache or {}).items():
-                p = (entry or {}).get("profile") or {}
-                rid = str(p.get("room_id") or "")
-                if not rid or rid in out:
-                    continue
-                out[rid] = {"room_id": rid,
-                            "label": users.get(sec_uid) or p.get("nickname") or rid[:10],
-                            "sec_uid": sec_uid,
-                            "viewers": None, "stale": True}
-        except Exception:
-            pass
-        return list(out.values())
+        return out
 
     # ---- 内部 ----
     def _add_event(self, level: str, message: str, room_id: str = "") -> None:
@@ -196,15 +219,54 @@ class LiveMonitor:
             self._add_event("error", f"无凭证: {str(exc)[:60]}")
             time.sleep(5)
             return
-        for rid, st in items:
+        for key, st in items:
             with self._lock:
                 if not self._state["running"]:
                     return
                 due = time.time() - st["last_tick"] >= MIN_ROOM_INTERVAL_S
             if not due:
                 continue
-            self._snapshot(rid, st, tok)
+            # 账户维度: 先解析当前场次 room_id (带 TTL 缓存)
+            if st["sec_uid"] and not self._resolve_room(st):
+                time.sleep(slot * 0.4)
+                continue
+            rid = st["resolved_rid"]
+            if rid:
+                self._snapshot(rid, st, tok)
             time.sleep(slot * 0.4)  # 房间间小间隔, 错峰
+
+    def _resolve_room(self, st: dict) -> bool:
+        """账户维度: 直连 profile/other 轻量版解析当前场次 room_id。
+
+        缓存 TTL 内直接用上次结果; 解析失败/未开播返回 False (本轮跳过)。
+        """
+        now = time.time()
+        if st["resolved_rid"] and now - st["resolved_at"] < _ROOM_RESOLVE_TTL_S:
+            return True
+        st["last_tick"] = now  # 解析也算一次探测, 钳制频率
+        try:
+            prof = _req_direct_lab("GET", "/aweme/v1/user/",
+                                   {"sec_user_id": st["sec_uid"]})
+        except Exception as exc:
+            self._add_event("error", f"{st['label']} profile 解析失败: "
+                            f"{str(exc)[:60]}", st["sec_uid"][:12])
+            return False
+        u = prof.get("user") or {}
+        rid = str(u.get("room_id_str") or u.get("room_id") or "").strip()
+        if not rid or rid == "0" or u.get("live_status") != 1:
+            # 未开播: 清掉旧解析, 下轮再试 (开播/下播事件由 _snapshot 侧维护)
+            if st["was_live"]:
+                self._add_event("offline", f"{st['label']} 已下播", st["sec_uid"][:12])
+                st["was_live"] = False
+            st["resolved_rid"] = ""
+            st["resolved_at"] = now
+            return False
+        if rid != st["resolved_rid"] and st["resolved_rid"]:
+            # 换了场次 (重新开播), 换房不重复报开播 (was_live 仍 True 时)
+            pass
+        st["resolved_rid"] = rid
+        st["resolved_at"] = now
+        return True
 
     def _snapshot(self, rid: str, st: dict, tok: str) -> None:
         q = common_q(room_id=rid, anchor_id="0", enter_type=0, mean_type=1,
@@ -214,9 +276,19 @@ class LiveMonitor:
         st["last_tick"] = time.time()
         sc = ent.get("status_code")
         if sc != 0:
-            hint = " (room_id 已失效, 下播后每场房间号独立 — 请刷新候选)" if sc == 30003 else ""
+            if sc == 30003:
+                # 房间失效: 账户维度目标下轮自动重解析; 房间维度目标需手动换
+                if st.get("sec_uid"):
+                    st["resolved_rid"] = ""  # 强制下轮重新解析
+                    st["resolved_at"] = 0.0
+                    hint = " (场次已失效, 下轮自动重新解析)"
+                else:
+                    hint = " (room_id 已失效, 下播后每场房间号独立 — 请刷新候选)"
+            else:
+                hint = ""
             self._add_event("error", f"{st['label']} enter sc={sc} "
-                            f"{str(ent.get('status_msg') or '')[:40]}{hint}", rid)
+                            f"{str(ent.get('status_msg') or '')[:40]}{hint}",
+                            st.get("sec_uid") or rid)
             return
         room = ent.get("data") or {}
         brief = _room_brief(room if isinstance(room, dict) else {})
