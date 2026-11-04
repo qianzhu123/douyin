@@ -491,8 +491,7 @@ def test_query_profiles_recovers_from_target_closed_error(monkeypatch):
 
     service.module = FakeMonitor()
     sec_uid = "MS4wLjABAAAAFakeUID"
-    # resolve_targets 需要 list_users,我们 stub 掉
-    service._watch_jobs = {}
+    # resolve_targets 需要 list_users,我们 stub 掉 (watch 轮询已移除, _watch_jobs 不复存在)
     monkeypatch.setattr(service, "resolve_targets", lambda ids: [{"sec_uid": sec_uid, "label": "fake", "url": "https://www.douyin.com/user/" + sec_uid}])
     # 避免触发真实缓存写入
     monkeypatch.setattr("backend.services.upsert_profile_cache", lambda *a, **k: None)

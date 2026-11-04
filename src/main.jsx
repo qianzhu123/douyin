@@ -59,15 +59,10 @@ function localNowIso() {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 }
 
-function mergeAccount(account, watch) {
-  const watched = (watch.profiles || []).find((item) => item.sec_uid === account.sec_uid);
-  const profile = watched?.profile || account.last_profile || {};
-  return {
-    ...account,
-    liveProfile: watched?.profile,
-    profile,
-    last_checked_at: watched ? (watch.last_checked_at || account.last_checked_at) : account.last_checked_at,
-  };
+function mergeAccount(account) {
+  // watch 轮询已移除, 账户数据只来自 profile_cache (monitor/手动检测/监控回写)
+  const profile = account.last_profile || {};
+  return { ...account, profile, last_checked_at: account.last_checked_at };
 }
 
 // ---- 粉丝团签到面板 (PC 直连, 凭证来自 data/fansclub_tokens/) ----
@@ -717,17 +712,16 @@ function FansClubPanel({ apiRef }) {
 //            room_id 房间维度 (feed 在播房/手动加; 下播后失效)
 function LiveMonitorPanel({ embedded }) {
   const [status, setStatus] = React.useState(null); // 后端 /api/live-monitor/status
-  const [candidates, setCandidates] = React.useState([]);
-  const [selected, setSelected] = React.useState(new Set()); // key: sec_uid 或 room_id
+  const [extraTargets, setExtraTargets] = React.useState([]); // 手动添加的账户 (账户之外)
   const [intervalSec, setIntervalSec] = React.useState(120);
   const [durationMin, setDurationMin] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
-  const [manual, setManual] = React.useState(''); // 手动添加: 主页链接/sec_uid/抖音号
+  const [manual, setManual] = React.useState(''); // 粘贴: 主页链接/短链/sec_uid/抖音号/名称
   const [manualBusy, setManualBusy] = React.useState(false);
+  const [accounts, setAccounts] = React.useState([]); // 账户列表 (默认监控对象, 用户定论 2026-11-05: 不再选主播)
+  const [includeAccounts, setIncludeAccounts] = React.useState(true);
   const running = !!(status && status.running);
-
-  const keyOf = (c) => (c.sec_uid ? `s:${c.sec_uid}` : `r:${c.room_id}`);
 
   const loadStatus = React.useCallback(async () => {
     try {
@@ -736,43 +730,46 @@ function LiveMonitorPanel({ embedded }) {
     } catch { /* ignore */ }
   }, []);
 
-  const loadCandidates = React.useCallback(async () => {
+  const loadAccounts = React.useCallback(async () => {
     try {
-      const r = await fetch(`${API_BASE}/api/live-monitor/candidates`);
+      const r = await fetch(`${API_BASE}/api/users`);
       const d = await r.json();
-      setCandidates(d.candidates || []);
+      setAccounts(d.users || []);
     } catch { /* ignore */ }
   }, []);
 
-  React.useEffect(() => { loadStatus(); loadCandidates(); }, [loadStatus, loadCandidates]);
+  React.useEffect(() => { loadStatus(); loadAccounts(); }, [loadStatus, loadAccounts]);
   React.useEffect(() => {
     // 轮询状态: 运行中 5s, 空闲 30s
     const t = setInterval(loadStatus, running ? 5000 : 30000);
     return () => clearInterval(t);
   }, [running, loadStatus]);
 
-  const toggleRoom = (k) => {
-    setSelected((cur) => {
-      const next = new Set(cur);
-      if (next.has(k)) next.delete(k); else next.add(k);
-      return next;
-    });
+  // 组装启动目标: 账户列表全部 (可开关) + 手动添加
+  const buildRooms = () => {
+    const rooms = [];
+    if (includeAccounts) {
+      for (const u of accounts) {
+        rooms.push({ sec_uid: u.sec_uid, label: u.label || u.nickname || u.unique_id || u.sec_uid.slice(0, 10) });
+      }
+    }
+    for (const c of extraTargets) {
+      if (!rooms.some((r) => r.sec_uid === c.sec_uid)) rooms.push({ sec_uid: c.sec_uid, label: c.label });
+    }
+    return rooms;
   };
 
   const startMonitor = async () => {
-    if (selected.size === 0) { setErr('请先勾选要监控的目标'); return; }
+    const rooms = buildRooms();
+    if (rooms.length === 0) { setErr('没有监控目标 — 粘贴链接/名称添加，或先在账户列表添加账户'); return; }
     setBusy(true); setErr('');
     try {
-      const rooms = candidates.filter((c) => selected.has(keyOf(c)))
-        .map((c) => (c.sec_uid ? { sec_uid: c.sec_uid, label: c.label }
-                                 : { room_id: c.room_id, label: c.label }));
       const r = await fetch(`${API_BASE}/api/live-monitor/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rooms, interval: intervalSec, duration_minutes: durationMin }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || '启动失败');
-      setSelected(new Set());
       await loadStatus();
     } catch (e) { setErr(e.message); }
     finally { setBusy(false); }
@@ -785,40 +782,30 @@ function LiveMonitorPanel({ embedded }) {
     finally { setBusy(false); }
   };
 
-  // 手动添加: 粘主页链接/sec_uid/直播间链接 → 搜索接口解析 (抖音号→走 /api/users/search;
-  // 链接里含 sec_uid 或 web_rid → 直接拼目标)
+  // 粘贴添加 (用户定论 2026-11-05: 舍弃候选 chip, 输入框直解):
+  // 后端 /api/users/resolve-link 三段解析 — 主页链接正则 → v.douyin.com 短链 302
+  // (lab §73.5 配方) → 名称/抖音号搜索。返回即为目标账户, 无需再选。
   const addManual = async () => {
     const v = manual.trim();
-    if (!v) { setErr('请输入主页链接 / 直播间链接 / sec_uid / 抖音号'); return; }
+    if (!v) { setErr('请输入主页链接 / 短链 / sec_uid / 抖音号 / 名称'); return; }
     setManualBusy(true); setErr('');
     try {
-      // ① 主页链接带 sec_uid: douyin.com/user/MS4w...
-      let m = v.match(/\/user\/(MS4w[A-Za-z0-9_-]+)/);
-      if (m) {
-        const c = { sec_uid: m[1], label: m[1].slice(0, 12) + '…', account: true, stale: false, viewers: null };
-        setCandidates((cur) => [c, ...cur.filter((x) => keyOf(x) !== keyOf(c))]);
-        setSelected((cur) => new Set([...cur, keyOf(c)]));
-        setManual('');
-        return;
-      }
-      // ② 直播间链接带 web_rid: live.douyin.com/<web_rid>
-      m = v.match(/live\.douyin\.com\/(\d+)/);
-      if (m) {
-        const c = { room_id: '', web_rid: m[1], label: `直播间 ${m[1]}`, stale: false, viewers: null, sec_uid: '' };
-        // web_rid 不等于 room_id, 交由后端搜索解析更好; 先尝试搜索
-      }
-      // ③ 走搜索接口 (抖音号/昵称), 搜到的第一个结果自动选中
-      const r = await fetch(`${API_BASE}/api/users/search`, {
+      const r = await fetch(`${API_BASE}/api/users/resolve-link`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyword: v }),
       });
       const d = await r.json();
-      const first = (d.candidates || [])[0];
-      if (!first) throw new Error('搜索无结果 — 试试直接粘贴主页链接或 sec_uid');
-      const c = { sec_uid: first.sec_uid, label: first.nickname || first.unique_id || v,
-                  account: true, stale: false, viewers: null };
-      setCandidates((cur) => [c, ...cur.filter((x) => keyOf(x) !== keyOf(c))]);
-      setSelected((cur) => new Set([...cur, keyOf(c)]));
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : '解析失败');
+      if (d.kind === 'sec_uid') {
+        const c = { sec_uid: d.sec_uid, label: d.sec_uid.slice(0, 12) + '…' };
+        setExtraTargets((cur) => [c, ...cur.filter((x) => x.sec_uid !== c.sec_uid)]);
+      } else if (d.kind === 'candidate') {
+        const c = d.candidate;
+        const target = { sec_uid: c.sec_uid, label: c.nickname || c.unique_id || c.sec_uid.slice(0, 12) };
+        setExtraTargets((cur) => [target, ...cur.filter((x) => x.sec_uid !== target.sec_uid)]);
+      } else {
+        throw new Error('未解析到账户 — 换主页链接试试');
+      }
       setManual('');
     } catch (e) { setErr(e.message); }
     finally { setManualBusy(false); }
@@ -842,8 +829,8 @@ function LiveMonitorPanel({ embedded }) {
         {running ? (
           <button onClick={stopMonitor} disabled={busy}>停止监控</button>
         ) : (
-          <button onClick={startMonitor} disabled={busy || selected.size === 0} title="启动后台直连轮询（不开浏览器）">
-            <Activity size={16} /> {busy ? '启动中…' : `启动监控 (${selected.size})`}
+          <button onClick={startMonitor} disabled={busy} title="启动后台直连轮询（不开浏览器）">
+            <Activity size={16} /> {busy ? '启动中…' : `启动监控 (${buildRooms().length})`}
           </button>
         )}
       </div>
@@ -857,9 +844,8 @@ function LiveMonitorPanel({ embedded }) {
         <label>时长 <input className="lm-num" value={durationMin}
           onChange={(e) => setDurationMin(e.target.value.replace(/\D/g, '') || '')}
           inputMode="numeric" placeholder="不限" /> 分钟</label>
-        <button className="secondary" onClick={loadCandidates} title="账户列表账户 + feed 当前在播房">
-          <RotateCw size={16} /> 刷新候选
-        </button>
+        <label className="lm-include"><input type="checkbox" checked={includeAccounts}
+          onChange={(e) => setIncludeAccounts(e.target.checked)} /> 含账户列表全部 ({accounts.length})</label>
       </div>
 
       {!running && (
@@ -868,32 +854,25 @@ function LiveMonitorPanel({ embedded }) {
             <input className="lm-add-input" value={manual}
               onChange={(e) => setManual(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') addManual(); }}
-              placeholder="手动添加：粘贴主页链接 / 直播间链接 / sec_uid / 抖音号，回车添加"
+              placeholder="追加监控目标：主页链接 / 短链 / sec_uid / 抖音号 / 名称，回车解析"
             />
             <button className="secondary" onClick={addManual} disabled={manualBusy}>
               <Plus size={16} /> {manualBusy ? '解析中…' : '添加'}
             </button>
           </div>
-          {candidates.length > 0 && (
-            <div className="lm-candidates">
-              {candidates.map((c) => {
-                const k = keyOf(c);
-                return (
-                  <button key={k}
-                    className={`lm-cand${selected.has(k) ? ' checked' : ''}${c.stale ? ' stale' : ''}${c.account ? ' acct' : ''}`}
-                    onClick={() => toggleRoom(k)}
-                    title={c.account
-                      ? `账户维度监控（${c.sec_uid.slice(0, 18)}…）— 自动跟随每场直播的房间号`
-                      : c.stale ? `room_id=${c.room_id}（历史场次，可能已失效）`
-                                : `room_id=${c.room_id}（正在直播${c.viewers ? ` · ${c.viewers}人` : ''}）`}>
-                    {c.label}{c.account ? '' : (c.stale ? ' ⚠' : ' ●')}
-                  </button>
-                );
-              })}
-            </div>
+          {!includeAccounts && extraTargets.length === 0 && (
+            <div className="empty">未选任何目标 — 勾选「含账户列表全部」或粘贴链接添加</div>
           )}
-          {candidates.length === 0 && (
-            <div className="empty">暂无候选 — 在上方输入框手动添加，或先在「账户与直播」添加账户</div>
+          {extraTargets.length > 0 && (
+            <div className="lm-candidates">
+              {extraTargets.map((c) => (
+                <span key={c.sec_uid} className="lm-cand acct checked" title={c.sec_uid}>
+                  {c.label}
+                  <button className="lm-cand-x" onClick={() => setExtraTargets((cur) => cur.filter((x) => x.sec_uid !== c.sec_uid))}
+                    title="移除">×</button>
+                </span>
+              ))}
+            </div>
           )}
         </>
       )}
@@ -1220,8 +1199,6 @@ function App() {
   // 左侧导航/顶栏按钮组共用的当前区块 (滚到粉丝团区域时顶栏切为粉丝团操作, 用户指定 2026-11-04)
   const [activeSection, setActiveSection] = React.useState('');
   const fansclubApi = React.useRef(null);
-  const [watchJobs, setWatchJobs] = React.useState([]);
-  const [watchCurrentId, setWatchCurrentId] = React.useState('');
   const [downloadJobs, setDownloadJobs] = React.useState([]);
   const [selectedUid, setSelectedUid] = React.useState('');
   const [checkedUids, setCheckedUids] = React.useState(new Set());
@@ -1230,26 +1207,8 @@ function App() {
   const [busy, setBusy] = React.useState(false);
   const [detectingUids, setDetectingUids] = React.useState(new Set());
   const [addOpen, setAddOpen] = React.useState(false);
-  const [pollOpen, setPollOpen] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState(null);
-  const [pollTargets, setPollTargets] = React.useState([]);
-  const [pollDefaults, setPollDefaults] = React.useState(() => {
-    try {
-      const stored = JSON.parse(window.localStorage.getItem('douyinPollDefaults') || 'null');
-      if (stored && Number.isFinite(stored.interval) && Number.isFinite(stored.durationMinutes)) {
-        return {
-          interval: Math.max(5, Math.min(3600, stored.interval)),
-          durationMinutes: Math.max(1, Math.min(1440, stored.durationMinutes)),
-          pollTypes: Array.isArray(stored.pollTypes)
-            ? stored.pollTypes.filter((t) => ['basic', 'live'].includes(t))
-            : [],
-        };
-      }
-    } catch (error) {
-      // fall through to defaults
-    }
-    return { interval: 30, durationMinutes: 100, pollTypes: [] };
-  });
+  // watch 轮询已整体移除 (2026-11-05): 定时盯直播由直播监控 (LiveMonitorPanel) 承担
   const [downloadText, setDownloadText] = React.useState('');
   const [downloadMode, setDownloadMode] = React.useState(1);
   const [downloadOutputDir, setDownloadOutputDir] = React.useState('');
@@ -1278,17 +1237,9 @@ function App() {
   const accountsRef = React.useRef([]);
   const contextMenuRef = React.useRef(null);
 
-  // Backward-compat: synthesize a single `watch` object from the current job so
-  // mergeAccount / pollingLogs / toolbar (watch.running) keep working unchanged.
-  const watch = React.useMemo(() => {
-    if (!watchJobs.length) return { running: false, profiles: [], events: [], targets: [] };
-    const current = watchJobs.find((job) => job.id === watchCurrentId) || watchJobs[watchJobs.length - 1];
-    return current || { running: false, profiles: [], events: [], targets: [] };
-  }, [watchJobs, watchCurrentId]);
-
   const rows = React.useMemo(
-    () => accounts.map((account) => mergeAccount(account, watch)),
-    [accounts, watch],
+    () => accounts.map((account) => mergeAccount(account, null)),
+    [accounts],
   );
   const selected = rows.find((row) => row.sec_uid === selectedUid) || rows[0];
   const checkedTargets = React.useMemo(() => Array.from(checkedUids), [checkedUids]);
@@ -1297,17 +1248,6 @@ function App() {
     () => activityLogs.filter((entry) => entry.source === '检测').slice(0, 80),
     [activityLogs],
   );
-  const pollingLogs = React.useMemo(() => {
-    const watchLogs = (watch.events || []).map((event) => ({
-      time: event.time,
-      level: event.level,
-      message: event.message,
-      source: '轮询',
-    }));
-    return [...activityLogs.filter((entry) => entry.source === '轮询'), ...watchLogs]
-      .sort((a, b) => String(b.time).localeCompare(String(a.time)))
-      .slice(0, 80);
-  }, [activityLogs, watch.events]);
   const downloadLogs = React.useMemo(
     () => downloadJobs.flatMap((job) => (job.logs || []).map((entry) => ({
       time: entry.time,
@@ -1330,10 +1270,6 @@ function App() {
   React.useEffect(() => {
     window.localStorage.setItem('douyinActivityLogs', JSON.stringify(activityLogs.slice(0, 80)));
   }, [activityLogs]);
-
-  React.useEffect(() => {
-    window.localStorage.setItem('douyinPollDefaults', JSON.stringify(pollDefaults));
-  }, [pollDefaults]);
 
   React.useEffect(() => {
     window.localStorage.setItem('douyinHiddenUids', JSON.stringify(Array.from(hiddenUids)));
@@ -1372,14 +1308,6 @@ function App() {
     });
   }, []);
 
-  const loadWatch = React.useCallback(async () => {
-    const response = await fetch(`${API_BASE}/api/watch/jobs`);
-    if (!response.ok) return;
-    const data = await response.json();
-    setWatchJobs(data.jobs || []);
-    setWatchCurrentId(data.current_id || '');
-  }, []);
-
   const loadDownloads = React.useCallback(async () => {
     const response = await fetch(`${API_BASE}/api/downloads`);
     if (!response.ok) return;
@@ -1400,19 +1328,17 @@ function App() {
 
   React.useEffect(() => {
     loadAccounts().catch((error) => setMessage(error.message));
-    loadWatch().catch(() => {});
     loadDownloads().catch(() => {});
     loadSettings().catch(() => {});
-  }, [loadAccounts, loadWatch, loadDownloads, loadSettings]);
+  }, [loadAccounts, loadDownloads, loadSettings]);
 
   React.useEffect(() => {
     const timer = window.setInterval(() => {
       loadAccounts().catch(() => {});
-      loadWatch().catch(() => {});
       loadDownloads().catch(() => {});
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [loadAccounts, loadWatch, loadDownloads]);
+  }, [loadAccounts, loadDownloads]);
 
   async function postJson(path, body = {}) {
     let response;
@@ -1512,13 +1438,6 @@ function App() {
       pendingTargets.forEach((uid) => next.delete(uid));
       return next;
     });
-  }
-
-
-  function openPollModal(targets) {
-    const runningTargets = (watch.targets || []).map((target) => target.sec_uid);
-    setPollTargets(targets.length ? targets : runningTargets);
-    setPollOpen(true);
   }
 
   function toggleAllAccounts() {
@@ -1631,93 +1550,6 @@ function App() {
     if (!draggedUid) return;
     setDraggedUid('');
     reorderAccounts(accountsRef.current);
-  }
-
-  async function startPolling({ interval, durationMinutes, pollTypes }) {
-    setBusy(true);
-    try {
-      const label = `轮询 ${new Date().toLocaleTimeString()}`;
-      const data = await postJson('/api/watch/start', {
-        targets: pollTargets,
-        interval,
-        duration_minutes: durationMinutes,
-        label,
-        poll_types: pollTypes,
-      });
-      // remember the last-used values so the next modal opens with them
-      setPollDefaults({
-        interval: Math.max(5, Math.min(3600, Number(interval) || 30)),
-        durationMinutes: Math.max(1, Math.min(1440, Number(durationMinutes) || 100)),
-        pollTypes: Array.isArray(pollTypes) ? pollTypes.slice() : [],
-      });
-      await loadWatch();
-      setPollOpen(false);
-      const typeText = (data.watch && data.watch.poll_types && data.watch.poll_types.length)
-        ? data.watch.poll_types.join('/')
-        : 'basic/live';
-      setMessage(`轮询已启动：${pollTargets.length} 账户，间隔 ${interval}s，持续 ${durationMinutes}m，类型 ${typeText}`);
-      appendLog('info', `轮询检测已启动：${pollTargets.length} 个账户，间隔 ${interval}s，持续 ${durationMinutes} 分钟，类型 ${typeText}`, '轮询');
-    } catch (error) {
-      setMessageWithProgress(`轮询启动失败：${error.message}`, error);
-      appendLog('error', error.message, '轮询');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function stopPolling() {
-    const jobId = watchCurrentId || (watchJobs[watchJobs.length - 1] || {}).id;
-    if (!jobId) {
-      setMessage('当前没有运行中的轮询任务');
-      return;
-    }
-    await stopPollingJob(jobId);
-  }
-
-  async function stopPollingJob(jobId) {
-    if (!jobId) return;
-    setBusy(true);
-    try {
-      await postJson(`/api/watch/${jobId}/stop`, {});
-      await loadWatch();
-      setMessage('轮询检测已停止');
-      appendLog('info', '轮询检测已停止', '轮询');
-      await loadAccounts();
-    } catch (error) {
-      setMessage(error.message);
-      appendLog('error', error.message, '轮询');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function adjustPollingJob(jobId, patch) {
-    if (!jobId) return;
-    try {
-      await postJson(`/api/watch/${jobId}/adjust`, patch);
-      await loadWatch();
-    } catch (error) {
-      setMessage(error.message);
-      appendLog('error', error.message, '轮询');
-    }
-  }
-
-  async function removePollingJob(jobId) {
-    if (!jobId) return;
-    setBusy(true);
-    try {
-      const resp = await fetch(`${API_BASE}/api/watch/${jobId}`, { method: 'DELETE' });
-      if (!resp.ok) throw new Error(`删除轮询任务失败 (${resp.status})`);
-      await loadWatch();
-      setMessage('轮询任务已移除');
-      appendLog('info', '轮询任务已移除', '轮询');
-      await loadAccounts();
-    } catch (error) {
-      setMessage(error.message);
-      appendLog('error', error.message, '轮询');
-    } finally {
-      setBusy(false);
-    }
   }
 
 
@@ -1994,10 +1826,7 @@ function App() {
             >
               刷人数
             </button>
-            <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
-              <Activity size={16} /> 轮询选中
-            </button>
-            <button className="icon-button" onClick={() => { loadAccounts(); loadWatch(); loadDownloads(); }} title="刷新">
+            <button className="icon-button" onClick={() => { loadAccounts(); loadDownloads(); }} title="刷新">
               <RefreshCcw size={18} />
             </button>
           </div>
@@ -2015,7 +1844,7 @@ function App() {
           <div className="panel-head">
             <div>
               <h2>账户与直播</h2>
-              <p>{watch.running ? `轮询中，第 ${watch.round || 0} 轮，间隔 ${watch.interval}s，持续 ${watch.duration_minutes || 30} 分钟，上次 ${formatTime(watch.last_checked_at)}` : '账户信息 + 实时直播监控（开播跟踪 / 观众变化 / 事件流）'}</p>
+              <p>账户信息 + 实时直播监控（开播跟踪 / 观众变化 / 事件流）</p>
             </div>
             <div className="panel-actions">
               {hiddenUids.size > 0 && (
@@ -2027,21 +1856,6 @@ function App() {
           </div>
 
           <LiveMonitorPanel embedded />
-
-          {watchJobs.length > 0 && (
-            <div className="watch-jobs">
-              {watchJobs.map((job) => (
-                <WatchJobCard
-                  key={job.id}
-                  job={job}
-                  busy={busy}
-                  onStop={() => stopPollingJob(job.id)}
-                  onAdjust={(patch) => adjustPollingJob(job.id, patch)}
-                  onRemove={() => removePollingJob(job.id)}
-                />
-              ))}
-            </div>
-          )}
 
           <div className="account-list">
             <div className="account-header">
@@ -2077,7 +1891,6 @@ function App() {
                 }}
                 onDetect={() => detectTargets([row.sec_uid])}
                 onDetectLiveRoom={() => detectLiveRoom([row.sec_uid])}
-                onPoll={() => openPollModal([row.sec_uid])}
                 onDelete={() => setDeleteTarget(row)}
               />
             ))}
@@ -2234,7 +2047,6 @@ function App() {
 
         <div className="log-grid" id="sec-logs">
           <LogPanel title="检测日志" description="单次账户信息与直播信息检测结果。" logs={detectLogs} />
-          <LogPanel title="轮询日志" description="轮询启动、停止、每轮检测摘要和开播/下播事件。" logs={pollingLogs} />
           <LogPanel title="下载日志" description="下载任务的解析、执行和失败信息。" logs={downloadLogs} />
         </div>
       </section>
@@ -2249,17 +2061,6 @@ function App() {
             await loadAccounts();
             setAddOpen(false);
           }}
-        />
-      )}
-
-      {pollOpen && (
-        <PollModal
-          targetCount={pollTargets.length}
-          initialInterval={pollDefaults.interval}
-          initialDurationMinutes={pollDefaults.durationMinutes}
-          initialPollTypes={pollDefaults.pollTypes}
-          onClose={() => setPollOpen(false)}
-          onStart={startPolling}
         />
       )}
 
@@ -2292,7 +2093,7 @@ function App() {
   );
 }
 
-function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onDetectLiveRoom, onPoll, onDelete }) {
+function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onDetectLiveRoom, onDelete }) {
   const profile = row.profile || {};
   const live = profile.live_status === 1;
   const failed = row.last_ok === false;
@@ -2336,7 +2137,6 @@ function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging,
       <span className="row-actions" onClick={(event) => event.stopPropagation()}>
         <button onClick={onDetect} disabled={detecting} title="刷新基本信息（昵称/粉丝/直播状态）">基本</button>
         <button className="secondary" onClick={onDetectLiveRoom} disabled={detecting} title="仅刷新直播间人数（不刷其它字段）">人数</button>
-        <button className="secondary" onClick={onPoll} disabled={busy}>轮询</button>
         <button className="secondary icon-button small-icon" onClick={onHide} title={hidden ? '恢复信息' : '隐藏信息'}>
           {hidden ? <Eye size={15} /> : <EyeOff size={15} />}
         </button>
@@ -2724,116 +2524,5 @@ function AddAccountModal({ busy, setBusy, setMessage, onClose, onAdded }) {
   );
 }
 
-function WatchJobCard({ job, busy, onStop, onAdjust, onRemove }) {
-  const [editing, setEditing] = React.useState(false);
-  const [interval, setIntervalValue] = React.useState(job.interval || 30);
-  const [durationMinutes, setDurationMinutes] = React.useState(job.duration_minutes || 30);
-  React.useEffect(() => {
-    setIntervalValue(job.interval || 30);
-    setDurationMinutes(job.duration_minutes || 30);
-  }, [job.interval, job.duration_minutes]);
-
-  const targetCount = (job.targets || []).length;
-  const lastEvent = (job.events || [])[0];
-  return (
-    <div className={`watch-job-card${job.running ? ' running' : ''}`}>
-      <div className="watch-job-head">
-        <span className="watch-job-label">{job.label || job.id.slice(0, 8)}</span>
-        <span className={`watch-job-state ${job.running ? 'live' : 'idle'}`}>
-          {job.running ? '运行中' : '已停止'}
-        </span>
-      </div>
-      <div className="watch-job-meta">
-        <span>目标 {targetCount}</span>
-        <span>第 {job.round || 0} 轮</span>
-        <span>间隔 {job.interval}s</span>
-        <span>持续 {job.duration_minutes || 30}m</span>
-        <span>上次 {formatTime(job.last_checked_at)}</span>
-      </div>
-      {editing && (
-        <div className="watch-job-edit">
-          <label>间隔(s)
-            <input type="number" min="5" value={interval} onChange={(event) => setIntervalValue(Number(event.target.value) || 5)} />
-          </label>
-          <label>持续(m)
-            <input type="number" min="1" value={durationMinutes} onChange={(event) => setDurationMinutes(Number(event.target.value) || 1)} />
-          </label>
-          <button className="secondary" onClick={() => { onAdjust({ interval, duration_minutes: durationMinutes }); setEditing(false); }}>应用</button>
-          <button className="secondary" onClick={() => setEditing(false)}>取消</button>
-        </div>
-      )}
-      {lastEvent && <div className="watch-job-event">{lastEvent.message}</div>}
-      {Array.isArray(job.progress) && job.progress.length > 0 && (
-        <div className="watch-job-progress">
-          {job.progress.slice(-12).map((step, index) => (
-            <div className={`watch-job-progress-line ${step.status}`} key={`${step.time}-${index}`}>
-              <span>{step.status === 'done' ? '✓' : step.status === 'error' ? '✗' : step.status === 'running' ? '⟳' : '·'}</span>
-              <span>{step.step}</span>
-              <span>{step.message}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="watch-job-actions">
-        <button className="secondary" onClick={() => setEditing((value) => !value)} disabled={busy}>调整</button>
-        <button className="secondary" onClick={onStop} disabled={busy || !job.running}>停止</button>
-        <button className="danger" onClick={onRemove} disabled={busy}>移除</button>
-      </div>
-    </div>
-  );
-}
-
-function PollModal({ targetCount, initialInterval, initialDurationMinutes, initialPollTypes, onClose, onStart }) {
-  const [interval, setIntervalValue] = React.useState(initialInterval || 30);
-  const [durationMinutes, setDurationMinutes] = React.useState(initialDurationMinutes || 30);
-  // 默认全选（兼容旧行为）；空数组=后端跑全部。
-  const [pollTypes, setPollTypes] = React.useState(() => {
-    if (Array.isArray(initialPollTypes)) return initialPollTypes.slice();
-    return ['basic', 'live'];
-  });
-
-  function toggleType(name) {
-    setPollTypes((current) => {
-      const next = new Set(current);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      // 至少保留一个；如果全部取消 → 后端跑全部 (传空数组)。
-      return Array.from(next);
-    });
-  }
-
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="modal compact-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-head">
-          <div>
-            <h2>轮询检测</h2>
-            <p>将检测 {targetCount} 个账户。</p>
-          </div>
-          <Activity size={20} />
-        </div>
-        <div className="field">
-          轮询范围（不勾选 = 全部）
-          <div className="poll-type-row">
-            <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('basic')} onChange={() => toggleType('basic')} /> 基本信息</label>
-            <label className="checkbox-line"><input type="checkbox" checked={pollTypes.includes('live')} onChange={() => toggleType('live')} /> 直播间</label>
-          </div>
-        </div>
-        <label className="field">
-          间隔秒数
-          <input value={interval} onChange={(event) => setIntervalValue(event.target.value)} inputMode="numeric" />
-        </label>
-        <label className="field">
-          检测时长（分钟）
-          <input value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} inputMode="numeric" />
-        </label>
-        <div className="modal-actions">
-          <button className="secondary" onClick={onClose}>取消</button>
-          <button onClick={() => onStart({ interval: Number(interval) || 30, durationMinutes: Number(durationMinutes) || 30, pollTypes })}>开始轮询</button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 createRoot(document.getElementById('root')).render(<App />);

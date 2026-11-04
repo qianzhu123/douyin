@@ -6,10 +6,8 @@ import math
 import re
 import threading
 import uuid
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
@@ -31,15 +29,9 @@ from .schemas import (
     AddUserResult,
     AppSettings,
     DownloadJob,
-    ProgressLog,
-    ProgressStep,
     ProfileResult,
     SearchCandidate,
     UserEntry,
-    WatchAdjustRequest,
-    WatchEvent,
-    WatchJob,
-    WatchStatus,
     now_iso,
 )
 from .tool_loader import load_module
@@ -54,44 +46,9 @@ except ImportError:  # pragma: no cover - dependency is declared for runtime
     async_playwright = None
 
 
-@dataclass
-class _WatchJobState:
-    """Holds runtime state for a single live-polling job."""
-
-    id: str
-    label: str
-    targets: list[dict[str, Any]]
-    interval: int
-    duration_minutes: int
-    started_at: str
-    end_at: str
-    last_checked_at: str = ""
-    round: int = 0
-    stopped: bool = False
-    # 轮询类型筛选：basic / live；空 = 全部（旧行为）
-    poll_types: tuple[str, ...] = ()
-    live_now: set[str] = field(default_factory=set)
-    profiles: dict[str, ProfileResult] = field(default_factory=dict)
-    events: deque[WatchEvent] = field(default_factory=lambda: deque(maxlen=400))
-    progress: deque[ProgressStep] = field(default_factory=lambda: deque(maxlen=400))
-    task: asyncio.Task | None = None
-
-    def is_running(self) -> bool:
-        return (self.task is not None) and (not self.task.done()) and not self.stopped
-
-    def add_event(self, level: str, message: str, sec_uid: str = "") -> None:
-        self.events.append(WatchEvent(time=now_iso(), level=level, message=message, sec_uid=sec_uid))
-
-    def add_progress(self, step: str, status: str, message: str, level: str = "info") -> None:
-        self.progress.append(
-            ProgressStep(
-                step=step,
-                status=status,
-                message=message,
-                level=level,
-                time=now_iso(),
-            )
-        )
+# --- watch 轮询整体移除 (2026-11-05, 用户定论: 与直播监控功能重复, 只留监控) ---
+# 原始 watch 状态类与轮询循环已删; 定时盯直播由 LiveMonitor (live_monitor.py) 承担,
+# 定时刷基本信息未来如需再在 LiveMonitor 上加 basic 快照类型。
 
 
 class MonitorService:
@@ -100,9 +57,6 @@ class MonitorService:
         self.search_module = load_module("douyin_user_search_tool", SEARCH_DIR / "douyin_search.py") if (SEARCH_DIR / "douyin_search.py").exists() else None
         self.raw_search_module = load_module("douyin_user_raw_search_tool", SEARCH_DIR / "raw.py") if (SEARCH_DIR / "raw.py").exists() else None
         ensure_project_users(USERS_FILE, self.module.parse_settings())
-        self._watch_jobs: dict[str, "_WatchJobState"] = {}
-        self._watch_current_id: str = ""
-        self._watch_lock = asyncio.Lock()
         self._search_lock = asyncio.Lock()
         self.live_room = LiveRoomService()
         self._live_room_sem = asyncio.Semaphore(3)
@@ -328,151 +282,7 @@ class MonitorService:
             except Exception:
                 pass
 
-    async def start_watch(self, target_ids: list[str], interval: int, duration_minutes: int = 30, end_at: str = "", job_id: str = "", label: str = "", poll_types: list[str] | None = None) -> WatchStatus:
-        async with self._watch_lock:
-            job = await self._start_watch_job(target_ids, interval, duration_minutes, end_at, job_id, label, poll_types or [])
-            self._watch_current_id = job.id
-            return self._job_to_status(job)
-
-    async def _start_watch_job(self, target_ids: list[str], interval: int, duration_minutes: int, end_at: str, job_id: str, label: str, poll_types: list[str] | None = None) -> "_WatchJobState":
-        targets = self.resolve_targets(target_ids)
-        job_id = job_id or str(uuid.uuid4())
-        # allow same-id restart (replace), but different ids coexist
-        old = self._watch_jobs.get(job_id)
-        if old and old.task and not old.task.done():
-            old.task.cancel()
-            # 与 _stop_job 同理:cancel 后最多等 1s 收尾，避免长 playwright 调用卡死整个 start
-            try:
-                await asyncio.wait_for(asyncio.shield(old.task), timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-            except Exception:
-                pass
-        started_at = now_iso()
-        end_at_resolved = end_at or (datetime_from_iso(started_at) + timedelta(minutes=max(1, duration_minutes))).isoformat(timespec="seconds")
-        normalized_types = _normalize_poll_types(poll_types)
-        job = _WatchJobState(
-            id=job_id,
-            label=label or f"轮询 {job_id[:8]}",
-            targets=targets,
-            interval=max(5, interval),
-            duration_minutes=max(1, duration_minutes),
-            end_at=end_at_resolved,
-            started_at=started_at,
-            poll_types=normalized_types,
-        )
-        type_label = "/".join(normalized_types) if normalized_types else "basic/live"
-        job.add_event("info", f"Started live polling for {len(targets)} user(s), types={type_label}.")
-        self._watch_jobs[job_id] = job
-        job.task = asyncio.create_task(self._watch_loop(job_id))
-        return job
-
-    async def stop_watch(self, job_id: str = "") -> WatchStatus:
-        async with self._watch_lock:
-            if job_id:
-                await self._stop_job(job_id)
-            else:
-                # compat: stop the "current" job
-                if self._watch_current_id:
-                    await self._stop_job(self._watch_current_id)
-            return self._compat_status()
-
-    async def _stop_job(self, job_id: str) -> None:
-        job = self._watch_jobs.get(job_id)
-        if not job:
-            return
-        if job.task and not job.task.done():
-            job.task.cancel()
-            # 只短暂等待收尸。_watch_loop 跑在 fetch_profiles_parallel(long playwright
-            # 调用)里时 cancel 未必能立刻进得去；这里若 await 卡到那一轮跑完(可能数十秒)，
-            # 上层 remove_watch_job 会一直持有 _watch_lock → 其它 watch 操作(stop/start/
-            # adjust/再 delete)全部死锁，UI 表现为"轮询任务完全无法移除"。
-            # 故:cancel 后最多等 1s 收不到就弃，留给事件循环后台自然消退(job 已从注册表 pop)。
-            try:
-                await asyncio.wait_for(asyncio.shield(job.task), timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-            except Exception:
-                pass
-        job.add_event("info", "Stopped live polling.")
-        job.stopped = True
-
-    async def remove_watch_job(self, job_id: str) -> None:
-        """Stop the job if running and drop it from the registry so the UI
-        can discard a finished/stopped polling task."""
-        async with self._watch_lock:
-            await self._stop_job(job_id)
-            self._watch_jobs.pop(job_id, None)
-            if self._watch_current_id == job_id:
-                self._watch_current_id = ""
-
-    def adjust_watch(self, job_id: str, interval: int | None = None, duration_minutes: int | None = None, end_at: str | None = "") -> WatchJob:
-        job = self._watch_jobs.get(job_id)
-        if not job:
-            raise ValueError("Watch job not found.")
-        if interval is not None:
-            job.interval = max(5, interval)
-        if duration_minutes is not None:
-            job.duration_minutes = max(1, duration_minutes)
-            job.end_at = (datetime_from_iso(job.started_at) + timedelta(minutes=job.duration_minutes)).isoformat(timespec="seconds")
-        if end_at:
-            job.end_at = end_at
-        job.add_event("info", f"Adjusted: interval={job.interval}s, duration={job.duration_minutes}m, end_at={job.end_at}")
-        return self._job_to_model(job)
-
-    def list_watch_jobs(self) -> list[WatchJob]:
-        return [self._job_to_model(job) for job in self._watch_jobs.values()]
-
-    def watch_status(self, job_id: str = "") -> WatchStatus:
-        if job_id:
-            job = self._watch_jobs.get(job_id)
-            return self._job_to_status(job) if job else WatchStatus(running=False)
-        return self._compat_status()
-
-    def _compat_status(self) -> WatchStatus:
-        job = self._watch_jobs.get(self._watch_current_id) if self._watch_current_id else None
-        return self._job_to_status(job) if job else WatchStatus(running=False)
-
-    def _job_to_status(self, job: "_WatchJobState | None") -> WatchStatus:
-        if not job:
-            return WatchStatus(running=False)
-        return WatchStatus(
-            id=job.id,
-            running=job.is_running(),
-            interval=job.interval,
-            duration_minutes=job.duration_minutes,
-            round=job.round,
-            started_at=job.started_at,
-            end_at=job.end_at,
-            last_checked_at=job.last_checked_at,
-            poll_types=list(job.poll_types),
-            targets=[UserEntry(**entry) for entry in job.targets],
-            profiles=list(job.profiles.values()),
-            events=list(job.events),
-            progress=list(job.progress),
-        )
-
-    def _job_to_model(self, job: "_WatchJobState") -> WatchJob:
-        return WatchJob(
-            id=job.id,
-            label=job.label,
-            running=job.is_running(),
-            interval=job.interval,
-            duration_minutes=job.duration_minutes,
-            round=job.round,
-            started_at=job.started_at,
-            end_at=job.end_at,
-            last_checked_at=job.last_checked_at,
-            poll_types=list(job.poll_types),
-            targets=[UserEntry(**entry) for entry in job.targets],
-            profiles=list(job.profiles.values()),
-            events=list(job.events),
-            progress=list(job.progress),
-        )
-
     async def shutdown(self) -> None:
-        for job_id in list(self._watch_jobs.keys()):
-            await self._stop_job(job_id)
         await self.module.close_browser()
         await self.live_room.close()
 
@@ -687,82 +497,6 @@ class MonitorService:
             json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-    async def _watch_loop(self, job_id: str) -> None:
-        job = self._watch_jobs.get(job_id)
-        if not job:
-            return
-        types = job.poll_types or ("basic", "live")
-        while True:
-            if job.end_at and datetime_from_iso(job.end_at) <= datetime_from_iso(now_iso()):
-                job.add_event("info", "Polling stopped after configured duration.")
-                job.add_progress("polling", "done", "轮询时长到，自动停止")
-                job.stopped = True
-                return
-            job.round += 1
-            job.last_checked_at = now_iso()
-            job.add_progress("round", "running", f"第 {job.round} 轮开始 (types={'/'.join(types)})")
-            try:
-                results: list[dict[str, Any] | None] = []
-                if "basic" in types:
-                    job.add_progress("basic", "running", f"并发拉取 {len(job.targets)} 个账户主页 (profile/other)", "info")
-                    try:
-                        results = await self.module.fetch_profiles_parallel(job.targets)
-                    except Exception as exc:
-                        if _is_pool_death(exc):
-                            await self._reset_monitor_pool()
-                            results = await self.module.fetch_profiles_parallel(job.targets)
-                        else:
-                            raise
-                    job.add_progress("basic", "done", "主页基础信息已更新")
-                else:
-                    # 不刷 basic 时也保证 profiles 表存在（用 cache 兜底），
-                    # 后续 live 才能挑出 web_rid。
-                    results = [self._cached_profile_for(entry) for entry in job.targets]
-                    job.add_progress("basic", "done", "已跳过主页（仅依赖缓存）")
-                for entry, info in zip(job.targets, results):
-                    profile = self._to_profile_result(entry, info)
-                    job.profiles[entry["sec_uid"]] = profile
-                    self._record_live_transition(job, entry, profile)
-                if "live" in types:
-                    job.add_progress("live", "running", "并发探测直播间详情 (enter/ranklist/paygrade)")
-                    await asyncio.gather(*(self._enrich_live_room(p) for p in job.profiles.values()))
-                    job.add_progress("live", "done", "直播间详情已刷新")
-                upsert_profile_cache(PROFILE_CACHE_FILE, [profile.model_dump() for profile in job.profiles.values()])
-                failed = sum(1 for profile in job.profiles.values() if not profile.ok)
-                job.add_event("info", f"Round {job.round}: checked {len(job.targets)} user(s), failed {failed}.")
-                job.add_progress("round", "done", f"第 {job.round} 轮完成：成功 {len(job.targets) - failed}/{len(job.targets)}")
-            except Exception as exc:
-                job.add_event("error", f"Polling failed: {exc}")
-                job.add_progress("round", "error", f"第 {job.round} 轮失败：{exc}", "error")
-            await asyncio.sleep(job.interval)
-
-    def _cached_profile_for(self, entry: dict[str, Any]) -> dict[str, Any] | None:
-        """不刷 basic 时，从 profile_cache.json 里捞最近一次的结果填回去，
-        让后续 live 也能继续运行（web_rid 已经持久化）。"""
-        cached = read_profile_cache(PROFILE_CACHE_FILE).get(entry["sec_uid"], {}).get("profile")
-        return cached if isinstance(cached, dict) else None
-
-    def _record_live_transition(self, job: "_WatchJobState", entry: dict[str, Any], profile: ProfileResult) -> None:
-        sec_uid = entry["sec_uid"]
-        label = entry.get("label") or sec_uid[:16]
-        if not profile.ok or not profile.profile:
-            job.add_event("error", f"{label}: query failed", sec_uid)
-            return
-
-        info = profile.profile
-        is_live = info.get("live_status") == 1
-        nickname = info.get("nickname") or label
-        if is_live and sec_uid not in job.live_now:
-            job.live_now.add(sec_uid)
-            viewers = info.get("live_viewers")
-            suffix = f" ({viewers} viewers)" if viewers not in (None, "") else ""
-            started = info.get("live_start_at")
-            started_suffix = f", started at {started}" if started else ""
-            job.add_event("live", f"{nickname} is live{suffix}{started_suffix}.", sec_uid)
-        elif not is_live and sec_uid in job.live_now:
-            job.live_now.remove(sec_uid)
-            job.add_event("offline", f"{nickname} is offline.", sec_uid)
-
     def _to_profile_result(self, entry: dict[str, Any], info: dict[str, Any] | None) -> ProfileResult:
         if not info:
             return ProfileResult(
@@ -785,21 +519,6 @@ class MonitorService:
             profile=profile,
         )
 
-
-
-def _normalize_poll_types(values: list[str] | None) -> tuple[str, ...]:
-    """规范化轮询类型白名单：去空/去重/保序/限定已知键。空 → 返回空 tuple 表示"全部"。"""
-    if not values:
-        return ()
-    allowed = {"basic", "live"}
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw in values:
-        v = str(raw or "").strip().lower()
-        if v in allowed and v not in seen:
-            seen.add(v)
-            out.append(v)
-    return tuple(out)
 
 
 def _is_pool_death(exc: BaseException) -> bool:
@@ -1836,13 +1555,6 @@ def enrich_profile(profile: dict[str, Any], raw_user: dict[str, Any]) -> dict[st
     if room_data and not enriched.get("live_viewers"):
         enriched["live_viewers"] = room_data.get("user_count")
     return enriched
-
-
-def datetime_from_iso(value: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return datetime.max
 
 
 def _load_room_data(user: dict[str, Any]) -> dict[str, Any]:

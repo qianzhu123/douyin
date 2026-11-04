@@ -1373,3 +1373,11 @@ button:disabled {
   border: 1px solid #d4e3f5; border-radius: 6px;
 }
 .lm-cand.acct { border-color: #b8d4ee; background: #eef6ff; }
+/* 粘贴添加的目标 chip (只读展示 + × 移除, 不再点选切换 2026-11-05) */
+.lm-cand.acct.checked { display: inline-flex; align-items: center; gap: 6px; }
+.lm-cand-x {
+  border: 0; background: transparent; color: #64839d; font-size: 14px;
+  line-height: 1; padding: 0 2px; cursor: pointer;
+}
+.lm-cand-x:hover { color: #b0483c; }
+.lm-include { color: #4a6580; user-select: none; }
