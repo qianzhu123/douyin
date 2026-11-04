@@ -80,8 +80,7 @@ const NAV_ITEMS = [
   { id: 'sec-logs', label: '日志' },
 ];
 
-function SideNav() {
-  const [active, setActive] = React.useState('');
+function SideNav({ active, onActive }) {
   React.useEffect(() => {
     const onScroll = () => {
       // 以"最后一个滚过视口上沿 1/3 的 section"为当前项
@@ -90,12 +89,12 @@ function SideNav() {
         const el = document.getElementById(item.id);
         if (el && el.getBoundingClientRect().top < window.innerHeight / 3) cur = item.id;
       }
-      setActive(cur);
+      onActive(cur);
     };
     onScroll();
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
-  }, []);
+  }, [onActive]);
   const jump = (id) => {
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -115,7 +114,7 @@ function SideNav() {
   );
 }
 
-function FansClubPanel() {
+function FansClubPanel({ apiRef }) {
   const [accounts, setAccounts] = React.useState([]);
   const [selected, setSelected] = React.useState('');
   // 各账户检查结果缓存: {label: overview} — 切换不丢, 刷新也不丢(localStorage), 手动「检查」才更新
@@ -131,6 +130,25 @@ function FansClubPanel() {
   });
   const [signJobs, setSignJobs] = React.useState([]);
   const [signingAll, setSigningAll] = React.useState(false);
+  // 向顶栏暴露动作与状态 (用户指定 2026-11-04: 滚到粉丝团区域时顶栏按钮组切换为粉丝团操作)
+  React.useEffect(() => {
+    if (!apiRef) return undefined;
+    apiRef.current = {
+      loadAccounts,
+      checkAllNow: async () => {
+        try {
+          const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
+          const d = await r.json();
+          if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
+          else if (d.reason === 'already running') setCheckAll(d.state);
+          else setError(d.reason || '未能启动');
+        } catch (e) { setError(e.message); }
+      },
+      signAll,
+      state: { signingAll, checkAllRunning: !!checkAll?.running, accounts: accounts.length },
+    };
+    return () => { apiRef.current = null; };
+  });
 
   const loadAccounts = React.useCallback(async () => {
     try {
@@ -525,35 +543,38 @@ function FansClubPanel() {
           <p>
             凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => (c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`)) || clubSignState[c.anchor_id]?.startsWith('ok:')).length}`}
           </p>
+          {/* 检测类操作在标题同侧 (用户指定 2026-11-04: 签到类独占右上角) */}
+          <div className="panel-actions panel-actions-left">
+            <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
+              <RotateCw size={16} /> 重载凭证
+            </button>
+            <button
+              className="secondary"
+              onClick={() => loadOverview(selected)}
+              disabled={!selected || checking}
+              title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），其他账户检查中也可并发检查"
+            >
+              <Search size={16} /> {checking ? '检查中…' : '检查'}
+            </button>
+            <button
+              className="secondary"
+              onClick={async () => {
+                try {
+                  const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
+                  const d = await r.json();
+                  if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
+                  else if (d.reason === 'already running') setCheckAll(d.state);
+                  else setError(d.reason || '未能启动');
+                } catch (e) { setError(e.message); }
+              }}
+              disabled={!!checkAll?.running}
+              title="后台串行检查全部账户（每天 0 点后打开页面也会自动执行一次）"
+            >
+              <Search size={16} /> {checkAll?.running ? '全量检测中…' : '检查全部'}
+            </button>
+          </div>
         </div>
         <div className="panel-actions">
-          <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
-            <RotateCw size={16} /> 重载凭证
-          </button>
-          <button
-            className="secondary"
-            onClick={() => loadOverview(selected)}
-            disabled={!selected || checking}
-            title="拉取当前账户全部粉丝团的最新状态（连签/亲密度/入团天数），其他账户检查中也可并发检查"
-          >
-            <Search size={16} /> {checking ? '检查中…' : '检查'}
-          </button>
-          <button
-            className="secondary"
-            onClick={async () => {
-              try {
-                const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
-                const d = await r.json();
-                if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
-                else if (d.reason === 'already running') setCheckAll(d.state);
-                else setError(d.reason || '未能启动');
-              } catch (e) { setError(e.message); }
-            }}
-            disabled={!!checkAll?.running}
-            title="后台串行检查全部账户（每天 0 点后打开页面也会自动执行一次）"
-          >
-            <Search size={16} /> {checkAll?.running ? '全量检测中…' : '检查全部'}
-          </button>
           <button
             onClick={signAll}
             disabled={accounts.length === 0 || signingAll}
@@ -1010,6 +1031,9 @@ function LiveAnalysisPanel() {  const [input, setInput] = React.useState('');
 
 function App() {
   const [accounts, setAccounts] = React.useState([]);
+  // 左侧导航/顶栏按钮组共用的当前区块 (滚到粉丝团区域时顶栏切为粉丝团操作, 用户指定 2026-11-04)
+  const [activeSection, setActiveSection] = React.useState('');
+  const fansclubApi = React.useRef(null);
   const [watchJobs, setWatchJobs] = React.useState([]);
   const [watchCurrentId, setWatchCurrentId] = React.useState('');
   const [downloadJobs, setDownloadJobs] = React.useState([]);
@@ -1736,38 +1760,62 @@ function App() {
 
   return (
     <main className="app-shell">
-      <SideNav />
+      <SideNav active={activeSection} onActive={setActiveSection} />
       <header className="topbar">
         <div>
           <h1>Douyin Monitor</h1>
           <p>账户主页信息与直播状态列表</p>
         </div>
-        <div className="top-actions">
-          <button className="secondary" onClick={() => setAddOpen(true)}>
-            <Plus size={16} /> 添加账户
-          </button>
-          <button
-            onClick={() => detectTargets(checkedTargets)}
-            disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
-            title="刷新选中账户的基本信息"
-          >
-            <RefreshCcw size={16} /> 刷基本
-          </button>
-          <button
-            className="secondary"
-            onClick={() => detectLiveRoom(checkedTargets)}
-            disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
-            title="仅刷新选中账户的直播间人数（不刷其它详情）"
-          >
-            刷人数
-          </button>
-          <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
-            <Activity size={16} /> 轮询选中
-          </button>
-          <button className="icon-button" onClick={() => { loadAccounts(); loadWatch(); loadDownloads(); }} title="刷新">
-            <RefreshCcw size={18} />
-          </button>
-        </div>
+        {activeSection === 'sec-fansclub' && fansclubApi.current ? (
+          /* 粉丝团区域: 顶栏按钮组切换为粉丝团操作 (检测类+签到) */
+          <div className="top-actions">
+            <button className="secondary" onClick={() => fansclubApi.current?.loadAccounts()} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
+              <RotateCw size={16} /> 重载凭证
+            </button>
+            <button
+              className="secondary"
+              onClick={() => fansclubApi.current?.checkAllNow()}
+              disabled={fansclubApi.current?.state?.checkAllRunning}
+              title="后台并发检查全部账户（每天 0 点后打开页面也会自动执行一次）"
+            >
+              <Search size={16} /> {fansclubApi.current?.state?.checkAllRunning ? '全量检测中…' : '检测全部'}
+            </button>
+            <button
+              onClick={() => fansclubApi.current?.signAll()}
+              disabled={!fansclubApi.current?.state?.accounts || fansclubApi.current?.state?.signingAll}
+              title="并发签到全部账户（各账户独立线程, 互不阻塞; 免费 join 端点, 幂等）"
+            >
+              <Activity size={16} /> {fansclubApi.current?.state?.signingAll ? '签到中…' : '一键签到全部'}
+            </button>
+          </div>
+        ) : (
+          <div className="top-actions">
+            <button className="secondary" onClick={() => setAddOpen(true)}>
+              <Plus size={16} /> 添加账户
+            </button>
+            <button
+              onClick={() => detectTargets(checkedTargets)}
+              disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
+              title="刷新选中账户的基本信息"
+            >
+              <RefreshCcw size={16} /> 刷基本
+            </button>
+            <button
+              className="secondary"
+              onClick={() => detectLiveRoom(checkedTargets)}
+              disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
+              title="仅刷新选中账户的直播间人数（不刷其它详情）"
+            >
+              刷人数
+            </button>
+            <button onClick={() => openPollModal(checkedTargets)} disabled={busy || checkedTargets.length === 0 || watchJobs.some((job) => job.running)}>
+              <Activity size={16} /> 轮询选中
+            </button>
+            <button className="icon-button" onClick={() => { loadAccounts(); loadWatch(); loadDownloads(); }} title="刷新">
+              <RefreshCcw size={18} />
+            </button>
+          </div>
+        )}
       </header>
 
       <section className="content list-layout">
@@ -1851,7 +1899,7 @@ function App() {
 
         {selected && <DetailPanel row={selected} hidden={hiddenUids.has(selected.sec_uid)} />}
 
-        <FansClubPanel />
+        <FansClubPanel apiRef={fansclubApi} />
         {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
 
         <PostsPanel accounts={accounts} />

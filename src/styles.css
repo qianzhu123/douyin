@@ -195,6 +195,12 @@ button:disabled {
   gap: 10px;
 }
 
+/* 标题同侧的按钮组 (粉丝团: 检测类按钮在标题下方, 签到类独占右上) */
+.panel-actions-left {
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+
 .panel-head h2,
 .modal-head h2 {
   margin: 0;
