@@ -76,6 +76,7 @@ const NAV_ITEMS = [
   { id: 'sec-accounts', label: '账户列表' },
   { id: 'sec-fansclub', label: '粉丝团' },
   { id: 'sec-posts', label: '作品/评论' },
+  { id: 'sec-live-monitor', label: '直播监控' },
   { id: 'sec-download', label: '视频下载' },
   { id: 'sec-logs', label: '日志' },
 ];
@@ -713,6 +714,160 @@ function FansClubPanel({ apiRef }) {
 }
 
 // ---- 直播间分析面板 (PC 直连两头配方, 只读; §81/§83) ----
+// ---- 直播实时监控面板 (阶段二: PC 直连快照轮询, 零浏览器) ----
+function LiveMonitorPanel() {
+  const [status, setStatus] = React.useState(null); // 后端 /api/live-monitor/status
+  const [candidates, setCandidates] = React.useState([]);
+  const [selected, setSelected] = React.useState(new Set()); // room_id set
+  const [intervalSec, setIntervalSec] = React.useState(120);
+  const [durationMin, setDurationMin] = React.useState(0);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const running = !!(status && status.running);
+
+  const loadStatus = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/live-monitor/status`);
+      setStatus(await r.json());
+    } catch { /* ignore */ }
+  }, []);
+
+  const loadCandidates = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/live-monitor/candidates`);
+      const d = await r.json();
+      setCandidates(d.candidates || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  React.useEffect(() => { loadStatus(); loadCandidates(); }, [loadStatus, loadCandidates]);
+  React.useEffect(() => {
+    // 轮询状态: 运行中 5s, 空闲 30s
+    const t = setInterval(loadStatus, running ? 5000 : 30000);
+    return () => clearInterval(t);
+  }, [running, loadStatus]);
+
+  const toggleRoom = (rid) => {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(rid)) next.delete(rid); else next.add(rid);
+      return next;
+    });
+  };
+
+  const startMonitor = async () => {
+    if (selected.size === 0) { setErr('请先勾选要监控的房间'); return; }
+    setBusy(true); setErr('');
+    try {
+      const rooms = candidates.filter((c) => selected.has(c.room_id))
+        .map((c) => ({ room_id: c.room_id, label: c.label }));
+      const r = await fetch(`${API_BASE}/api/live-monitor/start`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rooms, interval: intervalSec, duration_minutes: durationMin }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || '启动失败');
+      setSelected(new Set());
+      await loadStatus();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const stopMonitor = async () => {
+    setBusy(true);
+    try { await fetch(`${API_BASE}/api/live-monitor/stop`, { method: 'POST' }); await loadStatus(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const rooms = (status && status.rooms) || [];
+  const events = (status && status.events) || [];
+  const fmtT = (ts) => (ts ? fmtDayTime(ts * 1000) : '—');
+  const levelColor = (lv) => (lv === 'live' ? 'lm-live' : lv === 'offline' ? 'lm-off' : lv === 'error' ? 'lm-err' : '');
+
+  return (
+    <section className="panel live-monitor-panel" id="sec-live-monitor">
+      <div className="panel-head">
+        <div>
+          <h2>直播监控</h2>
+          <p>
+            {running
+              ? `监控中 · ${rooms.length} 房 · 间隔 ${status.interval}s · 累计事件 ${events.length}`
+              : '空闲 · PC 直连快照轮询（零浏览器），检测开播/下播/观众变化'}
+          </p>
+        </div>
+        <div className="panel-actions">
+          {running ? (
+            <button onClick={stopMonitor} disabled={busy}>停止监控</button>
+          ) : (
+            <button onClick={startMonitor} disabled={busy || selected.size === 0} title="启动后台直连轮询（不开浏览器）">
+              <Activity size={16} /> {busy ? '启动中…' : `启动监控 (${selected.size})`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {err && <div className="notice">{err}</div>}
+
+      <div className="lm-config">
+        <label>间隔 <input className="lm-num" value={intervalSec}
+          onChange={(e) => setIntervalSec(e.target.value.replace(/\D/g, '') || '60')}
+          inputMode="numeric" /> 秒</label>
+        <label>时长 <input className="lm-num" value={durationMin}
+          onChange={(e) => setDurationMin(e.target.value.replace(/\D/g, '') || '')}
+          inputMode="numeric" placeholder="不限" /> 分钟</label>
+        <button className="secondary" onClick={loadCandidates} title="从账户列表的 profile 缓存收集已开播过的房间号">
+          <RotateCw size={16} /> 刷新候选
+        </button>
+      </div>
+
+      {!running && candidates.length > 0 && (
+        <div className="lm-candidates">
+          {candidates.map((c) => (
+            <button key={c.room_id}
+              className={`lm-cand${selected.has(c.room_id) ? ' checked' : ''}${c.stale ? ' stale' : ''}`}
+              onClick={() => toggleRoom(c.room_id)}
+              title={c.stale ? `room_id=${c.room_id}（历史场次，下播后房间号失效，监控会报 enter 30003）` : `room_id=${c.room_id}（正在直播${c.viewers ? ` · ${c.viewers}人` : ''}）`}>
+              {c.label}{c.stale ? ' ⚠' : ''}
+            </button>
+          ))}
+        </div>
+      )}
+      {!running && candidates.length === 0 && (
+        <div className="empty">暂无候选房间 — 账户列表里「刷基本」检测到开播后这里会出现房间号</div>
+      )}
+
+      {running && rooms.length > 0 && (
+        <div className="lm-rooms">
+          <div className="lm-room lm-head">
+            <span>房间</span><span>状态</span><span>观众</span><span>标题</span><span>最近快照</span>
+          </div>
+          {rooms.map((r) => (
+            <div key={r.room_id} className="lm-room">
+              <span>{r.label}</span>
+              <span className={r.was_live ? 'lm-on' : 'lm-off'}>{r.was_live ? '直播中' : '未播'}</span>
+              <span>{r.viewers != null ? r.viewers.toLocaleString() : '—'}</span>
+              <span className="lm-title" title={r.title}>{r.title || '—'}</span>
+              <span>{fmtT(r.last_tick)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {events.length > 0 && (
+        <div className="lm-events">
+          {events.slice().reverse().map((e, i) => (
+            <div key={i} className={`lm-event ${levelColor(e.level)}`}>
+              <span className="lm-ev-time">{fmtT(e.time)}</span>
+              <span className="lm-ev-msg">{e.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PostsPanel({ accounts }) {
   const [secUid, setSecUid] = React.useState('');
   // 自定义数量 (用户指定 2026-11-04: 仅支持自定义, 不做预设档位)
@@ -1873,6 +2028,8 @@ function App() {
         {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
 
         <PostsPanel accounts={accounts} />
+
+        <LiveMonitorPanel />
 
         <section className="panel download-panel" id="sec-download">
           <div className="panel-head">

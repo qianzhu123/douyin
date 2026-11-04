@@ -472,6 +472,40 @@ def live_analyze(payload: LiveAnalysisRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
 
 
+# ---- 直播实时监控 (PC 直连快照轮询, 零浏览器, 见 backend/live_monitor.py) ----
+from .live_monitor import LiveMonitor
+from .schemas import LiveMonitorStartRequest
+
+_live_monitor = LiveMonitor()
+
+
+@app.post("/api/live-monitor/start")
+def live_monitor_start(payload: LiveMonitorStartRequest) -> dict:
+    """启动直播监控 (后台线程直连快照; 开播/下播/观众变化事件)。"""
+    r = _live_monitor.start(payload.rooms, interval=payload.interval,
+                            duration_minutes=payload.duration_minutes,
+                            label=payload.label.strip())
+    if not r.get("started"):
+        raise HTTPException(status_code=400, detail=r.get("reason") or "未能启动")
+    return r
+
+
+@app.post("/api/live-monitor/stop")
+def live_monitor_stop() -> dict:
+    return _live_monitor.stop()
+
+
+@app.get("/api/live-monitor/status")
+def live_monitor_status() -> dict:
+    return _live_monitor.status()
+
+
+@app.get("/api/live-monitor/candidates")
+def live_monitor_candidates() -> dict:
+    """从 profile_cache 收集有 room_id 的账户, 供前端一键填充监控目标。"""
+    return {"candidates": _live_monitor.candidates()}
+
+
 @app.post("/api/fansclub/admin/restart-backend")
 def admin_restart_backend() -> dict:
     """幂等重启后端（8000）。前端调用后预计 1-3s 内会失联。"""

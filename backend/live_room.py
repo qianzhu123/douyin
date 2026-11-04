@@ -69,6 +69,9 @@ def _resolve_login_profile() -> str:
 class LiveRoomService:
     """打开直播间、拦 webcast 接口并归一为直播间卡片 dict。
 
+    浏览器策略 (阶段二收编): 优先复用常驻 CDP Chrome (9222, start-douyin.ps1
+    拉起, downloader 同款), 探测完只关 page 不杀浏览器; CDP 不可达才退化
+    冷启 chromium (旧行为)。消灭每次探测 ~2-4s 的浏览器冷启动。
     线程安全：每次 fetch_overview 内部独立 async 上下文，可被多账户并发调用
     （调用方负责限并发，本类不做信号量）。
     """
@@ -79,9 +82,65 @@ class LiveRoomService:
         self.timeout_ms = timeout_ms
         self.enter_wait_ms = enter_wait_ms
 
-    async def close(self) -> None:
+    @staticmethod
+    def _cdp_alive(timeout: float = 1.5) -> bool:
+        """常驻 Chrome 9222 探活 (与 cdp_probe 同源, 不 import 免循环)。"""
+        try:
+            import httpx
+            resp = httpx.get("http://127.0.0.1:9222/json/version", timeout=timeout)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def close(self) -> None:
         """兼容 MonitorService.shutdown 调用；本服务无持久态，no-op。"""
         return
+
+    def _acquire_page(self, p):
+        """返回 (context, page, owns_browser)。CDP 可达→挂常驻浏览器;
+        否则冷启 chromium 且 owns_browser=True (调用方负责关闭)。"""
+
+        async def _inner():
+            if self._cdp_alive():
+                try:
+                    browser = await p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                    context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                    page = await context.new_page()
+                    await page.set_viewport_size({"width": 1600, "height": 1000})
+                    return context, page, False
+                except Exception:
+                    pass  # CDP 竞态死亡 → 落冷启
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            context = await browser.new_context(
+                user_agent=UA, viewport={"width": 1600, "height": 1000}
+            )
+            page = await context.new_page()
+            return context, page, True
+
+        return _inner()
+
+    def _release(self, context, page, owns_browser: bool, browser) -> None:
+        """只关自开的 page; owns_browser 才关浏览器 (CDP 常驻不能杀)。"""
+
+        async def _inner():
+            try:
+                await page.close()
+            except Exception:
+                pass
+            if owns_browser:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+        return _inner()
 
     async def fetch_anchor_paygrade(self, *, web_rid: str = "") -> int | None:
         """仅探测 anchor 本人 paygrade（hover popup 解析）。
@@ -93,45 +152,34 @@ class LiveRoomService:
             return None
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=self.headless,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                )
-                context = await browser.new_context(
-                    user_agent=UA, viewport={"width": 1600, "height": 1000}
-                )
-                page = await context.new_page()
+                context, page, owns = await self._acquire_page()(p)
                 try:
                     await page.goto(f"https://live.douyin.com/{web_rid}",
                                     wait_until="domcontentloaded",
                                     timeout=self.timeout_ms)
                 except Exception:
-                    await context.close()
-                    await browser.close()
+                    await self._release(context, page, owns, None)()
                     return None
                 await asyncio.sleep(15)  # 等 anchor bar 渲染（status=4 回放页较慢）
                 bar = page.locator('[data-e2e="rooom-info-bar-anchor"]')
-                if await bar.count() == 0:
-                    await context.close()
-                    await browser.close()
-                    return None
-                await bar.hover()
-                await asyncio.sleep(2.5)
-                level = await page.evaluate("""
-                    () => {
-                        const popup = document.querySelector('.semi-popover-content');
-                        const userName = popup?.querySelector('.user_name, [class*="user_name"]');
-                        if (!userName) return null;
-                        const imgs = userName.querySelectorAll('img');
-                        for (const img of imgs) {
-                            const m = (img.src || '').match(/new_user_grade_level_v1_(\\d+)/);
-                            if (m) return parseInt(m[1]);
+                level = None
+                if await bar.count() > 0:
+                    await bar.hover()
+                    await asyncio.sleep(2.5)
+                    level = await page.evaluate("""
+                        () => {
+                            const popup = document.querySelector('.semi-popover-content');
+                            const userName = popup?.querySelector('.user_name, [class*="user_name"]');
+                            if (!userName) return null;
+                            const imgs = userName.querySelectorAll('img');
+                            for (const img of imgs) {
+                                const m = (img.src || '').match(/new_user_grade_level_v1_(\\d+)/);
+                                if (m) return parseInt(m[1]);
+                            }
+                            return null;
                         }
-                        return null;
-                    }
-                """)
-                await context.close()
-                await browser.close()
+                    """)
+                await self._release(context, page, owns, None)()
                 if isinstance(level, int) and 0 < level <= 75:
                     return level
         except Exception:
@@ -182,14 +230,7 @@ class LiveRoomService:
 
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=self.headless,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                )
-                context = await browser.new_context(
-                    user_agent=UA, viewport={"width": 1600, "height": 1000}
-                )
-                page = await context.new_page()
+                context, page, owns = await self._acquire_page()(p)
                 page.on("response", lambda r: asyncio.create_task(on_response(r)))
 
                 # 第一阶段：缺 web_rid 时回主页拿 room_data 换 web_rid。
@@ -208,8 +249,7 @@ class LiveRoomService:
                     resolved_web_rid = _web_rid_from_profile(captured.get("profile") or {})
 
                 if not resolved_web_rid:
-                    await context.close()
-                    await browser.close()
+                    await self._release(context, page, owns, None)()
                     return None
 
                 # 第二阶段：用 web_rid 进直播间拦 enter/ranklist（复用同一 context）。
@@ -218,16 +258,14 @@ class LiveRoomService:
                     await page.goto(live_url, wait_until="domcontentloaded",
                                     timeout=self.timeout_ms)
                 except Exception:
-                    await context.close()
-                    await browser.close()
+                    await self._release(context, page, owns, None)()
                     return None
                 for _ in range(max(1, self.enter_wait_ms // 300)):
                     if "enter" in captured:
                         break
                     await asyncio.sleep(0.3)
                 if "enter" not in captured:
-                    await context.close()
-                    await browser.close()
+                    await self._release(context, page, owns, None)()
                     return None
                 await asyncio.sleep(1.5)  # 榜单/心愿单加载余量
 
@@ -258,8 +296,7 @@ class LiveRoomService:
                 except Exception:
                     anchor_paygrade = None
 
-                await context.close()
-                await browser.close()
+                await self._release(context, page, owns, None)()
         except Exception:
             return None
 
