@@ -544,34 +544,7 @@ function FansClubPanel({ apiRef }) {
             凭证账户 {accounts.length} 个{overview?.ok && ` · ${overview.label}：${clubs.length} 团，今日已签 ${clubs.filter((c) => (c.factor && new Date(c.factor * 1000) >= new Date(`${todayKey}T00:00:00+08:00`)) || clubSignState[c.anchor_id]?.startsWith('ok:')).length}`}
           </p>
         </div>
-        <div className="panel-actions">
-          <button className="secondary" onClick={loadAccounts} title="重新扫描 data/fansclub_tokens/ 下的凭证文件">
-            <RotateCw size={16} /> 重载凭证
-          </button>
-          <button
-            className="secondary"
-            onClick={async () => {
-              try {
-                const r = await fetch(`${API_BASE}/api/fansclub/check-all`, { method: 'POST' });
-                const d = await r.json();
-                if (d.started) setCheckAll({ running: true, done_labels: [], labels: [] });
-                else if (d.reason === 'already running') setCheckAll(d.state);
-                else setError(d.reason || '未能启动');
-              } catch (e) { setError(e.message); }
-            }}
-            disabled={!!checkAll?.running}
-            title="后台串行检查全部账户（每天 0 点后打开页面也会自动执行一次）"
-          >
-            <Search size={16} /> {checkAll?.running ? '全量检测中…' : '检查全部'}
-          </button>
-          <button
-            onClick={signAll}
-            disabled={accounts.length === 0 || signingAll}
-            title="并发签到全部账户（各账户独立线程, 互不阻塞; 免费 join 端点, 幂等）"
-          >
-            <Activity size={16} /> {signingAll || signJobs.some((j) => j.running) ? '签到中…' : '一键签到全部'}
-          </button>
-        </div>
+        {/* 重载凭证/检查全部/一键签到全部已移至顶栏 (滚到本区域时顶栏切换为这三个置顶按钮, 用户指定 2026-11-04) */}
       </div>
 
       {error && <div className="notice">{error}</div>}
