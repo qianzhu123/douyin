@@ -10,7 +10,7 @@ live_analysis.py, lab §81 验证): 定时对房间 POST /webcast/room/enter/ �
   room_id 解析带 10 分钟缓存, 未开播轮空。
 - {room_id}  房间维度 — 旧方式, 下播后 room_id 失效 (enter 30003)。
 
-事件: 开播 / 下播 / 标题变化 / 观众数变化 (上次→本次, 抖动抑制: 变化<5% 不报)。
+事件: 开播 / 下播 / 标题变化。人数在房间表实时展示, 不发事件。
 """
 from __future__ import annotations
 
@@ -22,8 +22,6 @@ from collections import deque
 from .live_analysis import _http, common_q, _room_brief, _pick_token
 from .aweme_read import _req_direct_lab
 
-# 观众数变化超过该比例才报事件 (抑制高频抖动)
-VIEWERS_DELTA_RATIO = 0.05
 # 单房间两次 enter 最小间隔 (礼貌; 用户 interval 低于此值会被钳到该值)
 MIN_ROOM_INTERVAL_S = 60
 HISTORY_MAX = 360          # 每房间快照环 (默认 120s 间隔 = 12h)
@@ -315,18 +313,7 @@ class LiveMonitor:
         if st["title"] and new_title and new_title != st["title"]:
             self._add_event("info", f"{st['label']} 改标题: {new_title[:30]}", rid)
         st["title"] = new_title
-        # 观众数变化 (>5%)
-        prev = None
-        for h in reversed(list(st["history"])[:-1]):
-            if h.get("viewers") is not None:
-                prev = h["viewers"]
-                break
-        if prev is not None and viewers_int is not None and prev > 0:
-            ratio = abs(viewers_int - prev) / prev
-            if ratio >= VIEWERS_DELTA_RATIO:
-                arrow = "+" if viewers_int > prev else "-"
-                self._add_event("info", f"{st['label']} 观众 {prev}→{viewers_int} "
-                                f"({arrow}{ratio * 100:.0f}%)", rid)
+        # 观众涨跌事件已撤 (2026-11-05 用户定论: 只留开播/下播/标题, 人数表格里看)
         # 礼貌离房
         try:
             ql = common_q(room_id=rid, room_id_str=rid, leave_type=0, reason=2)
