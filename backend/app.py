@@ -118,12 +118,31 @@ async def resolve_share_link(payload: SearchUsersRequest) -> dict:
         except Exception:
             pass  # 短链解析失败 → 落搜索
 
-    # ③ 名称/抖音号 → 搜索 (取首条)
-    candidates = await monitor_service.search_users(text)
-    if candidates:
-        first: SearchCandidate = candidates[0]
-        return {"kind": "candidate", "candidate": first.model_dump()}
-    return {"kind": "none"}
+    # ③ 名称/抖音号 → 搜索 (取首条)。搜索链路被登录墙/验证码拦截时降级报错, 不 500
+    # (2026-11-05 实测: douyin.com 搜索页已强制登录, profile 会话被风控时全链路空转;
+    #  三级模块各烧 20-50s 后超时 → 总卡 2 分钟, 故这里加 60s 总闸快速失败)
+    async def _search_with_budget() -> dict:
+        candidates = await monitor_service.search_users(text)
+        if candidates:
+            return {"kind": "candidate", "candidate": candidates[0].model_dump()}
+        return {"kind": "none"}
+
+    import asyncio as _asyncio
+
+    try:
+        return await _asyncio.wait_for(_search_with_budget(), timeout=60)
+    except _asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="搜索链路超时 (60s) — 多半被登录墙/验证码拦截。请改粘主页链接/短链/sec_uid, 或重登 external/douyin-user-search/douyin_profile (login.bat)",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"搜索链路不可用 (登录墙/验证码拦截): {str(exc)[:120]} — 请改粘主页链接/短链/sec_uid, 或重登 external/douyin-user-search/douyin_profile",
+        )
 
 
 @app.post("/api/users")

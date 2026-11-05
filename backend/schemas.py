@@ -153,69 +153,6 @@ class ProfileResult(BaseModel):
     profile: dict[str, Any] | None = None
 
 
-class WatchStartRequest(BaseModel):
-    targets: list[str] = Field(default_factory=list)
-    interval: int = 30
-    end_at: str = ""
-    duration_minutes: int = 30
-    id: str = ""
-    label: str = ""
-    # 轮询类型筛选；空 = 全跑（向后兼容）。"basic"=只刷主页基本信息，
-    # "live"=只刷直播间（需 web_rid）。
-    poll_types: list[str] = Field(default_factory=list)
-
-
-class WatchAdjustRequest(BaseModel):
-    interval: int | None = None
-    duration_minutes: int | None = None
-    end_at: str | None = None
-
-
-class WatchEvent(BaseModel):
-    time: str
-    level: Literal["info", "live", "offline", "error"]
-    message: str
-    sec_uid: str = ""
-
-
-class WatchStatus(BaseModel):
-    id: str = ""
-    running: bool = False
-    interval: int = 30
-    duration_minutes: int = 30
-    round: int = 0
-    started_at: str = ""
-    end_at: str = ""
-    last_checked_at: str = ""
-    poll_types: list[str] = Field(default_factory=list)
-    targets: list[UserEntry] = Field(default_factory=list)
-    profiles: list[ProfileResult] = Field(default_factory=list)
-    events: list[WatchEvent] = Field(default_factory=list)
-    progress: list[ProgressStep] = Field(default_factory=list)
-
-
-class WatchJob(BaseModel):
-    id: str
-    label: str = ""
-    running: bool = False
-    interval: int = 30
-    duration_minutes: int = 30
-    round: int = 0
-    started_at: str = ""
-    end_at: str = ""
-    last_checked_at: str = ""
-    poll_types: list[str] = Field(default_factory=list)
-    targets: list[UserEntry] = Field(default_factory=list)
-    profiles: list[ProfileResult] = Field(default_factory=list)
-    events: list[WatchEvent] = Field(default_factory=list)
-    progress: list[ProgressStep] = Field(default_factory=list)
-
-
-class WatchJobsResult(BaseModel):
-    jobs: list[WatchJob] = Field(default_factory=list)
-    current_id: str = ""
-
-
 class DownloadRequest(BaseModel):
     text: str
     mode: int = Field(default=1, ge=1, le=3)

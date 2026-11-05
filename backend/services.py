@@ -61,6 +61,16 @@ class MonitorService:
         self.live_room = LiveRoomService()
         self._live_room_sem = asyncio.Semaphore(3)
 
+    @staticmethod
+    def _cdp_alive(timeout: float = 1.5) -> bool:
+        """常驻 Chrome 9222 探活 (与 live_room._cdp_alive 同源)。"""
+        try:
+            import httpx
+            resp = httpx.get("http://127.0.0.1:9222/json/version", timeout=timeout)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     def list_users(self) -> list[UserEntry]:
         cache = read_profile_cache(PROFILE_CACHE_FILE)
         users = []
@@ -109,15 +119,32 @@ class MonitorService:
 
         payload: dict[str, Any] | None = None
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context = await browser.new_context(
-                viewport={"width": 1600, "height": 1000},
-                user_agent=self.module.UA,
-            )
+            # CDP 优先 (2026-11-05, 同 live_room 收编): 复用常驻 Chrome 9222 免冷启;
+            # CDP 不可达才冷启 chromium。探测完只关 page, 常驻浏览器绝不杀。
+            browser = None
+            owns_browser = False
+            context = None
+            if self._cdp_alive():
+                try:
+                    browser = await playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                    context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                except Exception:
+                    browser = None
+            if browser is None:
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                owns_browser = True
+                context = await browser.new_context(
+                    viewport={"width": 1600, "height": 1000},
+                    user_agent=self.module.UA,
+                )
             page = await context.new_page()
+            try:
+                await page.set_viewport_size({"width": 1600, "height": 1000})
+            except Exception:
+                pass
             response_seen = asyncio.Event()
 
             async def capture_response(response) -> None:
@@ -155,8 +182,19 @@ class MonitorService:
                     except asyncio.TimeoutError:
                         raise RuntimeError("Timed out waiting for Douyin user search response.")
             finally:
-                await context.close()
-                await browser.close()
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                if owns_browser:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
 
         if not payload:
             return []

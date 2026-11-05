@@ -14,6 +14,7 @@ live_analysis.py, lab §81 验证): 定时对房间 POST /webcast/room/enter/ �
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
@@ -332,6 +333,44 @@ class LiveMonitor:
             _http("POST", "/webcast/room/leave/", ql, tok)
         except Exception:
             pass
+        # 回写 profile_cache (2026-11-05 打通断链): 账户表格的直播间/人数列直接吃到监控数据。
+        # 只动 live 相关字段, 基础信息 (粉丝/昵称等) 一概不碰 — 与手动检测解耦。
+        if st.get("sec_uid"):
+            try:
+                self._write_back(st["sec_uid"], live, viewers_int, brief)
+            except Exception:
+                pass  # 回写失败绝不影响监控主循环
+
+    def _write_back(self, sec_uid: str, live: bool, viewers_int: int | None,
+                    brief: dict) -> None:
+        """监控快照 → profile_cache。仅刷新 live_status/live_viewers/live_room 浅字段;
+        账户无 cache 记录时跳过 (不凭空造档案, 基础信息仍以手动检测为准)。"""
+        from .config import PROFILE_CACHE_FILE
+        from .services import read_profile_cache
+        cache = read_profile_cache(PROFILE_CACHE_FILE)
+        entry = cache.get(sec_uid)
+        if not isinstance(entry, dict):
+            return
+        profile = entry.get("profile")
+        if not isinstance(profile, dict):
+            return
+        profile = dict(profile)
+        profile["live_status"] = 1 if live else 0
+        profile["live_viewers"] = viewers_int if live else None
+        room = dict(profile.get("live_room") or {})
+        room["room_id_str"] = brief.get("room_id") or room.get("room_id_str")
+        room["status"] = brief.get("status")
+        room["title"] = brief.get("title") or room.get("title")
+        if viewers_int is not None:
+            room["viewers"] = viewers_int
+        profile["live_room"] = room
+        entry["profile"] = profile
+        entry["last_checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        cache[sec_uid] = entry
+        PROFILE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROFILE_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
 
 def _parse_viewers(value) -> int | None:
