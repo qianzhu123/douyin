@@ -35,3 +35,4 @@ backend/frontend.err.log
 external/douyin-monitor/data/
 tests/live_room_analysis/out/
 data/fansclub_tokens/
+data/fansclub_overview_cache.json
