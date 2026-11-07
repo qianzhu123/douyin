@@ -617,7 +617,7 @@ function FansClubPanel({ apiRef }) {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span>今日亲密度</span><span title="昨天结束时的亲密度 (来自每日凌晨 0 点自动检测的归档)">昨日</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span title="昨天结束时的亲密度 (来自每日凌晨 0 点自动检测的归档)">昨日亲密度</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -656,13 +656,13 @@ function FansClubPanel({ apiRef }) {
                     <span className="signed-at-cell" title="该团最近一次检测时刻">
                       {checkedAt ? fmtDayTime(checkedAt) : '—'}
                     </span>
-                    <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}
-                      title={todayGainFor(c) && todayGainFor(c) !== '0' ? '今日亲密度增量' : undefined}>
-                      {todayGainFor(c)}
-                    </span>
                     <span className="y-intimacy"
                       title={yIntimacyFor(c) != null ? '昨天结束时的亲密度 (凌晨0点自动检测归档)' : '昨日无归档 (后端凌晨未检测或账户较新)'}>
                       {yIntimacyFor(c) != null ? yIntimacyFor(c).toLocaleString() : '—'}
+                    </span>
+                    <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}
+                      title={todayGainFor(c) && todayGainFor(c) !== '0' ? '今日亲密度增量' : undefined}>
+                      {todayGainFor(c)}
                     </span>
                     <span title={distNext != null ? `下一级需 ${c.next_level_intimacy?.toLocaleString()} 亲密度` : undefined}>
                       {(c.intimacy || 0).toLocaleString()}
