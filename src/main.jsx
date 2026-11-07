@@ -2017,6 +2017,29 @@ function App() {
   );
 }
 
+function LogPanel({ title, description, logs }) {
+  return (
+    <section className="panel log-panel">
+      <div className="panel-head">
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+      </div>
+      <div className="log-box">
+        {logs.map((entry, index) => (
+          <div className={`log-line ${entry.level}`} key={`${entry.time}-${index}`}>
+            <span>{formatTime(entry.time)}</span>
+            <strong>{entry.source}</strong>
+            <p>{entry.message}</p>
+          </div>
+        ))}
+        {logs.length === 0 && <div className="empty">暂无日志</div>}
+      </div>
+    </section>
+  );
+}
+
 function Info({ label, value }) {
   return (
     <div className="info-item">
