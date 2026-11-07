@@ -193,6 +193,27 @@ def live_monitor_remove(payload: dict) -> dict:
     return _live_monitor.remove_target(sec_uid)
 
 
+# ---- 扫码登录 (2026-11-08, 界面登录按钮): 二维码展示 + 轮询状态, 替代手动 login.bat ----
+from .login_qr import qr_login_session  # noqa: E402
+
+
+@app.post("/api/login/qr/start")
+def login_qr_start() -> dict:
+    """发起扫码登录: 起 headless 浏览器开登录页, 旁听 get_qrcode 展示二维码。"""
+    return qr_login_session.start()
+
+
+@app.get("/api/login/qr/status")
+def login_qr_status() -> dict:
+    return qr_login_session.status()
+
+
+@app.post("/api/login/qr/cancel")
+def login_qr_cancel() -> dict:
+    qr_login_session.cancel()
+    return {"ok": True}
+
+
 @app.delete("/api/users/{sec_uid}")
 def delete_user(sec_uid: str) -> dict:
     try:

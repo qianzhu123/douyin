@@ -964,6 +964,34 @@ button:disabled {
 .library-modal {
   width: min(720px, 100%);
 }
+/* ---- 扫码登录弹窗 (2026-11-08) ---- */
+.qr-login-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 2px;
+}
+.qr-login-img {
+  width: 220px;
+  height: 220px;
+  border-radius: 8px;
+  border: 1px solid #dcecf8;
+  background: #fff;
+  image-rendering: pixelated;
+}
+.qr-scanned-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1a9c5b;
+  font-weight: 600;
+}
+.qr-scanned-hint img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
 .lib-row {
   grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: 14px;

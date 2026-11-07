@@ -825,6 +825,98 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
   );
 }
 
+// ---- 扫码登录弹窗 (2026-11-08): 界面内显示二维码, 扫码后落 douyin_profile, 替代手动 login.bat ----
+// 后端 /api/login/qr/start 起 headless 浏览器开登录页旁听 get_qrcode; 前端 2s 轮询 status 展示。
+function QrLoginModal({ onClose }) {
+  const [st, setSt] = React.useState(null); // 后端 status 原样
+  const [err, setErr] = React.useState('');
+  const closing = React.useRef(false);
+
+  React.useEffect(() => {
+    let stop = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/login/qr/start`, { method: 'POST' });
+        if (!r.ok) throw new Error((await r.json()).detail || '发起登录失败');
+      } catch (e) { if (!stop) setErr(e.message); }
+    })();
+    return () => { stop = true; };
+  }, []);
+
+  React.useEffect(() => {
+    let stop = false;
+    async function poll() {
+      while (!stop) {
+        try {
+          const r = await fetch(`${API_BASE}/api/login/qr/status`);
+          const d = await r.json();
+          if (!stop) setSt(d);
+          if (d.phase !== 'running') return;
+        } catch { /* 后端抖动: 继续轮 */ }
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+    }
+    poll();
+    return () => { stop = true; };
+  }, []);
+
+  // 成功后停留 1.6s 让用户看到提示, 再自动关
+  React.useEffect(() => {
+    if (st?.phase === 'success' && !closing.current) {
+      closing.current = true;
+      setTimeout(onClose, 1600);
+    }
+  }, [st?.phase, onClose]);
+
+  const phase = st?.phase || 'starting';
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="modal compact-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>扫码登录抖音</h2>
+            <p>
+              {phase === 'success' ? '✅ 登录成功 — 搜索链路已恢复' :
+                phase === 'scanned' || st?.avatar ? '已扫码，请在手机上确认' :
+                phase === 'starting' || phase === 'running' ? '请用「抖音 APP」扫一扫' :
+                phase === 'timeout' ? '二维码已超时' :
+                phase === 'cancelled' ? '已取消' :
+                phase === 'error' ? `出错: ${st?.error || '未知'}` : '…'}
+            </p>
+          </div>
+          <button className="secondary" onClick={onClose}>{phase === 'success' ? '完成' : '关闭'}</button>
+        </div>
+
+        {err && <div className="notice">{err}</div>}
+
+        <div className="qr-login-body">
+          {phase === 'running' || phase === 'starting' ? (
+            st?.qr ? (
+              <img className="qr-login-img" src={st.qr} alt="抖音登录二维码" />
+            ) : (
+              <div className="empty"><Loader2 size={18} className="spin" /> 正在获取二维码…</div>
+            )
+          ) : phase === 'success' ? (
+            <div className="empty">登录态已写入，可以继续使用名称搜索了</div>
+          ) : phase === 'error' || phase === 'timeout' || phase === 'cancelled' ? (
+            <div className="empty">
+              {phase === 'timeout' ? '超过 5 分钟未扫码，会话已结束' : '登录未完成'}
+              <div style={{ marginTop: 12 }}>
+                <button onClick={() => window.location.reload()}>重开会话</button>
+              </div>
+            </div>
+          ) : null}
+          {phase === 'running' && st?.avatar && (
+            <div className="qr-scanned-hint">
+              <img src={st.avatar} alt="" /> {st.device || '已扫码'}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- 添加账户弹窗 (旧逻辑原样回归, 2026-11-07): 名称搜索→候选列表→添加入库 ----
 // 与主播库解耦: 添加只入库 (users.json), 默认不进监控 — 是否监控由主播库里的按钮决定。
 function AddAccountModal({ busy, setBusy, setMessage, onClose, onAdded }) {
@@ -1446,6 +1538,8 @@ function App() {
   const [libraryOpen, setLibraryOpen] = React.useState(false);
   // 旧「添加账户」弹窗回归 (2026-11-07): 名称搜索→候选→添加, 新账户默认不进监控
   const [addOpen, setAddOpen] = React.useState(false);
+  // 扫码登录弹窗 (2026-11-08): 搜索登录墙的界面内解法
+  const [qrLoginOpen, setQrLoginOpen] = React.useState(false);
   const [message, setMessage] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [detectingUids, setDetectingUids] = React.useState(new Set());
@@ -1903,6 +1997,9 @@ function App() {
             <button onClick={() => setAddOpen(true)} title="名称搜索→候选→添加入库">
               <Plus size={16} /> 添加账户
             </button>
+            <button className="secondary" onClick={() => setQrLoginOpen(true)} title="搜索报登录墙/验证码时, 扫码重登">
+              扫码登录
+            </button>
             <button
               onClick={() => detectTargets([])}
               disabled={detectingUids.size > 0}
@@ -2109,6 +2206,10 @@ function App() {
             setAddOpen(false);
           }}
         />
+      )}
+
+      {qrLoginOpen && (
+        <QrLoginModal onClose={() => setQrLoginOpen(false)} />
       )}
 
       {deleteTarget && (
