@@ -335,26 +335,35 @@ function FansClubPanel({ apiRef }) {
   // 单团签到: 每主播行独立按钮, 状态 {aid: 'signing'|'ok:...'|'err:...'}
   // (声明必须在下面的 sign-all effect 之前 — 它的依赖数组引用了 clubSignState)
   const [clubSignState, setClubSignState] = React.useState({});
-  // 签到全部完成后自动刷新当前账户数据 (签到成功要反映到行数据/状态列)
+  // 签到全部完成后: 用后端 sign-status 里每个账户的 signed_anchors 直接置已签
+  // + 后端已自动检测落盘, 这里把全部签过账户的检测结果拉进表格
+  // (旧版只刷 selected 一个账户 — 一键签到全部后其余账户永远显示未签, 2026-11-07 修复)
   const wasRunningRef = React.useRef(false);
   React.useEffect(() => {
     if (wasRunningRef.current && !hasRunning && !signingAll) {
       wasRunningRef.current = false;
-      // 本会话签到的团直接置已签 (不等 loadOverview; 日历渲染延迟会拖几秒,
-      // 立刻重拉反而可能把状态拉回未签 — 用户指定: 签到就直接改状态)
+      // ① 本会话签到的团直接置已签 (后端 sign-status 每账户带回 signed_anchors)
       setOverviewMap((m) => {
-        const ov = m[selected];
-        if (!ov || !ov.clubs) return m;
-        const clubs = ov.clubs.map((x) => {
-          const st = clubSignState[x.anchor_id] || '';
-          return st.startsWith('ok:') ? { ...x, signed: true } : x;
-        });
-        return { ...m, [selected]: { ...ov, clubs } };
+        const next = { ...m };
+        for (const j of signJobs) {
+          const anchors = j.signed_anchors || [];
+          if (!anchors.length || !next[j.label]?.clubs) continue;
+          const aidSet = new Set(anchors);
+          next[j.label] = {
+            ...next[j.label],
+            clubs: next[j.label].clubs.map((x) => (aidSet.has(x.anchor_id) ? { ...x, factor: Math.floor(Date.now() / 1000) } : x)),
+          };
+        }
+        return next;
       });
-      if (selected) loadOverview(selected);
+      // ② 后端签到完成已自动检测并落盘, 拉全部签过账户的最新结果
+      //    (无签成功的账户也拉 — 状态列要反映"跳过/失败"后的真值)
+      for (const j of signJobs) {
+        if (j.label) fetchOverviewSilent(j.label);
+      }
     }
     if (hasRunning) wasRunningRef.current = true;
-  }, [hasRunning, signingAll, selected, loadOverview, clubSignState]);
+  }, [hasRunning, signingAll, signJobs, fetchOverviewSilent]);
   React.useEffect(() => {
     // 挂载即同步一次: 防止后端重启后残留 signingAll=true 永久禁用按钮
     (async () => {

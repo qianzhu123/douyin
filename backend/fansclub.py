@@ -295,6 +295,7 @@ def _do_sign(label: str, token: str) -> None:
     state = _sign_state[label]
     today_ts, _ = _today_bj()
     ok = fail = skip = 0
+    signed_anchors: list[str] = []  # 本轮签成功的团 (anchor_id), 前端据此直接置已签
     try:
         raw = club_list(token)
     except Exception as exc:
@@ -332,11 +333,13 @@ def _do_sign(label: str, token: str) -> None:
             sc = r.get("status_code")
             if sc == 0:
                 ok += 1
+                signed_anchors.append(aid)
                 qt = r.get("qiandao_text") or {}
                 state["log"].append(f"OK {name} 连签{qt.get('continues_sign_days')}天")
             elif sc == 14001:
                 # 日历缓存延迟时服务端幂等兜底, 视作成功
                 ok += 1
+                signed_anchors.append(aid)
                 state["log"].append(f"OK {name} (已签, 幂等兜底)")
             else:
                 fail += 1
@@ -345,8 +348,18 @@ def _do_sign(label: str, token: str) -> None:
             fail += 1
             state["log"].append(f"[error] {name} {str(exc)[:80]}")
         time.sleep(0.8)
-    state.update(running=False, done=True, ok=ok, fail=fail, skip=skip)
+    state.update(running=False, done=True, ok=ok, fail=fail, skip=skip,
+                 signed_anchors=signed_anchors,
+                 finished_at=time.time())
     state["log"].append(f"完成: 签 {ok} / 跳过 {skip} / 失败 {fail}")
+    # 签到完成 → 自动检测该账户并落盘 (状态列/今日亲密度直接拿到签到后真值;
+    # 之前只签不检, 非当前 tab 的账户表格永远停在签到前, 2026-11-07 用户定论: 签到完必须检测)
+    try:
+        ov = account_overview(label, token)
+        if ov.get("ok"):
+            _save_overview_cache(label, ov)
+    except Exception:
+        pass  # 检测失败不影响签到结果
 
 
 def start_sign(label: str, token: str) -> dict:
