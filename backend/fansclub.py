@@ -394,13 +394,28 @@ def start_check_all() -> dict:
 
 
 def _save_overview_cache(label: str, overview: dict) -> None:
-    """检测结果落盘 (断链修复: 定时检测的结果不再只存在于函数返回值)。"""
+    """检测结果落盘 (断链修复: 定时检测的结果不再只存在于函数返回值)。
+
+    同时写 per-date 亲密度归档 (days.{YYYYMMDD}.{anchor_id} = intimacy):
+    昨日亲密度列的数据源 — 凌晨 0 点自动检测到的 intimacy 即"昨天结束时的值"。
+    只存数字不存整份 overview (防体积膨胀), 保留最近 7 天。
+    """
     try:
         data: dict = {}
         if OVERVIEW_CACHE_FILE.exists():
             data = json.loads(OVERVIEW_CACHE_FILE.read_text(encoding="utf-8"))
         overview = dict(overview)
         overview["checked_at"] = time.time()
+        if overview.get("ok"):
+            _, today_str = _today_bj()
+            days = overview.get("days") if isinstance(overview.get("days"), dict) else {}
+            # 旧结构 days 可能整体被覆盖: 从文件里恢复该 label 的历史再合并今天
+            prev_days = (data.get(label) or {}).get("days") or {}
+            days = {**prev_days, **days}
+            days[today_str] = {str(c.get("anchor_id")): (c.get("intimacy") or 0)
+                               for c in (overview.get("clubs") or [])}
+            # 只留最近 7 天 (按日期字符串排序即时间序, YYYYMMDD 字典序=时间序)
+            overview["days"] = dict(sorted(days.items())[-7:])
         data[label] = overview
         OVERVIEW_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:

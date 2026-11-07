@@ -234,9 +234,14 @@ function FansClubPanel({ apiRef }) {
             if (!ov || !ov.ok) continue;
             const cur = m[label];
             // 后端缓存更新才覆盖 (checked_at 后端存的是秒, 前端是毫秒)
+            // 注意: 即使后端较旧也要合并 days (亲密度历史归档只存在后端, 前端本地无此数据)
             const backendAt = (ov.checked_at || 0) * (ov.checked_at < 1e12 ? 1000 : 1);
             if (!cur || (cur.checked_at || 0) < backendAt) {
               next[label] = { ...ov, checked_at: backendAt || Date.now() };
+              changed = true;
+            } else if (ov.days && (!cur.days || Object.keys(ov.days).length >= Object.keys(cur.days).length)) {
+              // 后端较旧但带 days 归档: 只补历史, 其余字段不动
+              next[label] = { ...cur, days: ov.days };
               changed = true;
             }
           }
@@ -524,6 +529,15 @@ function FansClubPanel({ apiRef }) {
     const g = (c.intimacy || 0) - b;
     return g > 0 ? `+${g}` : '0';
   };
+  // 昨日亲密度: 凌晨 0 点自动检测的归档 (overview.days[昨日YYYYMMDD][anchor_id] = intimacy)。
+  // 北京日期口径与 todayKey 相同 (+8h); 昨天无归档 (新账户/后端当天没跑) → '—' (有 title 说明, 不误导)
+  const yesterdayKey = new Date(Date.now() - 16 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+  const yIntimacyFor = (c) => {
+    const snap = overview?.days?.[yesterdayKey];
+    if (!snap) return null;
+    const v = snap[c.anchor_id];
+    return v == null ? null : v;
+  };
   const checking = loadingLabel === selected; // 只有当前账户自己在检查才算
   // 全量检查时当前账户是否正在被检查 (tab 上有橙色呼吸点, 但表格不打断)
   const checkingCurrent = loadingLabel === selected;
@@ -603,7 +617,7 @@ function FansClubPanel({ apiRef }) {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span>今日亲密度</span><span title="昨天结束时的亲密度 (来自每日凌晨 0 点自动检测的归档)">昨日</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -617,7 +631,7 @@ function FansClubPanel({ apiRef }) {
                 {checking ? (
                   // 检查当前账户时: 保留行框架, 数值列写「检测中」
                   <>
-                    <span className="cell-checking" colSpan={9}>检测中…</span>
+                    <span className="cell-checking" colSpan={10}>检测中…</span>
                   </>
                 ) : (
                   <>
@@ -645,6 +659,10 @@ function FansClubPanel({ apiRef }) {
                     <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}
                       title={todayGainFor(c) && todayGainFor(c) !== '0' ? '今日亲密度增量' : undefined}>
                       {todayGainFor(c)}
+                    </span>
+                    <span className="y-intimacy"
+                      title={yIntimacyFor(c) != null ? '昨天结束时的亲密度 (凌晨0点自动检测归档)' : '昨日无归档 (后端凌晨未检测或账户较新)'}>
+                      {yIntimacyFor(c) != null ? yIntimacyFor(c).toLocaleString() : '—'}
                     </span>
                     <span title={distNext != null ? `下一级需 ${c.next_level_intimacy?.toLocaleString()} 亲密度` : undefined}>
                       {(c.intimacy || 0).toLocaleString()}
