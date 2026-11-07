@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch, FileUp, GripVertical, Loader2, Plus, RefreshCcw, RotateCw, Search, Square, Trash2 } from 'lucide-react';
+import { Activity, Download, ExternalLink, FileSearch, FileUp, Loader2, Plus, RefreshCcw, RotateCw, Search, Square, Trash2 } from 'lucide-react';
 import { formatDuration } from './duration.js';
 import { buildDownloadInputText, mergeDownloadPreviews, removeDownloadPreviewItem } from './downloadPreviewState.js';
 import './styles.css';
@@ -737,17 +737,12 @@ function FansClubPanel({ apiRef }) {
 // ---- 直播实时监控 (阶段二: PC 直连快照轮询, 零浏览器; 嵌在账户列表面板内) ----
 // 目标双维度: sec_uid 账户维度 (每轮自动解析当前场次 room_id, 重新开播也跟得住)
 //            room_id 房间维度 (feed 在播房/手动加; 下播后失效)
-function LiveMonitorPanel({ embedded }) {
+function LiveMonitorPanel({ embedded, onOpenLibrary }) {
+  // 主播库形态 (2026-11-07 用户定论): 目标从主播库弹窗勾选「加入监控」, 加入即监控;
+  // 不再有"全量开关/临时粘贴目标"。下播后该目标由后端自动关闭 (live_monitor._remove_locked)。
   const [status, setStatus] = React.useState(null); // 后端 /api/live-monitor/status
-  const [extraTargets, setExtraTargets] = React.useState([]); // 手动添加的账户 (账户之外)
-  const [intervalSec, setIntervalSec] = React.useState(120);
-  const [durationMin, setDurationMin] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
-  const [manual, setManual] = React.useState(''); // 粘贴: 主页链接/短链/sec_uid/抖音号/名称
-  const [manualBusy, setManualBusy] = React.useState(false);
-  const [accounts, setAccounts] = React.useState([]); // 账户列表 (默认监控对象, 用户定论 2026-11-05: 不再选主播)
-  const [includeAccounts, setIncludeAccounts] = React.useState(true);
   const running = !!(status && status.running);
 
   const loadStatus = React.useCallback(async () => {
@@ -757,85 +752,18 @@ function LiveMonitorPanel({ embedded }) {
     } catch { /* ignore */ }
   }, []);
 
-  const loadAccounts = React.useCallback(async () => {
-    try {
-      const r = await fetch(`${API_BASE}/api/users`);
-      const d = await r.json();
-      setAccounts(d.users || []);
-    } catch { /* ignore */ }
-  }, []);
-
-  React.useEffect(() => { loadStatus(); loadAccounts(); }, [loadStatus, loadAccounts]);
+  React.useEffect(() => { loadStatus(); }, [loadStatus]);
   React.useEffect(() => {
     // 轮询状态: 运行中 5s, 空闲 30s
     const t = setInterval(loadStatus, running ? 5000 : 30000);
     return () => clearInterval(t);
   }, [running, loadStatus]);
 
-  // 组装启动目标: 账户列表全部 (可开关) + 手动添加
-  const buildRooms = () => {
-    const rooms = [];
-    if (includeAccounts) {
-      for (const u of accounts) {
-        rooms.push({ sec_uid: u.sec_uid, label: u.label || u.nickname || u.unique_id || u.sec_uid.slice(0, 10) });
-      }
-    }
-    for (const c of extraTargets) {
-      if (!rooms.some((r) => r.sec_uid === c.sec_uid)) rooms.push({ sec_uid: c.sec_uid, label: c.label });
-    }
-    return rooms;
-  };
-
-  const startMonitor = async () => {
-    const rooms = buildRooms();
-    if (rooms.length === 0) { setErr('没有监控目标 — 粘贴链接/名称添加，或先在账户列表添加账户'); return; }
-    setBusy(true); setErr('');
-    try {
-      const r = await fetch(`${API_BASE}/api/live-monitor/start`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rooms, interval: intervalSec, duration_minutes: durationMin }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || '启动失败');
-      await loadStatus();
-    } catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
-  };
-
   const stopMonitor = async () => {
     setBusy(true);
     try { await fetch(`${API_BASE}/api/live-monitor/stop`, { method: 'POST' }); await loadStatus(); }
     catch (e) { setErr(e.message); }
     finally { setBusy(false); }
-  };
-
-  // 粘贴添加 (用户定论 2026-11-05: 舍弃候选 chip, 输入框直解):
-  // 后端 /api/users/resolve-link 三段解析 — 主页链接正则 → v.douyin.com 短链 302
-  // (lab §73.5 配方) → 名称/抖音号搜索。返回即为目标账户, 无需再选。
-  const addManual = async () => {
-    const v = manual.trim();
-    if (!v) { setErr('请输入主页链接 / 短链 / sec_uid / 抖音号 / 名称'); return; }
-    setManualBusy(true); setErr('');
-    try {
-      const r = await fetch(`${API_BASE}/api/users/resolve-link`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword: v }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : '解析失败');
-      if (d.kind === 'sec_uid') {
-        const c = { sec_uid: d.sec_uid, label: d.sec_uid.slice(0, 12) + '…' };
-        setExtraTargets((cur) => [c, ...cur.filter((x) => x.sec_uid !== c.sec_uid)]);
-      } else if (d.kind === 'candidate') {
-        const c = d.candidate;
-        const target = { sec_uid: c.sec_uid, label: c.nickname || c.unique_id || c.sec_uid.slice(0, 12) };
-        setExtraTargets((cur) => [target, ...cur.filter((x) => x.sec_uid !== target.sec_uid)]);
-      } else {
-        throw new Error('未解析到账户 — 换主页链接试试');
-      }
-      setManual('');
-    } catch (e) { setErr(e.message); }
-    finally { setManualBusy(false); }
   };
 
   const rooms = (status && status.rooms) || [];
@@ -849,76 +777,38 @@ function LiveMonitorPanel({ embedded }) {
         <strong className="lm-name">直播监控</strong>
         <span className="lm-sub">
           {running
-            ? `监控中 · ${rooms.length} 目标 · 间隔 ${status.interval}s · 事件 ${events.length}`
-            : '空闲 · 直连快照轮询（零浏览器），检测开播/下播/观众变化'}
+            ? `监控中 · ${rooms.length} 目标 · 间隔 ${status.interval}s`
+            : '空闲 · 从主播库加入主播后自动开始轮询（零浏览器直连）'}
         </span>
         <span className="lm-spacer" />
-        {running ? (
-          <button onClick={stopMonitor} disabled={busy}>停止监控</button>
-        ) : (
-          <button onClick={startMonitor} disabled={busy} title="启动后台直连轮询（不开浏览器）">
-            <Activity size={16} /> {busy ? '启动中…' : `启动监控 (${buildRooms().length})`}
-          </button>
+        <button className="secondary" onClick={onOpenLibrary} title="打开主播库：加入 / 移出监控，查看详情">
+          <Search size={16} /> 主播库
+        </button>
+        {running && (
+          <button onClick={stopMonitor} disabled={busy}>全部停止</button>
         )}
       </div>
 
       {err && <div className="notice">{err}</div>}
 
-      <div className="lm-config">
-        <label>间隔 <input className="lm-num" value={intervalSec}
-          onChange={(e) => setIntervalSec(e.target.value.replace(/\D/g, '') || '60')}
-          inputMode="numeric" /> 秒</label>
-        <label>时长 <input className="lm-num" value={durationMin}
-          onChange={(e) => setDurationMin(e.target.value.replace(/\D/g, '') || '')}
-          inputMode="numeric" placeholder="不限" /> 分钟</label>
-        <label className="lm-include"><input type="checkbox" checked={includeAccounts}
-          onChange={(e) => setIncludeAccounts(e.target.checked)} /> 含账户列表全部 ({accounts.length})</label>
-      </div>
-
-      {!running && (
-        <>
-          <div className="lm-add-row">
-            <input className="lm-add-input" value={manual}
-              onChange={(e) => setManual(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') addManual(); }}
-              placeholder="追加监控目标：主页链接 / 短链 / sec_uid / 抖音号 / 名称，回车解析"
-            />
-            <button className="secondary" onClick={addManual} disabled={manualBusy}>
-              <Plus size={16} /> {manualBusy ? '解析中…' : '添加'}
-            </button>
-          </div>
-          {!includeAccounts && extraTargets.length === 0 && (
-            <div className="empty">未选任何目标 — 勾选「含账户列表全部」或粘贴链接添加</div>
-          )}
-          {extraTargets.length > 0 && (
-            <div className="lm-candidates">
-              {extraTargets.map((c) => (
-                <span key={c.sec_uid} className="lm-cand acct checked" title={c.sec_uid}>
-                  {c.label}
-                  <button className="lm-cand-x" onClick={() => setExtraTargets((cur) => cur.filter((x) => x.sec_uid !== c.sec_uid))}
-                    title="移除">×</button>
-                </span>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-
       {running && rooms.length > 0 && (
         <div className="lm-rooms">
           <div className="lm-room lm-head">
-            <span>目标</span><span>状态</span><span>观众</span><span>标题</span><span>最近快照</span>
+            <span>主播</span><span>状态</span><span>观众</span><span>标题</span><span>最近快照</span>
           </div>
           {rooms.map((r) => (
             <div key={r.key} className="lm-room">
               <span>{r.label}</span>
-              <span className={r.was_live ? 'lm-on' : 'lm-off'}>{r.was_live ? '直播中' : '未播'}</span>
+              <span className={r.was_live ? 'lm-on' : 'lm-off'}>{r.was_live ? '直播中' : '解析中…'}</span>
               <span>{r.viewers != null ? r.viewers.toLocaleString() : '—'}</span>
               <span className="lm-title" title={r.title}>{r.title || '—'}</span>
               <span>{fmtT(r.last_tick)}</span>
             </div>
           ))}
         </div>
+      )}
+      {running && rooms.length === 0 && (
+        <div className="empty">启动中 — 首轮快照几秒内出现</div>
       )}
 
       {events.length > 0 && (
@@ -931,6 +821,243 @@ function LiveMonitorPanel({ embedded }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- 主播库弹窗 (2026-11-07): 替代旧账户大表格 ----
+// 库 = users.json; 每行一个主播: 监控开关 (加入/移出即生效) / 详情按钮 / 删除。
+// 「详情」弹小窗展示最近一次检测结果 (profile_cache), 可手动刷基本。
+function StreamerLibraryModal({ onClose, onChanged }) {
+  const [users, setUsers] = React.useState([]);
+  const [busyUid, setBusyUid] = React.useState('');
+  const [err, setErr] = React.useState('');
+  const [manual, setManual] = React.useState(''); // 主页链接/短链/sec_uid/抖音号/名称
+  const [addBusy, setAddBusy] = React.useState(false);
+  const [detailFor, setDetailFor] = React.useState(null); // {row, loading, error}
+  const [deleteFor, setDeleteFor] = React.useState(null);
+  const monitorCount = users.filter((u) => u.monitor).length;
+
+  const load = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/users`);
+      const d = await r.json();
+      setUsers(d.users || []);
+    } catch (e) { setErr(e.message); }
+  }, []);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  // 加入 / 移出监控: monitor 位落库 + live-monitor add/remove 动态挂摘 (一条龙)
+  async function toggleMonitor(u) {
+    setBusyUid(u.sec_uid); setErr('');
+    const next = !u.monitor;
+    try {
+      const r = await fetch(`${API_BASE}/api/users/monitor-toggle`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_uid: u.sec_uid, monitor: next }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || '开关失败');
+      await fetch(`${API_BASE}/api/live-monitor/${next ? 'add' : 'remove'}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_uid: u.sec_uid, label: u.label || u.nickname || u.sec_uid.slice(0, 12) }),
+      });
+      await load();
+      if (onChanged) await onChanged();
+    } catch (e) { setErr(e.message); }
+    finally { setBusyUid(''); }
+  }
+
+  // 粘贴解析入库 (复用 resolve-link 三段解析); 解析成功 → 入库 + 默认纳入监控
+  async function addManual() {
+    const v = manual.trim();
+    if (!v) { setErr('请输入主页链接 / 短链 / sec_uid / 抖音号 / 名称'); return; }
+    setAddBusy(true); setErr('');
+    try {
+      const r = await fetch(`${API_BASE}/api/users/resolve-link`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: v }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : '解析失败');
+      if (d.kind === 'none') throw new Error('未解析到账户 — 换主页链接试试');
+      const c = d.kind === 'sec_uid'
+        ? { sec_uid: d.sec_uid, nickname: '', unique_id: '' }
+        : d.candidate;
+      const label = c.nickname || c.unique_id || c.sec_uid.slice(0, 12);
+      const ar = await fetch(`${API_BASE}/api/users`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label, sec_uid: c.sec_uid, homepage_url: c.homepage_url || `https://www.douyin.com/user/${c.sec_uid}`, nickname: c.nickname || '', monitor: true }),
+      });
+      const ad = await ar.json();
+      if (!ar.ok) throw new Error(ad.detail?.error || ad.detail || '入库失败');
+      // 入库默认 monitor=true → 同步挂进监控
+      await fetch(`${API_BASE}/api/live-monitor/add`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_uid: c.sec_uid, label }),
+      });
+      setManual('');
+      await load();
+      if (onChanged) await onChanged();
+    } catch (e) { setErr(e.message); }
+    finally { setAddBusy(false); }
+  }
+
+  // 详情: 拉该主播的检测结果 (先读库缓存, 再手动 /api/query 刷新)
+  async function openDetail(u) {
+    setDetailFor({ row: u, loading: true, error: '' });
+    try {
+      const r = await fetch(`${API_BASE}/api/query`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets: [u.sec_uid] }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail?.error || d.detail || '检测失败');
+      const result = (d.results || [])[0];
+      if (!result || !result.ok) throw new Error(result?.error || '检测失败');
+      setDetailFor({ row: { ...u, ...result }, loading: false, error: '' });
+      await load();
+      if (onChanged) await onChanged();
+    } catch (e) {
+      setDetailFor({ row: u, loading: false, error: e.message });
+    }
+  }
+
+  async function confirmDelete() {
+    const u = deleteFor;
+    if (!u) return;
+    setBusyUid(u.sec_uid); setErr('');
+    try {
+      // 先摘监控再删库 (监控在跑时删库会留下幽灵目标)
+      await fetch(`${API_BASE}/api/live-monitor/remove`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_uid: u.sec_uid }),
+      });
+      const r = await fetch(`${API_BASE}/api/users/${encodeURIComponent(u.sec_uid)}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error((await r.json()).detail || '删除失败');
+      setDeleteFor(null);
+      await load();
+      if (onChanged) await onChanged();
+    } catch (e) { setErr(e.message); }
+    finally { setBusyUid(''); }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="modal library-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>主播库</h2>
+            <p>共 {users.length} 人 · 监控中 {monitorCount} — 勾选即监控，下播自动结束该目标</p>
+          </div>
+          <button className="secondary" onClick={onClose}>关闭</button>
+        </div>
+
+        {err && <div className="notice">{err}</div>}
+
+        <div className="lm-add-row">
+          <input className="lm-add-input" value={manual}
+            onChange={(e) => setManual(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addManual(); }}
+            placeholder="添加主播：主页链接 / 短链 / sec_uid / 抖音号 / 名称，回车解析入库并纳入监控"
+          />
+          <button className="secondary" onClick={addManual} disabled={addBusy}>
+            <Plus size={16} /> {addBusy ? '解析中…' : '添加'}
+          </button>
+        </div>
+
+        <div className="candidate-list">
+          {users.map((u) => {
+            const profile = u.last_profile || {};
+            const live = profile.live_status === 1;
+            return (
+              <article className={`candidate-row lib-row${u.monitor ? ' monitored' : ''}`} key={u.sec_uid}>
+                <label className="select-cell" title={u.monitor ? '监控中（点击移出）' : '未监控（点击加入）'}>
+                  <input type="checkbox" checked={!!u.monitor}
+                    disabled={busyUid === u.sec_uid}
+                    onChange={() => toggleMonitor(u)} />
+                </label>
+                <img src={u.avatar_url || ''} alt="" />
+                <div>
+                  <strong>{u.label || u.nickname || '未备注'}</strong>
+                  <small>
+                    {live
+                      ? <span className="live-pill-inline">直播中 {profile.live_viewers != null ? `· ${formatNumber(profile.live_viewers)}人` : ''}</span>
+                      : '未直播'}
+                    {u.last_checked_at ? ` · 检测 ${formatTime(u.last_checked_at)}` : ''}
+                  </small>
+                  <span title={u.sec_uid}>
+                    粉丝 {formatNumber(profile.follower_count || u.follower_count)}
+                    {profile.live_room?.anchor?.paygrade_level ? ` · Lv ${profile.live_room.anchor.paygrade_level}` : ''}
+                  </span>
+                </div>
+                <div className="lib-actions">
+                  <button className="secondary" onClick={() => openDetail(u)} disabled={detailFor?.loading}
+                    title="检测并查看详情 (基本信息+直播间)">
+                    详情
+                  </button>
+                  <a className="icon-button" href={u.url} target="_blank" rel="noreferrer" title="打开主页">
+                    <ExternalLink size={15} />
+                  </a>
+                  <button className="danger icon-button" onClick={() => setDeleteFor(u)} title="从主播库删除">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          {users.length === 0 && <div className="empty">主播库为空 — 用上方输入框添加主播</div>}
+        </div>
+      </div>
+
+      {detailFor && (
+        <StreamerDetailModal detail={detailFor} onClose={() => setDetailFor(null)} />
+      )}
+      {deleteFor && (
+        <DeleteAccountModal
+          row={deleteFor}
+          busy={busyUid === deleteFor.sec_uid}
+          onClose={() => setDeleteFor(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+// 主播库详情弹窗: 基本信息 + 直播中显示直播间人数/标题, 数据来自 /api/query 结果
+function StreamerDetailModal({ detail, onClose }) {
+  const row = detail.row || {};
+  const profile = row.profile || {};
+  const live = profile.live_status === 1;
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="modal compact-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>{row.label || profile.nickname || '主播详情'}</h2>
+            <p>{detail.loading ? '检测中…' : (detail.error || '最近一次检测结果')}</p>
+          </div>
+          <button className="secondary" onClick={onClose}>关闭</button>
+        </div>
+        {detail.loading ? (
+          <div className="empty"><Loader2 size={18} className="spin" /> 正在检测该主播…</div>
+        ) : detail.error ? (
+          <div className="notice">{detail.error}</div>
+        ) : (
+          <div className="detail-grid">
+            <Info label="抖音号" value={profile.unique_id || row.unique_id || '-'} />
+            <Info label="粉丝" value={formatNumber(profile.follower_count || row.follower_count)} />
+            <Info label="关注" value={formatNumber(profile.following_count || row.following_count)} />
+            <Info label="获赞" value={formatNumber(profile.total_favorited || row.total_favorited)} />
+            <Info label="IP地址" value={profile.ip_location || row.ip_location || '-'} />
+            <Info label="直播状态" value={live ? '直播中' : '未直播'} />
+            {live && <Info label="直播间人数" value={formatNumber(profile.live_viewers)} />}
+            {live && profile.live_room?.title && <Info label="直播标题" value={String(profile.live_room.title).slice(0, 40)} />}
+            <Info label="上次检测" value={formatTime(row.last_checked_at)} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1227,13 +1354,11 @@ function App() {
   const [activeSection, setActiveSection] = React.useState('');
   const fansclubApi = React.useRef(null);
   const [downloadJobs, setDownloadJobs] = React.useState([]);
-  const [selectedUid, setSelectedUid] = React.useState('');
-  const [checkedUids, setCheckedUids] = React.useState(new Set());
-  const [contextInfo, setContextInfo] = React.useState(null);
+  // 账户大表格已撤 (2026-11-07): 库操作全在主播库弹窗; 这两个状态是顶栏检测按钮与弹窗刷新共用
+  const [libraryOpen, setLibraryOpen] = React.useState(false);
   const [message, setMessage] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [detectingUids, setDetectingUids] = React.useState(new Set());
-  const [addOpen, setAddOpen] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState(null);
   // watch 轮询已整体移除 (2026-11-05): 定时盯直播由直播监控 (LiveMonitorPanel) 承担
   const [downloadText, setDownloadText] = React.useState('');
@@ -1246,14 +1371,6 @@ function App() {
   const [selectedDownloadUrls, setSelectedDownloadUrls] = React.useState(new Set());
   const [selectedDownloadMedia, setSelectedDownloadMedia] = React.useState({});
   const [previewBusy, setPreviewBusy] = React.useState(false);
-  const [draggedUid, setDraggedUid] = React.useState('');
-  const [hiddenUids, setHiddenUids] = React.useState(() => {
-    try {
-      return new Set(JSON.parse(window.localStorage.getItem('douyinHiddenUids') || '[]'));
-    } catch (error) {
-      return new Set();
-    }
-  });
   const [activityLogs, setActivityLogs] = React.useState(() => {
     try {
       return JSON.parse(window.localStorage.getItem('douyinActivityLogs') || '[]');
@@ -1262,15 +1379,11 @@ function App() {
     }
   });
   const accountsRef = React.useRef([]);
-  const contextMenuRef = React.useRef(null);
 
   const rows = React.useMemo(
     () => accounts.map((account) => mergeAccount(account, null)),
     [accounts],
   );
-  const selected = rows.find((row) => row.sec_uid === selectedUid) || rows[0];
-  const checkedTargets = React.useMemo(() => Array.from(checkedUids), [checkedUids]);
-  const allChecked = rows.length > 0 && rows.every((row) => checkedUids.has(row.sec_uid));
   const detectLogs = React.useMemo(
     () => activityLogs.filter((entry) => entry.source === '检测').slice(0, 80),
     [activityLogs],
@@ -1299,40 +1412,14 @@ function App() {
   }, [activityLogs]);
 
   React.useEffect(() => {
-    window.localStorage.setItem('douyinHiddenUids', JSON.stringify(Array.from(hiddenUids)));
-  }, [hiddenUids]);
-
-  React.useEffect(() => {
     accountsRef.current = accounts;
   }, [accounts]);
-
-  React.useEffect(() => {
-    if (!contextInfo) return undefined;
-    function closeContextMenu(event) {
-      if (contextMenuRef.current?.contains(event.target)) return;
-      setContextInfo(null);
-    }
-    function closeOnEscape(event) {
-      if (event.key === 'Escape') setContextInfo(null);
-    }
-    document.addEventListener('pointerdown', closeContextMenu);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeContextMenu);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [contextInfo]);
 
   const loadAccounts = React.useCallback(async () => {
     const response = await fetch(`${API_BASE}/api/users`);
     if (!response.ok) throw new Error('账户列表加载失败');
     const data = await response.json();
     setAccounts(data.users || []);
-    setSelectedUid((current) => current || data.users?.[0]?.sec_uid || '');
-    setCheckedUids((current) => {
-      const valid = new Set((data.users || []).map((user) => user.sec_uid));
-      return new Set(Array.from(current).filter((uid) => valid.has(uid)));
-    });
   }, []);
 
   const loadDownloads = React.useCallback(async () => {
@@ -1408,13 +1495,15 @@ function App() {
     setMessage(detail ? `${message}\n${detail}` : message);
   }
 
+  // 主播库顶栏快捷检测 (顶栏「刷基本」按钮): 只检测库内勾选目标不可行 (勾选在弹窗内),
+  // 顶栏按钮语义 = 刷新全部主播的基本信息 (库不大, 27 个并发直连很快)
   async function detectTargets(targets = []) {
     const actualTargets = targets.length ? targets : rows.map((row) => row.sec_uid);
     const pendingTargets = actualTargets.filter((uid) => !detectingUids.has(uid));
     if (pendingTargets.length === 0) return;
 
     setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在检测 ${pendingTargets.length} 个账户的基本信息…\n· 解析目标账户`);
+    setMessage(`正在检测 ${pendingTargets.length} 个主播的基本信息…\n· 解析目标账户`);
     try {
       const data = await postJson('/api/query', { targets: pendingTargets });
       await loadAccounts();
@@ -1424,9 +1513,9 @@ function App() {
         const label = result.label || result.sec_uid;
         appendLog(result.ok ? 'info' : 'error', result.ok ? `${label} 基本信息已刷新` : `${label} 基本信息检测失败：${result.error || '可能触发风控或接口暂无数据'}`, '检测');
       });
-      setMessage(failures.length ? `已检测 ${results.length} 个账户，${failures.length} 个失败` : `已检测 ${results.length} 个账户`);
+      setMessage(failures.length ? `已检测 ${results.length} 个主播，${failures.length} 个失败` : `已检测 ${results.length} 个主播`);
     } catch (error) {
-      setMessageWithProgress(`检测 ${pendingTargets.length} 个账户失败：${error.message}`, error);
+      setMessageWithProgress(`检测 ${pendingTargets.length} 个主播失败：${error.message}`, error);
       appendLog('error', error.message, '检测');
     } finally {
       setDetectingUids((current) => {
@@ -1437,83 +1526,6 @@ function App() {
     }
   }
 
-  async function detectLiveRoom(targets = []) {
-    const pendingTargets = targets.filter((uid) => !detectingUids.has(uid));
-    if (pendingTargets.length === 0) return;
-    setDetectingUids((current) => new Set([...current, ...pendingTargets]));
-    setMessage(`正在刷新 ${pendingTargets.length} 个账户的直播间人数…\n· 拦 enter 取 view_count`);
-    const results = [];
-    for (const uid of pendingTargets) {
-      setMessage(`正在刷新 ${pendingTargets.length} 个账户的直播间人数…\n· ${uid.slice(0, 12)}…`);
-      try {
-        const data = await postJson('/api/live-viewers', { sec_uid: uid });
-        const ok = !!data.live_viewers;
-        results.push({ sec_uid: uid, ok });
-        appendLog(ok ? 'info' : 'error',
-          ok ? `${uid.slice(0, 16)}... 直播间人数已刷新（${data.live_viewers.viewers || 0}）` : `${uid.slice(0, 16)}... 直播间人数失败（需先有 web_rid）`,
-          '直播人数');
-      } catch (error) {
-        results.push({ sec_uid: uid, ok: false });
-        appendLog('error', `${uid.slice(0, 16)}... 直播人数失败：${error.message}`, '直播人数');
-      }
-    }
-    await loadAccounts();
-    const failures = results.filter((r) => !r.ok).length;
-    setMessage(failures ? `${results.length - failures} 个直播间人数已刷新，${failures} 个失败` : `${results.length} 个直播间人数已刷新`);
-    setDetectingUids((current) => {
-      const next = new Set(current);
-      pendingTargets.forEach((uid) => next.delete(uid));
-      return next;
-    });
-  }
-
-  function toggleAllAccounts() {
-    setCheckedUids((current) => {
-      if (rows.length > 0 && rows.every((row) => current.has(row.sec_uid))) {
-        return new Set();
-      }
-      return new Set(rows.map((row) => row.sec_uid));
-    });
-  }
-
-  function toggleAccount(uid) {
-    setCheckedUids((current) => {
-      const next = new Set(current);
-      if (next.has(uid)) next.delete(uid);
-      else next.add(uid);
-      return next;
-    });
-  }
-
-  async function copyText(text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      setMessage('已复制');
-    } catch (error) {
-      setMessage('复制失败');
-    }
-  }
-
-  function toggleHidden(uid) {
-    setHiddenUids((current) => {
-      const next = new Set(current);
-      if (next.has(uid)) next.delete(uid);
-      else next.add(uid);
-      return next;
-    });
-  }
-
-  async function reorderAccounts(nextRows) {
-    setAccounts(nextRows);
-    try {
-      await postJson('/api/users/reorder', { sec_uids: nextRows.map((row) => row.sec_uid) });
-      appendLog('info', '账户顺序已保存', '界面');
-    } catch (error) {
-      setMessage(error.message);
-      appendLog('error', error.message, '界面');
-      loadAccounts().catch(() => {});
-    }
-  }
 
   async function deleteAccount(row) {
     setBusy(true);
@@ -1528,18 +1540,6 @@ function App() {
       if (!response.ok) throw new Error(data.detail || '删除账户失败');
       const nextUsers = data.users || [];
       setAccounts(nextUsers);
-      setContextInfo(null);
-      setCheckedUids((current) => {
-        const next = new Set(current);
-        next.delete(row.sec_uid);
-        return next;
-      });
-      setHiddenUids((current) => {
-        const next = new Set(current);
-        next.delete(row.sec_uid);
-        return next;
-      });
-      setSelectedUid((current) => (current === row.sec_uid ? nextUsers[0]?.sec_uid || '' : current));
       setDeleteTarget(null);
       setMessage('账户已删除');
       appendLog('info', `账户已删除：${row.label || row.profile?.nickname || row.sec_uid}`, '界面');
@@ -1549,34 +1549,6 @@ function App() {
     } finally {
       setBusy(false);
     }
-  }
-
-  function handleRowDragOver(event, targetUid) {
-    event.preventDefault();
-    const edge = 72;
-    if (event.clientY < edge) {
-      window.scrollBy({ top: -24, behavior: 'auto' });
-    } else if (window.innerHeight - event.clientY < edge) {
-      window.scrollBy({ top: 24, behavior: 'auto' });
-    }
-    if (!draggedUid || draggedUid === targetUid) return;
-
-    setAccounts((current) => {
-      const fromIndex = current.findIndex((account) => account.sec_uid === draggedUid);
-      const toIndex = current.findIndex((account) => account.sec_uid === targetUid);
-      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return current;
-      const next = [...current];
-      const [moved] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, moved);
-      accountsRef.current = next;
-      return next;
-    });
-  }
-
-  function finishDrag() {
-    if (!draggedUid) return;
-    setDraggedUid('');
-    reorderAccounts(accountsRef.current);
   }
 
 
@@ -1835,23 +1807,15 @@ function App() {
           </div>
         ) : (
           <div className="top-actions">
-            <button className="secondary" onClick={() => setAddOpen(true)}>
-              <Plus size={16} /> 添加账户
+            <button className="secondary" onClick={() => setLibraryOpen(true)}>
+              <Plus size={16} /> 主播库
             </button>
             <button
-              onClick={() => detectTargets(checkedTargets)}
-              disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
-              title="刷新选中账户的基本信息"
+              onClick={() => detectTargets([])}
+              disabled={detectingUids.size > 0}
+              title="刷新全部主播的基本信息（昵称/粉丝/直播状态）"
             >
-              <RefreshCcw size={16} /> 刷基本
-            </button>
-            <button
-              className="secondary"
-              onClick={() => detectLiveRoom(checkedTargets)}
-              disabled={checkedTargets.length === 0 || checkedTargets.every((uid) => detectingUids.has(uid))}
-              title="仅刷新选中账户的直播间人数（不刷其它详情）"
-            >
-              刷人数
+              <RefreshCcw size={16} /> {detectingUids.size > 0 ? '检测中…' : '刷基本'}
             </button>
             <button className="icon-button" onClick={() => { loadAccounts(); loadDownloads(); }} title="刷新">
               <RefreshCcw size={18} />
@@ -1870,62 +1834,18 @@ function App() {
         <section className="panel account-panel" id="sec-accounts">
           <div className="panel-head">
             <div>
-              <h2>账户与直播</h2>
-              <p>账户信息 + 实时直播监控（开播跟踪 / 观众变化 / 事件流）</p>
+              <h2>直播监控</h2>
+              <p>开播提醒 / 人数显示 — 监控目标从主播库勾选加入，下播自动结束</p>
             </div>
             <div className="panel-actions">
-              {hiddenUids.size > 0 && (
-                <button className="secondary" onClick={() => setHiddenUids(new Set())}>
-                  <Eye size={16} /> 恢复信息 {hiddenUids.size}
-                </button>
-              )}
+              <button onClick={() => setLibraryOpen(true)}>
+                <Search size={16} /> 主播库 ({accounts.length})
+              </button>
             </div>
           </div>
 
-          <LiveMonitorPanel embedded />
-
-          <div className="account-list">
-            <div className="account-header">
-              <label className="select-cell">
-                <input type="checkbox" checked={allChecked} onChange={toggleAllAccounts} />
-              </label>
-              <span>账户</span>
-              <span>直播间</span>
-              <span>人数</span>
-              <span>账号等级</span>
-              <span>上次检测</span>
-              <span>操作</span>
-            </div>
-            {rows.map((row) => (
-              <AccountRow
-                key={row.sec_uid}
-                row={row}
-                selected={row.sec_uid === selectedUid}
-                checked={checkedUids.has(row.sec_uid)}
-                busy={busy}
-                detecting={detectingUids.has(row.sec_uid)}
-                hidden={hiddenUids.has(row.sec_uid)}
-                dragging={draggedUid === row.sec_uid}
-                onSelect={() => setSelectedUid(row.sec_uid)}
-                onToggle={() => toggleAccount(row.sec_uid)}
-                onHide={() => toggleHidden(row.sec_uid)}
-                onDragStart={() => setDraggedUid(row.sec_uid)}
-                onDragOver={(event) => handleRowDragOver(event, row.sec_uid)}
-                onDragEnd={finishDrag}
-                onContext={(event) => {
-                  event.preventDefault();
-                  setContextInfo({ row, x: event.clientX, y: event.clientY });
-                }}
-                onDetect={() => detectTargets([row.sec_uid])}
-                onDetectLiveRoom={() => detectLiveRoom([row.sec_uid])}
-                onDelete={() => setDeleteTarget(row)}
-              />
-            ))}
-            {rows.length === 0 && <div className="empty">暂无账户，请先添加账户</div>}
-          </div>
+          <LiveMonitorPanel embedded onOpenLibrary={() => setLibraryOpen(true)} />
         </section>
-
-        {selected && <DetailPanel row={selected} hidden={hiddenUids.has(selected.sec_uid)} />}
 
         <FansClubPanel apiRef={fansclubApi} />
         {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
@@ -2078,34 +1998,11 @@ function App() {
         </div>
       </section>
 
-      {addOpen && (
-        <AddAccountModal
-          busy={busy}
-          setBusy={setBusy}
-          setMessage={setMessage}
-          onClose={() => setAddOpen(false)}
-          onAdded={async () => {
-            await loadAccounts();
-            setAddOpen(false);
-          }}
+      {libraryOpen && (
+        <StreamerLibraryModal
+          onClose={() => setLibraryOpen(false)}
+          onChanged={loadAccounts}
         />
-      )}
-
-      {contextInfo && (
-        <div
-          ref={contextMenuRef}
-          className="context-menu"
-          style={{ left: contextInfo.x, top: contextInfo.y }}
-        >
-          <strong>{contextInfo.row.profile?.unique_id || contextInfo.row.unique_id || '无抖音号'}</strong>
-          <small>{contextInfo.row.sec_uid}</small>
-          <button className="secondary" onClick={() => {
-            copyText(contextInfo.row.profile?.unique_id || contextInfo.row.unique_id || contextInfo.row.sec_uid);
-            setContextInfo(null);
-          }}>
-            <Copy size={14} /> 复制
-          </button>
-        </div>
       )}
 
       {deleteTarget && (
@@ -2117,303 +2014,6 @@ function App() {
         />
       )}
     </main>
-  );
-}
-
-function AccountRow({ row, selected, checked, busy, detecting, hidden, dragging, onSelect, onToggle, onHide, onDragStart, onDragOver, onDragEnd, onContext, onDetect, onDetectLiveRoom, onDelete }) {
-  const profile = row.profile || {};
-  const live = profile.live_status === 1;
-  const failed = row.last_ok === false;
-  const masked = '******';
-  return (
-    <div
-      className={`${selected ? 'account-row selected' : 'account-row'}${hidden ? ' hidden-row' : ''}${dragging ? ' dragging' : ''}`}
-      draggable
-      onClick={onSelect}
-      onContextMenu={onContext}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragEnd={onDragEnd}
-      role="button"
-      tabIndex={0}
-    >
-      <label className="select-cell" onClick={(event) => event.stopPropagation()}>
-        <input type="checkbox" checked={checked} onChange={onToggle} />
-      </label>
-      <span className="account-name">
-        <GripVertical size={15} className="drag-handle" />
-        <span>
-          <strong>{hidden ? masked : (row.label || profile.nickname || '未备注')}</strong>
-          {!hidden && failed && <small className="error-text">{row.last_error || '检测失败'}</small>}
-        </span>
-      </span>
-      <span>
-        <span className={hidden ? 'hidden-pill' : failed ? 'failed-pill' : live ? 'live-pill' : 'idle-pill'} title={hidden ? '' : row.last_error || ''}>
-          {hidden ? masked : failed ? '检测失败' : live ? '直播中' : '未直播'}
-        </span>
-      </span>
-      <span>{hidden ? masked : live ? formatNumber(profile.live_viewers) : '-'}</span>
-      <span title="账号等级 (anchor 本人 paygrade，hover popup 解析，需 web_rid)">
-        {hidden ? masked : (
-          profile.live_room?.anchor?.paygrade_level
-            ? `Lv ${profile.live_room.anchor.paygrade_level}`
-            : (profile.web_rid || (profile.live_room?.web_rid) ? '未探测' : '-')
-        )}
-      </span>
-      <span>{hidden ? masked : formatTime(row.last_checked_at)}</span>
-      <span className="row-actions" onClick={(event) => event.stopPropagation()}>
-        <button onClick={onDetect} disabled={detecting} title="刷新基本信息（昵称/粉丝/直播状态）">基本</button>
-        <button className="secondary" onClick={onDetectLiveRoom} disabled={detecting} title="仅刷新直播间人数（不刷其它字段）">人数</button>
-        <button className="secondary icon-button small-icon" onClick={onHide} title={hidden ? '恢复信息' : '隐藏信息'}>
-          {hidden ? <Eye size={15} /> : <EyeOff size={15} />}
-        </button>
-        <button className="danger icon-button small-icon" onClick={onDelete} disabled={busy} title="删除账户">
-          <Trash2 size={15} />
-        </button>
-        <a href={row.url} target="_blank" rel="noreferrer" title="打开主页">
-          <ExternalLink size={16} />
-        </a>
-      </span>
-    </div>
-  );
-}
-
-function DetailPanel({ row, hidden }) {
-  const profile = row.profile || {};
-  const masked = '******';
-  const display = (value) => (hidden ? masked : value);
-  const anchorPaygrade = profile.live_room?.anchor?.paygrade_level;
-  return (
-    <section className="panel detail-panel">
-      <div className="panel-head">
-        <div>
-          <h2>{hidden ? masked : (row.label || profile.nickname || '账户详情')}</h2>
-          <p>{hidden ? masked : '最近一次检测结果'}</p>
-        </div>
-      </div>
-      <div className="detail-grid">
-        <Info label="关注" value={display(formatNumber(profile.following_count || row.following_count))} />
-        <Info label="粉丝" value={display(formatNumber(profile.follower_count || row.follower_count))} />
-        <Info label="获赞" value={display(formatNumber(profile.total_favorited || row.total_favorited))} />
-        <Info label="IP地址" value={display(profile.ip_location || row.ip_location || '-')} />
-        <Info label="直播状态" value={display(profile.live_status === 1 ? '直播中' : '未直播')} />
-        <Info label="直播间人数" value={display(formatNumber(profile.live_viewers))} />
-        <Info label="开播时间" value={display(formatTime(profile.live_start_at))} />
-        <Info label="持续时间" value={display(formatDuration(profile.live_duration_seconds))} />
-        <Info label="主播等级" value={display(anchorPaygrade ? `Lv ${anchorPaygrade}` : (profile.web_rid ? '未探测' : '需 web_rid'))} />
-        <Info label="上次检测" value={display(formatTime(row.last_checked_at))} />
-      </div>
-      {profile.live_room && profile.live_status === 1 && !hidden && (
-        <LiveRoomCard data={profile.live_room} />
-      )}
-      {profile.live_room && profile.live_status !== 1 && !hidden && profile.web_rid && (
-        <div className="live-room-card offline">
-          <div className="live-room-card-head">
-            <span>已下播（web_rid 已知，可继续探测等级/直播间）</span>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function LiveRoomCard({ data }) {
-  const partition = data.partition || {};
-  const similar = data.similar_rooms || [];
-  const audience = data.audience_rank_top || [];
-  const meta = data.audience_rank_meta || {};
-  const stream = data.stream_url || {};
-  const anchor = data.anchor || {};
-  return (
-    <div className="live-room-card">
-      <div className="live-room-card-head">
-        <span className="live-dot" />
-        <h3>{data.title || '直播间详情'}</h3>
-        <a className="live-room-link" href={`https://live.douyin.com/${data.web_rid}`} target="_blank" rel="noreferrer">
-          打开直播间
-        </a>
-      </div>
-      <div className="live-room-grid">
-        <Info label="在线观看" value={formatNumber(data.viewers) !== '-' ? formatNumber(data.viewers) : (data.user_count_str || '-')} />
-        <Info label="累计观看" value={formatNumber(data.total_user_str)} />
-        <Info label="本场点赞" value={formatNumber(data.like_count)} />
-        <Info label="分区" value={partition.title || '-'} />
-      </div>
-      {similar.length > 0 && (
-        <div className="live-room-tags">
-          <span className="live-room-tags-label">同推房：</span>
-          {similar.map((room, index) => (
-            <a key={index} className="live-room-tag" href={`https://live.douyin.com/${room.web_rid}`} target="_blank" rel="noreferrer">
-              {room.title || room.web_rid} · {room.user_count_str}
-            </a>
-          ))}
-        </div>
-      )}
-      {audience.length > 0 && (
-        <div className="audience-rank">
-          <div className="audience-rank-head">
-            <h4>观众榜 Top{audience.length}</h4>
-            <span className="audience-rank-meta">{meta.user_count_desc || ''}</span>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>昵称</th>
-                <th>付费等级</th>
-                <th>粉丝团</th>
-              </tr>
-            </thead>
-            <tbody>
-              {audience.map((u) => (
-                <tr key={u.sec_uid || u.rank}>
-                  <td>{u.rank}</td>
-                  <td>{u.nickname || '-'}</td>
-                  <td>{u.pay_grade_level ?? '-'}</td>
-                  <td>{u.fans_club_level ?? '-'}{u.guard_status > 0 ? ` (守${u.guard_status})` : ''}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <div className="live-room-foot">
-        <span className="live-room-anchor">主播：{anchor.nickname || '-'}{anchor.paygrade_level ? ` · Lv ${anchor.paygrade_level}` : ''}</span>
-        {data.qrcode_url && <img className="live-room-qr" src={data.qrcode_url} alt="直播间二维码" />}
-      </div>
-      <p className="live-room-stream">流地址：{stream.hls_pull_url || stream.flv_pull_url || '未开放'}</p>
-    </div>
-  );
-}
-
-function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onToggleMedia, onToggleMediaBulk, onRemove }) {
-  const dragState = React.useRef({ active: false, url: '', mode: 'add', last: -1 });
-
-  const beginDrag = (event, item, firstIndex) => {
-    if (event.button !== 0) return;
-    const picked = new Set(selectedMedia[item.url] || []);
-    dragState.current = {
-      active: true,
-      url: item.url,
-      mode: picked.has(firstIndex) ? 'remove' : 'add',
-      last: firstIndex,
-    };
-    applyDrag(firstIndex);
-    event.preventDefault();
-  };
-
-  const applyDrag = (index) => {
-    const ds = dragState.current;
-    if (!ds.active) return;
-    if (ds.last === index) return;
-    ds.last = index;
-    const current = new Set(selectedMedia[ds.url] || []);
-    if (ds.mode === 'add') current.add(index);
-    else current.delete(index);
-    onToggleMediaBulk(ds.url, Array.from(current).sort((a, b) => a - b));
-  };
-
-  const endDrag = () => {
-    if (dragState.current.active) dragState.current.active = false;
-  };
-
-  React.useEffect(() => {
-    window.addEventListener('mouseup', endDrag);
-    return () => window.removeEventListener('mouseup', endDrag);
-  }, []);
-
-  return (
-    <div className="preview-list">
-      {(preview.items || []).map((item) => {
-        const isImageType = item.type === 'image' || item.type === 'slide';
-        const media = item.media || [];
-        const multiImage = isImageType && media.length > 1;
-        const picked = new Set(selectedMedia[item.url] || []);
-        const allPicked = multiImage && picked.size === media.length;
-        const nonePicked = multiImage && picked.size === 0;
-        const toggleAll = () => {
-          if (allPicked) {
-            media.forEach((m) => onToggleMedia(item.url, m.index));
-          } else {
-            const toAdd = media.filter((m) => !picked.has(m.index));
-            toAdd.forEach((m) => onToggleMedia(item.url, m.index));
-          }
-        };
-        return (
-        <article className="preview-row" key={item.url}>
-          <label className="select-cell">
-            <input type="checkbox" checked={selectedUrls.has(item.url)} onChange={() => onToggle(item.url)} />
-          </label>
-          <div className="preview-cover">
-            {item.cover_url ? <img src={item.cover_url} alt="" /> : <span>{item.type}</span>}
-          </div>
-          <div className="preview-main">
-            <strong>{item.title || `链接 ${item.index}`}</strong>
-            <small>{item.author || item.url}</small>
-            <span>
-              {item.type || 'link'} · {item.duration ? formatDuration(item.duration) : '时长未知'} · {media.length || 1} 个媒体项
-              {multiImage && picked.size > 0 ? ` · 已选 ${picked.size} 张` : ''}
-            </span>
-            {item.error && <small className="error-text">{item.error}</small>}
-            {multiImage && (
-              <div
-                className="media-strip"
-                onMouseLeave={endDrag}
-              >
-                <button className="secondary media-toggle-all" onClick={toggleAll} type="button">
-                  {allPicked ? '取消全选' : '全选'}
-                </button>
-                <small className="media-hint">提示：按住鼠标在图片上拖动可批量勾选/取消</small>
-                {media.map((m) => {
-                  const checked = picked.has(m.index);
-                  return (
-                    <div
-                      className={`media-chip${checked ? ' picked' : ''}`}
-                      key={`${item.url}-${m.index}`}
-                      title={`第 ${m.index} 张 · ${m.type}`}
-                      onMouseDown={(e) => beginDrag(e, item, m.index)}
-                      onMouseEnter={() => applyDrag(m.index)}
-                      onClick={(e) => { e.preventDefault(); onToggleMedia(item.url, m.index); }}
-                    >
-                      {m.cover_url ? <img src={m.cover_url} alt="" loading="lazy" draggable="false" /> : <span>{m.type}</span>}
-                      <small>{m.index}</small>
-                    </div>
-                  );
-                })}
-                {nonePicked && <small className="error-text">未勾选图片时将下载全部 {media.length} 张</small>}
-              </div>
-            )}
-          </div>
-          <button className="icon-button preview-remove" onClick={() => onRemove(item.url)} title="删除该预览" type="button">
-            <Trash2 size={16} />
-          </button>
-        </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function LogPanel({ title, description, logs }) {
-  return (
-    <section className="panel log-panel">
-      <div className="panel-head">
-        <div>
-          <h2>{title}</h2>
-          <p>{description}</p>
-        </div>
-      </div>
-      <div className="log-box">
-        {logs.map((entry, index) => (
-          <div className={`log-line ${entry.level}`} key={`${entry.time}-${index}`}>
-            <span>{formatTime(entry.time)}</span>
-            <strong>{entry.source}</strong>
-            <p>{entry.message}</p>
-          </div>
-        ))}
-        {logs.length === 0 && <div className="empty">暂无日志</div>}
-      </div>
-    </section>
   );
 }
 
@@ -2453,103 +2053,5 @@ function DeleteAccountModal({ row, busy, onClose, onConfirm }) {
     </div>
   );
 }
-
-function AddAccountModal({ busy, setBusy, setMessage, onClose, onAdded }) {
-  const [keyword, setKeyword] = React.useState('');
-  const [candidates, setCandidates] = React.useState([]);
-
-  async function postJson(path, body = {}) {
-    let response;
-    try {
-      response = await fetch(`${API_BASE}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      throw new Error('无法连接后端服务，请确认 127.0.0.1:8000 正在运行。');
-    }
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '请求失败');
-    return data;
-  }
-
-  async function searchUsers() {
-    if (!keyword.trim()) {
-      setMessage('请输入需要添加的账户名称');
-      return;
-    }
-    setBusy(true);
-    try {
-      const data = await postJson('/api/users/search', { keyword: keyword.trim() });
-      setCandidates(data.candidates || []);
-      setMessage(`找到 ${data.candidates?.length || 0} 个候选用户`);
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addCandidate(candidate) {
-    setBusy(true);
-    try {
-      await postJson('/api/users', {
-        ...candidate,
-        label: candidate.nickname || candidate.unique_id || keyword,
-      });
-      setMessage('账户已保存到 data/users.json');
-      await onAdded();
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-      <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-head">
-          <div>
-            <h2>添加账户</h2>
-          </div>
-          <button className="secondary" onClick={onClose}>关闭</button>
-        </div>
-        <div className="search-form">
-          <input
-            value={keyword}
-            onChange={(event) => setKeyword(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter') searchUsers(); }}
-            placeholder="输入账户名称"
-          />
-          <button onClick={searchUsers} disabled={busy}>
-            <Search size={16} /> 搜索
-          </button>
-        </div>
-        <div className="candidate-list">
-          {candidates.map((candidate) => (
-            <article className="candidate-row" key={candidate.sec_uid}>
-              <img src={candidate.avatar_url || ''} alt="" />
-              <div>
-                <strong>{candidate.nickname || '未命名用户'}</strong>
-                <small>{candidate.unique_id ? `抖音号：${candidate.unique_id}` : candidate.sec_uid.slice(0, 18)}</small>
-                <span>
-                  粉丝 {formatNumber(candidate.follower_count)} · 关注 {formatNumber(candidate.following_count)} · 获赞 {formatNumber(candidate.total_favorited)}
-                  {candidate.ip_location ? ` · ${candidate.ip_location}` : ''}
-                </span>
-              </div>
-              <button onClick={() => addCandidate(candidate)} disabled={busy}>
-                <Plus size={16} /> 添加
-              </button>
-            </article>
-          ))}
-          {candidates.length === 0 && <div className="empty">搜索结果会显示在这里</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 
 createRoot(document.getElementById('root')).render(<App />);

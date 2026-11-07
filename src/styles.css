@@ -202,124 +202,6 @@ button:disabled {
   letter-spacing: 0;
 }
 
-.account-list {
-  display: grid;
-  gap: 8px;
-  max-height: calc(100vh - 220px);
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.account-header {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: #fff;
-  /* sticky 元素需要 box-shadow 才能盖住下面滚上来的 row */
-  box-shadow: 0 1px 0 #d8e9f8;
-}
-
-.account-header,
-.account-row {
-  display: grid;
-  grid-template-columns:
-    28px
-    minmax(120px, 1.15fr)
-    minmax(86px, .72fr)
-    minmax(70px, .58fr)
-    minmax(80px, .68fr)
-    minmax(132px, .95fr)
-    minmax(244px, 1.2fr);
-  gap: 12px;
-  align-items: center;
-}
-
-.account-header {
-  color: #64839d;
-  font-size: 12px;
-  font-weight: 750;
-  padding: 0 12px;
-}
-
-.account-row {
-  width: 100%;
-  text-align: left;
-  color: #17324d;
-  background: #fbfdff;
-  border: 1px solid #dcecf8;
-  border-radius: 8px;
-  padding: 12px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.account-row:hover {
-  border-color: #a7d2f6;
-  background: #f5fbff;
-}
-
-.account-row.selected {
-  background: #eaf5ff;
-  border-color: #76bdf6;
-  box-shadow: inset 4px 0 0 #2f8cff;
-}
-
-.account-row.hidden-row {
-  background: #f8fbfd;
-  border-style: dashed;
-}
-
-.account-row.dragging {
-  border-color: #2f8cff;
-  box-shadow: 0 10px 24px rgba(47, 140, 255, .18);
-}
-
-.account-name {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-
-.account-name > span {
-  min-width: 0;
-}
-
-.account-paygrade {
-  font-weight: 700;
-  color: #1b6fc2;
-}
-
-.drag-handle {
-  color: #88a8c1;
-  flex: 0 0 auto;
-  cursor: grab;
-}
-
-.account-name strong,
-.candidate-row strong {
-  display: block;
-  font-size: 14px;
-  line-height: 1.3;
-}
-
-.account-row small,
-.candidate-row small,
-.job-row small {
-  display: block;
-  color: #64839d;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.row-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .select-cell {
   display: flex;
   align-items: center;
@@ -329,84 +211,6 @@ button:disabled {
 .select-cell input {
   width: 16px;
   height: 16px;
-}
-
-.context-menu {
-  position: fixed;
-  z-index: 45;
-  display: grid;
-  gap: 8px;
-  width: min(310px, calc(100vw - 32px));
-  padding: 12px;
-  background: #fff;
-  border: 1px solid #c9dff1;
-  border-radius: 8px;
-  box-shadow: 0 14px 40px rgba(30, 72, 112, .18);
-}
-
-.context-menu strong,
-.context-menu small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.context-menu small {
-  color: #64839d;
-  font-size: 12px;
-}
-
-.row-actions button {
-  padding: 7px 10px;
-  font-size: 13px;
-}
-
-.row-actions a,
-.candidate-row a {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 6px;
-  background: #eaf5ff;
-  color: #1b6fc2;
-}
-
-.live-pill,
-.idle-pill,
-.failed-pill,
-.hidden-pill {
-  display: inline-flex;
-  width: fit-content;
-  border-radius: 999px;
-  padding: 5px 8px;
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.live-pill {
-  background: #ffe9e7;
-  color: #ba1a1a;
-}
-
-.idle-pill {
-  background: #eef7ff;
-  color: #5b7e99;
-}
-
-.failed-pill {
-  background: #fff1f1;
-  color: #ba1a1a;
-}
-
-.hidden-pill {
-  background: #edf2f7;
-  color: #60788f;
-}
-
-.detail-panel {
-  background: #fbfdff;
 }
 
 .detail-grid {
@@ -816,21 +620,10 @@ button:disabled {
 }
 
 @media (max-width: 1160px) {
-  .account-header {
-    display: none;
-  }
-
-  .account-row {
-    grid-template-columns: 1fr 1fr;
-  }
-
   .select-cell {
     justify-content: flex-start;
   }
 
-  .row-actions {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-width: 760px) {
@@ -860,10 +653,6 @@ button:disabled {
     padding: 16px;
   }
 
-  .account-row {
-    grid-template-columns: 1fr;
-  }
-
   .modal-backdrop {
     padding: 12px;
   }
@@ -875,51 +664,6 @@ button:disabled {
   font-size: 12px;
   line-height: 1.5;
 }
-
-/* 直播间详情卡（DetailPanel 内，仅 live_status==1 且 live_room 非空时渲染） */
-.live-room-card {
-  margin-top: 14px;
-  padding: 14px 16px;
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 10px;
-  background: var(--surface-2, #f8fafc);
-}
-.live-room-card .live-room-card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.live-room-card .live-dot {
-  width: 9px; height: 9px; border-radius: 50%;
-  background: #ef4444; box-shadow: 0 0 0 0 rgba(239,68,68,.6);
-  animation: livePulse 1.4s infinite;
-}
-@keyframes livePulse {
-  0% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); }
-  70% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
-  100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
-}
-.live-room-card .live-room-card-head h3 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
-.live-room-card .live-room-link { font-size: 12px; color: #2563eb; text-decoration: none; }
-.live-room-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px;
-}
-.live-room-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; font-size: 12px; }
-.live-room-tags-label { color: var(--muted, #64748b); }
-.live-room-tag { padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; text-decoration: none; }
-.audience-rank { margin-top: 10px; border-top: 1px dashed var(--border, #e2e8f0); padding-top: 10px; }
-.audience-rank-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.audience-rank-head h4 { margin: 0; font-size: 13px; }
-.audience-rank-meta { font-size: 11px; color: var(--muted, #64748b); }
-.audience-rank table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.audience-rank th, .audience-rank td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border, #edf2f7); }
-.audience-rank th { font-weight: 600; color: var(--muted, #64748b); }
-.live-room-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12px; }
-.live-room-qr { width: 64px; height: 64px; object-fit: contain; }
-.live-room-stream { margin: 8px 0 0; font-size: 11px; color: var(--muted, #94a3b8); word-break: break-all; }
-
-@media (max-width: 720px) { .live-room-grid { grid-template-columns: repeat(2, 1fr); } }
 
 /* ---- 粉丝团签到面板 ---- */
 .fansclub-toolbar {
@@ -1195,21 +939,6 @@ button:disabled {
 
 /* ---- 直播实时监控面板 (阶段二) ---- */
 .live-monitor-panel { margin-top: 18px; }
-.lm-config {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  margin-bottom: 10px; font-size: 13px; color: #4a6580;
-}
-.lm-config label { display: inline-flex; align-items: center; gap: 6px; }
-.lm-num {
-  width: 64px; padding: 3px 8px; border: 1px solid #d4e3f5; border-radius: 6px;
-  font-size: 13px;
-}
-.lm-candidates { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.lm-cand {
-  padding: 5px 14px; border: 1px solid #d4e3f5; border-radius: 16px;
-  background: #f2f7fd; color: #17324d; font-size: 13px; cursor: pointer;
-}
-.lm-cand.checked { background: #2f8cff; border-color: #2f8cff; color: #fff; }
 .lm-rooms { border: 1px solid #e3eef9; border-radius: 10px; overflow: hidden; margin-bottom: 12px; }
 .lm-room {
   display: grid; grid-template-columns: 110px 64px 90px 1fr 88px;
@@ -1233,8 +962,6 @@ button:disabled {
 .lm-event.lm-live .lm-ev-msg { color: #1a9c5b; font-weight: 600; }
 .lm-event.lm-off .lm-ev-msg { color: #b0483c; }
 .lm-event.lm-err .lm-ev-msg { color: #c2872b; }
-.lm-cand.stale { opacity: 0.55; }
-
 /* 直播监控嵌入账户列表形态 */
 .live-monitor-box.embedded {
   border: 1px solid #e3eef9; border-radius: 10px;
@@ -1249,12 +976,53 @@ button:disabled {
   flex: 1; min-width: 200px; padding: 6px 10px; font-size: 13px;
   border: 1px solid #d4e3f5; border-radius: 6px;
 }
-.lm-cand.acct { border-color: #b8d4ee; background: #eef6ff; }
 /* 粘贴添加的目标 chip (只读展示 + × 移除, 不再点选切换 2026-11-05) */
-.lm-cand.acct.checked { display: inline-flex; align-items: center; gap: 6px; }
-.lm-cand-x {
-  border: 0; background: transparent; color: #64839d; font-size: 14px;
-  line-height: 1; padding: 0 2px; cursor: pointer;
+
+/* ---- 主播库弹窗 (2026-11-07) ---- */
+.library-modal {
+  width: min(720px, 100%);
 }
-.lm-cand-x:hover { color: #b0483c; }
-.lm-include { color: #4a6580; user-select: none; }
+.lib-row {
+  grid-template-columns: 28px 44px minmax(0, 1fr) auto;
+}
+.lib-row.monitored {
+  border-color: #a7d2f6;
+  background: #f2f9ff;
+}
+.lib-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lib-actions .icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: #eaf5ff;
+  color: #1b6fc2;
+  border: 0;
+}
+.lib-actions .icon-button:hover {
+  background: #d7ecff;
+}
+.lib-actions .icon-button.danger {
+  background: #fdeeea;
+  color: #ba1a1a;
+}
+.lib-actions .icon-button.danger:hover {
+  background: #faddd7;
+}
+.live-pill-inline {
+  color: #1a9c5b;
+  font-weight: 700;
+}
+.spin {
+  animation: spin360 1s linear infinite;
+  vertical-align: -3px;
+}
+@keyframes spin360 {
+  to { transform: rotate(360deg); }
+}

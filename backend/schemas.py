@@ -27,6 +27,8 @@ class UserEntry(BaseModel):
     label: str = ""
     url: str
     sec_uid: str
+    # 直播监控开关 (主播库: 勾选=监控目标; 旧条目无此键=False, 新添加默认 True)
+    monitor: bool = False
     nickname: str = ""
     unique_id: str = ""
     signature: str = ""
@@ -124,6 +126,7 @@ class AddUserRequest(BaseModel):
     label: str
     sec_uid: str
     homepage_url: str = ""
+    monitor: bool = True  # 主播库: 新加入默认纳入监控 (2026-11-07)
     nickname: str = ""
     unique_id: str = ""
     signature: str = ""
@@ -136,6 +139,12 @@ class AddUserRequest(BaseModel):
 
 class ReorderUsersRequest(BaseModel):
     sec_uids: list[str] = Field(default_factory=list)
+
+
+class MonitorToggleRequest(BaseModel):
+    """主播库监控开关 (单账户勾选/取消; 旧版批量勾选形态废弃)。"""
+    sec_uid: str
+    monitor: bool
 
 
 class AddUserResult(BaseModel):

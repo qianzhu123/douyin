@@ -254,6 +254,9 @@ class MonitorService:
     def delete_user(self, sec_uid: str) -> list[UserEntry]:
         return delete_project_user(USERS_FILE, sec_uid)
 
+    def set_monitor(self, sec_uid: str, monitor: bool) -> list[UserEntry]:
+        return set_monitor_flag(USERS_FILE, sec_uid, monitor)
+
     def resolve_targets(self, target_ids: list[str]) -> list[dict[str, Any]]:
         if not target_ids:
             return [entry.model_dump() for entry in self.list_users()]
@@ -1417,6 +1420,23 @@ def delete_project_user(users_file: Path, sec_uid: str) -> list[UserEntry]:
     return next_users
 
 
+def set_monitor_flag(users_file: Path, sec_uid: str, monitor: bool) -> list[UserEntry]:
+    """主播库监控开关 (2026-11-07): 只翻 monitor 位, 其它字段不动。"""
+    target = sec_uid.strip()
+    users = read_project_users(users_file)
+    hit = False
+    for index, user in enumerate(users):
+        if user.sec_uid == target:
+            merged = {**user.model_dump(), "monitor": bool(monitor)}
+            users[index] = UserEntry(**merged)
+            hit = True
+            break
+    if not hit:
+        raise ValueError("User not found.")
+    _write_project_users(users_file, users)
+    return users
+
+
 def read_profile_cache(cache_file: Path = PROFILE_CACHE_FILE) -> dict[str, dict[str, Any]]:
     if not cache_file.exists():
         return {}
@@ -1479,6 +1499,7 @@ def upsert_project_user(users_file: Path, data: dict[str, Any]) -> AddUserResult
         label=label,
         url=url,
         sec_uid=sec_uid,
+        monitor=bool(data.get("monitor", True)),  # 主播库: 新账户默认纳入监控
         nickname=str(data.get("nickname") or ""),
         unique_id=str(data.get("unique_id") or ""),
         signature=str(data.get("signature") or ""),
@@ -1493,6 +1514,9 @@ def upsert_project_user(users_file: Path, data: dict[str, Any]) -> AddUserResult
     for index, user in enumerate(users):
         if user.sec_uid == sec_uid:
             merged = {**user.model_dump(), **incoming.model_dump(exclude_defaults=True)}
+            # monitor 是开关不是资料字段: 显式传入才覆盖 (重复添加不悄悄改勾选状态)
+            if "monitor" in data:
+                merged["monitor"] = bool(data["monitor"])
             users[index] = UserEntry(**merged)
             _write_project_users(users_file, users)
             return AddUserResult(added=False, entry=users[index], message="User already exists; metadata updated.")

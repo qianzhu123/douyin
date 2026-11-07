@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, LiveRoomRequest, LiveViewersRequest, PaygradeRequest, ProgressLog, ProgressStep, QueryRequest, ReorderUsersRequest, SearchUsersRequest
+from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, LiveRoomRequest, LiveViewersRequest, MonitorToggleRequest, PaygradeRequest, ProgressLog, ProgressStep, QueryRequest, ReorderUsersRequest, SearchUsersRequest
 from .services import DownloadService, MonitorService, load_app_settings, save_app_settings
 
 
@@ -162,6 +162,35 @@ def add_user(payload: AddUserRequest) -> dict:
 @app.post("/api/users/reorder")
 def reorder_users(payload: ReorderUsersRequest) -> dict:
     return {"users": monitor_service.reorder_users(payload.sec_uids)}
+
+
+@app.post("/api/users/monitor-toggle")
+def user_monitor_toggle(payload: MonitorToggleRequest) -> dict:
+    """主播库监控开关 (只翻 users.json 的 monitor 位; 监控轮询由
+    /api/live-monitor/add|remove 动态挂/摘)。"""
+    try:
+        return {"users": monitor_service.set_monitor(payload.sec_uid, payload.monitor)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/live-monitor/add")
+def live_monitor_add(payload: dict) -> dict:
+    """主播库「加入监控」: 动态挂目标, 监控没跑就自动启动 (用户语义: 加入即监控)。"""
+    sec_uid = str((payload or {}).get("sec_uid") or "").strip()
+    label = str((payload or {}).get("label") or "").strip()
+    if not sec_uid:
+        raise HTTPException(status_code=400, detail="sec_uid required")
+    return _live_monitor.add_target(sec_uid, label)
+
+
+@app.post("/api/live-monitor/remove")
+def live_monitor_remove(payload: dict) -> dict:
+    """主播库「移出监控」: 动态摘目标, 其余目标继续; 摘空自动停。"""
+    sec_uid = str((payload or {}).get("sec_uid") or "").strip()
+    if not sec_uid:
+        raise HTTPException(status_code=400, detail="sec_uid required")
+    return _live_monitor.remove_target(sec_uid)
 
 
 @app.delete("/api/users/{sec_uid}")

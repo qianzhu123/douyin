@@ -95,6 +95,56 @@ class LiveMonitor:
                 self._add_event("info", "监控已停止")
             return {"running": False}
 
+    def add_target(self, sec_uid: str, label: str = "") -> dict:
+        """主播库动态加入 (2026-11-07): 监控运行中也可直接加目标, 立即生效。
+        未在跑则自动启动单目标轮询 (用户语义: 加入即监控)。"""
+        sec = str(sec_uid or "").strip()
+        if not sec:
+            return {"added": False, "reason": "sec_uid required"}
+        with self._lock:
+            if self._state["running"]:
+                key = sec
+                if key in self._rooms:
+                    self._rooms[key]["label"] = label or self._rooms[key]["label"]
+                    return {"added": False, "reason": "already monitored"}
+                self._rooms[key] = {
+                    "label": label or sec[:16], "sec_uid": sec, "room_id": "",
+                    "resolved_rid": "", "resolved_at": 0.0, "last": None,
+                    "history": deque(maxlen=HISTORY_MAX),
+                    "last_tick": 0.0, "was_live": False,
+                    "title": "", "viewers": None,
+                }
+                self._state["rooms"] = [
+                    {"sec_uid": st["sec_uid"], "room_id": st["room_id"], "label": st["label"]}
+                    for st in self._rooms.values()
+                ]
+                self._add_event("info", f"{label or sec[:16]} 加入监控")
+                return {"added": True, "running": True}
+        # 未在跑: 以该目标启动 (走 start 的全套初始化)
+        r = self.start([{"sec_uid": sec, "label": label}])
+        return {"added": bool(r.get("started")), "reason": r.get("reason", ""),
+                "running": bool(r.get("started"))}
+
+    def remove_target(self, sec_uid: str) -> dict:
+        """主播库动态移出: 直接从轮询表摘除, 其余目标继续跑。
+        摘到空则整个监控自动停 (没有空转的轮询线程)。"""
+        sec = str(sec_uid or "").strip()
+        with self._lock:
+            removed = self._rooms.pop(sec, None)
+            if not removed:
+                return {"removed": False, "reason": "not monitored"}
+            self._state["rooms"] = [
+                {"sec_uid": st["sec_uid"], "room_id": st["room_id"], "label": st["label"]}
+                for st in self._rooms.values()
+            ]
+            if not self._rooms and self._state["running"]:
+                self._state["running"] = False
+                self._state["ended_at"] = time.time()
+                self._add_event("info", "全部目标已移出, 监控自动停止")
+            else:
+                self._add_event("info", f"{removed['label']} 移出监控")
+            return {"removed": True, "running": self._state["running"]}
+
     def status(self) -> dict:
         with self._lock:
             rooms = []
@@ -171,6 +221,25 @@ class LiveMonitor:
     def _add_event(self, level: str, message: str, room_id: str = "") -> None:
         self._events.append({"time": time.time(), "level": level,
                              "message": message, "room_id": room_id})
+
+    def _remove_locked(self, sec_uid: str, note: str = "") -> None:
+        """摘除目标 (调用方必须已持 self._lock)。摘到空则整个监控停。"""
+        sec = str(sec_uid or "").strip()
+        if not sec:
+            return
+        removed = self._rooms.pop(sec, None)
+        if not removed:
+            return
+        self._state["rooms"] = [
+            {"sec_uid": st["sec_uid"], "room_id": st["room_id"], "label": st["label"]}
+            for st in self._rooms.values()
+        ]
+        if note:
+            self._add_event("info", note, sec)
+        if not self._rooms and self._state["running"]:
+            self._state["running"] = False
+            self._state["ended_at"] = time.time()
+            self._add_event("info", "全部目标已下播, 监控自动停止")
 
     def _loop(self) -> None:
         while True:
@@ -253,12 +322,13 @@ class LiveMonitor:
         u = prof.get("user") or {}
         rid = str(u.get("room_id_str") or u.get("room_id") or "").strip()
         if not rid or rid == "0" or u.get("live_status") != 1:
-            # 未开播: 清掉旧解析, 下轮再试 (开播/下播事件由 _snapshot 侧维护)
+            # 未开播: (2026-11-07 用户定论) 下播后该监控目标直接关闭 — 从轮询表
+            # 摘除并停掉对它的探测, 不再无限轮空; 开播事件由主播库"加入"重新拉起。
+            # was_live=True 说明这轮之前还在播 → 先发下播事件再摘。
             if st["was_live"]:
-                self._add_event("offline", f"{st['label']} 已下播", st["sec_uid"][:12])
+                self._add_event("offline", f"{st['label']} 已下播 (监控自动结束)", st["sec_uid"][:12])
                 st["was_live"] = False
-            st["resolved_rid"] = ""
-            st["resolved_at"] = now
+                self._remove_locked(st["sec_uid"], f"{st['label']} 下播自动关闭")
             return False
         if rid != st["resolved_rid"] and st["resolved_rid"]:
             # 换了场次 (重新开播), 换房不重复报开播 (was_live 仍 True 时)
@@ -302,11 +372,12 @@ class LiveMonitor:
         st["viewers"] = viewers_int
 
         live = status == 2
-        # 开播 / 下播
+        # 开播 / 下播 (下播 → 该目标监控自动关闭, 2026-11-07 用户定论)
         if live and not st["was_live"]:
             self._add_event("live", f"{st['label']} 开播: {brief.get('title') or ''}", rid)
         elif not live and st["was_live"]:
-            self._add_event("offline", f"{st['label']} 已下播", rid)
+            self._add_event("offline", f"{st['label']} 已下播 (监控自动结束)", rid)
+            self._remove_locked(st["sec_uid"], f"{st['label']} 下播自动关闭")
         st["was_live"] = live
         # 标题变化
         new_title = brief.get("title") or ""
