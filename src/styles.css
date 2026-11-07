@@ -966,6 +966,7 @@ button:disabled {
 }
 .lib-row {
   grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 14px;
 }
 .lib-row.monitored {
   border-color: #a7d2f6;

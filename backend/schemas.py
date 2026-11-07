@@ -126,7 +126,7 @@ class AddUserRequest(BaseModel):
     label: str
     sec_uid: str
     homepage_url: str = ""
-    monitor: bool = True  # 主播库: 新加入默认纳入监控 (2026-11-07)
+    monitor: bool = False  # 入库≠监控: 是否监控由主播库按钮显式决定 (2026-11-07 a03b590)
     nickname: str = ""
     unique_id: str = ""
     signature: str = ""

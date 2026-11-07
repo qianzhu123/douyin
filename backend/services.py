@@ -1499,7 +1499,7 @@ def upsert_project_user(users_file: Path, data: dict[str, Any]) -> AddUserResult
         label=label,
         url=url,
         sec_uid=sec_uid,
-        monitor=bool(data.get("monitor", True)),  # 主播库: 新账户默认纳入监控
+        monitor=bool(data.get("monitor", False)),  # 入库≠监控, 默认不进监控 (2026-11-07)
         nickname=str(data.get("nickname") or ""),
         unique_id=str(data.get("unique_id") or ""),
         signature=str(data.get("signature") or ""),
