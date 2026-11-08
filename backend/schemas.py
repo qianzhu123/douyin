@@ -65,7 +65,7 @@ class LiveAnalysisRequest(BaseModel):
 
 class LiveMonitorStartRequest(BaseModel):
     rooms: list[dict[str, Any]] = Field(default_factory=list)  # [{room_id, label?}]
-    interval: int = Field(default=120, ge=60, le=3600)
+    interval: int = Field(default=30, ge=15, le=3600)
     duration_minutes: int = Field(default=0, ge=0, le=1440)
     label: str = ""
 

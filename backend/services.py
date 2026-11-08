@@ -107,6 +107,25 @@ class MonitorService:
             return await self._search_users_locked(keyword)
 
     async def _search_users_locked(self, keyword: str) -> list[SearchCandidate]:
+        # 协议通道首选 (2026-11-08): App 域 oracle 签名直发, 不依赖浏览器/登录态。
+        # 不可达 (真机不在/签名失败/antispam 壳) 静默回落浏览器三级链, 行为不变。
+        try:
+            from . import aweme_search_protocol as proto
+            users, note = await asyncio.to_thread(proto.search, keyword)
+            return [SearchCandidate(
+                nickname=u.get("nickname", ""), unique_id=u.get("unique_id", ""),
+                signature=u.get("signature", ""), avatar_url=u.get("avatar_url", ""),
+                follower_count=int(u.get("follower_count") or 0),
+                following_count=int(u.get("following_count") or 0),
+                total_favorited=int(u.get("total_favorited") or 0),
+                ip_location="", sec_uid=u["sec_uid"],
+                homepage_url=f"https://www.douyin.com/user/{u['sec_uid']}",
+                live_status=int(u.get("live_status") or 0),
+                room_id=u.get("room_id", ""),
+            ) for u in users][:12]
+        except Exception:
+            pass  # 协议通道任何失败 → 浏览器链 (不拖时: 协议内部 5s 超时)
+
         if self.raw_search_module is not None:
             candidates = await asyncio.to_thread(self._search_users_with_raw_module, keyword)
             if candidates:

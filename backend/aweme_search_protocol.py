@@ -1,0 +1,302 @@
+"""backend/aweme_search_protocol.py — App 域协议搜索通道 (oracle 签名直发).
+
+用户诉求 (2026-11-08): 添加主播的名称搜索首选协议通道, 替代浏览器 XHR 拦截;
+浏览器三级链 (raw → external → CDP) 保留作降级。
+
+配方移植自 lab 仓 (D:/code/android/androidre/douyin):
+- tools/e112f_signed_search.py  v1 GET 37 参数模板 + e103b 头族
+- tools/sign_client.py          设备 oracle (frida 27042, libmetasec 0x2e01c0)
+- docs/e112_search.md §5.2/§5.3 定论:
+  * oracle 只认最小双键罐 install_id=<真值>\r\nsessionid=<真值> (多余键致拒,
+    2026-11-08 复证: 6键 OK / 第7键起全 null)
+  * 发送用全量真罐 + e103b 头族
+  * sc=0 无 antispam/hit_shark 壳 (签名白名单破 shark)
+
+可达性 (启用条件, 全满足才走协议, 否则静默回落浏览器链):
+  ① adb devices 有 device 状态的机子
+  ② frida-server 27042 端口可达 (adb forward 已建)
+  ③ 设备上有非 musically 的 aweme 活进程 (§89: musically=Splash 假进程)
+
+响应解析 (2026-11-08 用户确认: 全树扫, 不依赖 type=4 user_list 卡):
+  user 卡按 rank 抖动 (陈泽两次搜索一次有一 lần无), 但 aweme 卡的 author 对象
+  恒带完整资料 → 递归扫全树收 (nickname+sec_uid) 对象, sec_uid 去重,
+  author.follower_count 可信; relation_label.user_list 无粉丝数作次选。
+纪律: 只读 GET; oracle 调用 5s 超时即回落; 真机不在不重试不拖时。
+"""
+from __future__ import annotations
+
+import json
+import re
+import ssl
+import subprocess
+import threading
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+# ---- lab 仓资源定位 (配置化, 找不到即通道不可用 → 静默回落) ----
+_LAB_ROOTS = [
+    Path(r"D:\code\android\androidre\douyin"),
+]
+ADB_SERIAL = "192.168.43.35:5555"
+FRIDA_PORT = 27042
+SIGN_TIMEOUT_S = 5     # oracle 单次签名超时 (超时即回落, 不拖时)
+HTTP_TIMEOUT_S = 15
+ORACLE_MAX_CALLS = 40  # 单 oracle 会话签名次数上限 (§48.3 会话漂移防线, 超限重建)
+
+CTX = ssl.create_default_context()
+CTX.check_hostname = False
+CTX.verify_mode = ssl.CERT_NONE
+
+
+def _lab_root() -> Path | None:
+    for p in _LAB_ROOTS:
+        if (p / "tools" / "sign_client.py").exists():
+            return p
+    return None
+
+
+def _read_lab_files(root: Path) -> dict[str, str] | None:
+    try:
+        return {
+            "headers": (root / "logs" / "e103b_headers.json").read_text(encoding="utf-8"),
+            "cookie": (root / "tools" / "real_cookie.txt").read_text(encoding="utf-8"),
+        }
+    except Exception:
+        return None
+
+
+# ---- 可达性探测 (cheap, 每次搜索前跑; 失败立刻回落) ----
+_probe_cache: dict = {"ts": 0.0, "ok": False}
+_PROBE_TTL = 30  # 30s 内复用探测结果
+
+
+def probe_available() -> tuple[bool, str]:
+    """三条件探测: adb 设备 / frida 端口 / aweme 活进程。返回 (ok, reason)。"""
+    import socket
+
+    now = time.time()
+    if now - _probe_cache["ts"] < _PROBE_TTL:
+        return _probe_cache["ok"], _probe_cache.get("reason", "")
+
+    ok, reason = False, ""
+    try:
+        out = subprocess.run(["adb", "-s", ADB_SERIAL, "get-state"],
+                             capture_output=True, timeout=5).stdout.decode().strip()
+        if out != "device":
+            reason = f"adb state={out or 'none'}"
+        else:
+            with socket.create_connection(("127.0.0.1", FRIDA_PORT), timeout=2):
+                pass  # 端口可达
+            ps = subprocess.run(
+                ["adb", "-s", ADB_SERIAL, "shell", "ps -A -o PID,NAME,STAT"],
+                capture_output=True, timeout=8).stdout.decode(errors="replace")
+            live = [l for l in ps.splitlines()
+                    if "com.ss.android.ugc.aweme" in l and " Z " not in l]
+            if not live:
+                reason = "aweme 进程不在跑"
+            else:
+                ok = True
+    except Exception as exc:
+        reason = f"探测失败: {str(exc)[:60]}"
+
+    _probe_cache.update(ts=now, ok=ok, reason=reason)
+    return ok, reason
+
+
+# ---- oracle 会话 (懒建, 漂移自愈: 冷启重建) ----
+_oracle_lock = threading.Lock()
+_oracle = None            # SignOracle 实例 (lab 模块动态加载)
+_oracle_calls = 0         # 本会话已签次数
+_lab_mods: dict = {}
+
+
+def _load_lab_modules(root: Path) -> dict:
+    """动态加载 lab 仓 sign_client (隔离 sys.path, 不污染后端包)。"""
+    if "sc" in _lab_mods:
+        return _lab_mods
+    import importlib.util
+    import sys
+
+    old_path = sys.path[:]
+    sys.path.insert(0, str(root / "tools"))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "douyin_lab_sign_client", root / "tools" / "sign_client.py")
+        sc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sc)
+        sc.ADB = f"adb -s {ADB_SERIAL}"
+        sc.FRIDA_EP = f"127.0.0.1:{FRIDA_PORT}"
+        _lab_mods["sc"] = sc
+    finally:
+        sys.path[:] = old_path
+    return _lab_mods
+
+
+def _get_oracle(root: Path) -> Any:
+    """取健康 oracle; 漂移/超限则重建 (SignOracle.start 会 attach 现有进程)。"""
+    global _oracle, _oracle_calls
+    sc = _load_lab_modules(root)["sc"]
+    with _oracle_lock:
+        if _oracle is not None:
+            if _oracle_calls >= ORACLE_MAX_CALLS:
+                try:
+                    _oracle.detach()
+                except Exception:
+                    pass
+                _oracle = None
+            else:
+                return _oracle
+        orc = sc.SignOracle(auto_start=False)
+        orc.start()
+        _oracle = orc
+        _oracle_calls = 0
+        return orc
+
+
+def _sign(root: Path, url: str, min_jar: str) -> dict | None:
+    """签一次; 返回 heads dict 或 None (超时/null/漂移)。"""
+    global _oracle_calls
+    try:
+        orc = _get_oracle(root)
+        r = orc.sign(url, min_jar, timeout=SIGN_TIMEOUT_S)
+        _oracle_calls += 1
+        if "heads" in r and r["heads"]:
+            return r["heads"]
+        # 失败一次即判会话不健康 → 弃用 (下次搜索重建)
+        try:
+            orc.detach()
+        except Exception:
+            pass
+        with _oracle_lock:
+            globals()["_oracle"] = None
+        return None
+    except Exception:
+        with _oracle_lock:
+            globals()["_oracle"] = None
+        return None
+
+
+# ---- 37 参数模板 (e112f common_q 原样移植) ----
+def _common_q(**extra) -> dict:
+    q = dict(iid="1765185923070852", device_id="5967213509056", ac="wifi",
+             channel="huawei_1128_64", aid=1128, app_name="aweme",
+             version_code=400600, version_name="40.6.0", device_platform="android",
+             os="android", ssmix="a", device_type="Pixel 2 XL", device_brand="google",
+             language="zh", os_api=30, os_version=11, manifest_version_code=400601,
+             resolution="1440*2712", dpi=560, update_version_code=40609900,
+             _rticket=int(time.time() * 1000), package="com.ss.android.ugc.aweme",
+             first_launch_timestamp=0, cpu_support64="true", host_abi="arm64-v8a",
+             is_guest_mode=0, app_type="normal", minor_status=0, appTheme="light",
+             is_preinstall=0, need_personal_recommend=1, is_android_pad=0,
+             is_android_fold=0, ts=int(time.time()),
+             cdid="61eafaf6-6a6b-4423-bf00-bfa1b53b1fb5")
+    q.update(extra)
+    return q
+
+
+# ---- 响应解析: 全树扫 user 对象 (author 优先, sec_uid 去重) ----
+def _extract_users(body: dict) -> list[dict]:
+    """递归收 (nickname+sec_uid) 对象。author 类 (带 follower_count) 优先排序。"""
+    hits: dict[str, dict] = {}
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            sec = o.get("sec_uid")
+            if sec and o.get("nickname"):
+                cur = hits.get(sec)
+                # 已有带粉丝数的记录则不降级覆盖; 否则可被带粉丝数的补强
+                enriched = {
+                    "sec_uid": sec,
+                    "nickname": o.get("nickname") or "",
+                    "unique_id": o.get("unique_id") or o.get("short_id") or "",
+                    "signature": o.get("signature") or "",
+                    "follower_count": int(o.get("follower_count") or 0),
+                    "following_count": int(o.get("following_count") or 0),
+                    "total_favorited": int(o.get("total_favorited") or 0),
+                    "live_status": int(o.get("live_status") or 0),
+                    "room_id": str(o.get("room_id_str") or o.get("room_id") or ""),
+                }
+                av = (o.get("avatar_thumb") or o.get("avatar_medium")
+                      or o.get("avatar_larger") or {})
+                urls = (av.get("url_list") or []) if isinstance(av, dict) else []
+                enriched["avatar_url"] = urls[0] if urls else ""
+                if cur is None:
+                    hits[sec] = enriched
+                elif enriched["follower_count"] and not cur["follower_count"]:
+                    # 补粉丝数等丰富字段 (relation_label 出的无粉丝壳)
+                    for k, v in enriched.items():
+                        if v and not cur.get(k):
+                            cur[k] = v
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(body)
+    # 查询词命中的排前, 再按粉丝数降序
+    return sorted(hits.values(),
+                  key=lambda u: (-u["follower_count"], -u["live_status"]))
+
+
+def _is_antispam_shell(body: dict) -> bool:
+    nil = ((body.get("business_config") or {}).get("search_nil_info") or {})
+    return bool(nil.get("search_nil_type") in ("antispam_check", "hit_shark"))
+
+
+# ---- 对外主入口 ----
+def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
+    """协议通道搜索。返回 (candidates, note); 不可用/失败抛 RuntimeError 由上层回落。
+
+    candidates 为 SearchCandidate 兼容 dict 列表; note 为进度标注 ("protocol+...")。
+    """
+    root = _lab_root()
+    if root is None:
+        raise RuntimeError("lab 仓不存在")
+    files = _read_lab_files(root)
+    if files is None:
+        raise RuntimeError("lab 头族/罐文件缺失")
+
+    ok, reason = probe_available()
+    if not ok:
+        raise RuntimeError(f"oracle 不可达: {reason}")
+
+    sid = f"{int(time.time() * 1000)}7000000000000000000"
+    q = _common_q(query=keyword, count=count, offset=0, search_id=sid,
+                  search_channel="aweme_general", enter_from="search_page",
+                  is_global_rewrite=0, history_vid="", match_user_keyword=1,
+                  sort_type=0, publish_time=0, filter_type=0)
+    url = ("https://aweme.snssdk.com/aweme/v1/general/search/single/?"
+           + urllib.parse.urlencode(q))
+
+    # 最小双键罐 (§5.2 定论): 真值 install_id + sessionid
+    ck_pairs = [p.strip() for p in files["cookie"].strip().split(";") if "=" in p]
+    ck_map = {p.split("=", 1)[0]: p.split("=", 1)[1] for p in ck_pairs}
+    if "install_id" not in ck_map or "sessionid" not in ck_map:
+        raise RuntimeError("真罐缺 install_id/sessionid")
+    min_jar = f"install_id={ck_map['install_id']}\r\nsessionid={ck_map['sessionid']}"
+
+    heads = _sign(root, url, min_jar)
+    if not heads:
+        raise RuntimeError("oracle 签名失败 (超时/漂移)")
+
+    headers = dict(json.loads(files["headers"]))
+    headers["Cookie"] = files["cookie"].strip().replace("\r\n", "; ")
+    headers["User-Agent"] = ("com.ss.android.ugc.aweme/400601 (Linux; U; Android 11; "
+                             "zh_CN; Pixel 2 XL; Build/RP1A.201005.004.A1)")
+    headers.update(heads)
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S, context=CTX) as resp:
+        body = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    if body.get("status_code") != 0:
+        raise RuntimeError(f"协议搜索 sc={body.get('status_code')}")
+    if _is_antispam_shell(body):
+        raise RuntimeError("协议搜索命中 antispam/hit_shark 壳")
+    users = _extract_users(body)
+    if not users:
+        raise RuntimeError("协议搜索无用户结果")
+    return users, f"protocol (oracle 七头, {len(users)} 候选)"

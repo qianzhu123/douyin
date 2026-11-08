@@ -923,10 +923,24 @@ button:disabled {
 .live-monitor-panel { margin-top: 18px; }
 .lm-rooms { border: 1px solid #e3eef9; border-radius: 10px; overflow: hidden; margin-bottom: 12px; }
 .lm-room {
-  display: grid; grid-template-columns: 110px 64px 90px 1fr 88px;
+  display: grid; grid-template-columns: 110px 64px 90px 1fr 88px 64px;
   gap: 8px; padding: 7px 12px; font-size: 13px; align-items: center;
   border-bottom: 1px solid #eef4fb;
 }
+.lm-room .lm-room-ops { display: flex; justify-content: flex-end; }
+.lm-room .lm-remove-btn { padding: 3px 10px; font-size: 12px; }
+/* 开播提醒 toast (页面内, 全局铁律不用原生 alert) */
+#lm-toast-box {
+  position: fixed; right: 18px; top: 18px; z-index: 3000;
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+}
+.lm-toast {
+  background: #17324d; color: #fff; padding: 10px 16px; border-radius: 8px;
+  font-size: 13.5px; font-weight: 600; box-shadow: 0 6px 18px rgba(23,50,77,.25);
+  opacity: 0; transform: translateX(24px); transition: all .35s ease;
+  pointer-events: auto; cursor: pointer;
+}
+.lm-toast.show { opacity: 1; transform: translateX(0); }
 .lm-room:last-child { border-bottom: 0; }
 .lm-room.lm-head { background: #f4f8fd; font-weight: 700; color: #4a6580; font-size: 12.5px; }
 .lm-room .lm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #64839d; }
@@ -994,7 +1008,7 @@ button:disabled {
 }
 .lib-row {
   grid-template-columns: 44px minmax(0, 1fr) auto;
-  gap: 14px;
+  gap: 16px;
 }
 .lib-row.monitored {
   border-color: #a7d2f6;

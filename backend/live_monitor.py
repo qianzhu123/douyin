@@ -23,7 +23,10 @@ from .live_analysis import _http, common_q, _room_brief, _pick_token
 from .aweme_read import _req_direct_lab
 
 # 单房间两次 enter 最小间隔 (礼貌; 用户 interval 低于此值会被钳到该值)
-MIN_ROOM_INTERVAL_S = 60
+# 2026-11-08 用户反馈: 120s 默认太长, 改 30s 默认 / 15s 下限 (账户维度每轮
+# 先 profile 解析再 enter, 15s 对单目标=15s/次 profile + 15s/次 enter, 可接受)
+MIN_ROOM_INTERVAL_S = 15
+DEFAULT_INTERVAL_S = 30
 HISTORY_MAX = 360          # 每房间快照环 (默认 120s 间隔 = 12h)
 EVENTS_MAX = 200
 # sec_uid -> room_id 解析缓存时长 (主播重新开播频率低, 10 分钟够)
@@ -36,7 +39,7 @@ class LiveMonitor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
-        self._state: dict = {"running": False, "interval": 120,
+        self._state: dict = {"running": False, "interval": DEFAULT_INTERVAL_S,
                              "rooms": [], "started_at": None, "ended_at": None}
         # room_id -> {"label","last":brief,"history":deque,"last_tick":ts,"was_live":bool,"title":str,"viewers":int}
         self._rooms: dict[str, dict] = {}
@@ -44,7 +47,7 @@ class LiveMonitor:
         self._label: str = ""
 
     # ---- 对外 API ----
-    def start(self, rooms: list[dict], interval: int = 120,
+    def start(self, rooms: list[dict], interval: int = DEFAULT_INTERVAL_S,
               duration_minutes: int = 0, label: str = "") -> dict:
         """rooms: [{room_id, label?}] 或 [{sec_uid, label?}] (账户维度优先);
         duration_minutes=0 表示一直跑到 stop。"""
@@ -64,7 +67,7 @@ class LiveMonitor:
                                   "label": str(r.get("label") or rid)})
             if not clean:
                 return {"started": False, "reason": "no valid rooms"}
-            interval = max(MIN_ROOM_INTERVAL_S, int(interval or 120))
+            interval = max(MIN_ROOM_INTERVAL_S, int(interval or DEFAULT_INTERVAL_S))
             self._state = {"running": True, "interval": interval,
                            "rooms": clean, "started_at": time.time(),
                            "ended_at": None, "duration_minutes": duration_minutes,

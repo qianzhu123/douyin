@@ -742,13 +742,26 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
   // 不再有"全量开关/临时粘贴目标"。下播后该目标由后端自动关闭 (live_monitor._remove_locked)。
   const [status, setStatus] = React.useState(null); // 后端 /api/live-monitor/status
   const [busy, setBusy] = React.useState(false);
+  const [removingUid, setRemovingUid] = React.useState('');
   const [err, setErr] = React.useState('');
   const running = !!(status && status.running);
+  // 开播提醒去重: 只对"从未见过的开播"发通知 (2026-11-08 用户诉求)
+  const notifiedLive = React.useRef(new Set());
 
   const loadStatus = React.useCallback(async () => {
     try {
       const r = await fetch(`${API_BASE}/api/live-monitor/status`);
-      setStatus(await r.json());
+      const st = await r.json();
+      setStatus(st);
+      // 开播检测: was_live false→true 转变即提醒 (页面级通知, 无需系统权限申请逻辑)
+      for (const room of st.rooms || []) {
+        if (room.was_live && !notifiedLive.current.has(room.key)) {
+          notifiedLive.current.add(room.key);
+          try { notifyLiveStart(room); } catch { /* 通知失败不影响主流程 */ }
+        } else if (!room.was_live && notifiedLive.current.has(room.key)) {
+          notifiedLive.current.delete(room.key); // 下播重置, 再开播再提醒
+        }
+      }
     } catch { /* ignore */ }
   }, []);
 
@@ -764,6 +777,20 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
     try { await fetch(`${API_BASE}/api/live-monitor/stop`, { method: 'POST' }); await loadStatus(); }
     catch (e) { setErr(e.message); }
     finally { setBusy(false); }
+  };
+
+  // 行内移除 (2026-11-08 用户诉求: 不必开主播库就能摘单个目标)
+  const removeRoom = async (room) => {
+    if (!room.sec_uid) return;
+    setRemovingUid(room.sec_uid);
+    try {
+      await fetch(`${API_BASE}/api/live-monitor/remove`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_uid: room.sec_uid }),
+      });
+      await loadStatus();
+    } catch (e) { setErr(e.message); }
+    finally { setRemovingUid(''); }
   };
 
   const rooms = (status && status.rooms) || [];
@@ -794,15 +821,21 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
       {running && rooms.length > 0 && (
         <div className="lm-rooms">
           <div className="lm-room lm-head">
-            <span>主播</span><span>状态</span><span>观众</span><span>标题</span><span>最近快照</span>
+            <span>主播</span><span>状态</span><span>观众</span><span>标题</span><span>最近快照</span><span></span>
           </div>
           {rooms.map((r) => (
             <div key={r.key} className="lm-room">
               <span>{r.label}</span>
-              <span className={r.was_live ? 'lm-on' : 'lm-off'}>{r.was_live ? '直播中' : '解析中…'}</span>
+              <span className={r.was_live ? 'lm-on' : 'lm-off'}>{r.was_live ? '直播中' : '未开播'}</span>
               <span>{r.viewers != null ? r.viewers.toLocaleString() : '—'}</span>
               <span className="lm-title" title={r.title}>{r.title || '—'}</span>
               <span>{fmtT(r.last_tick)}</span>
+              <span className="lm-room-ops">
+                <button className="secondary lm-remove-btn" onClick={() => removeRoom(r)}
+                  disabled={removingUid === r.sec_uid} title="移出监控 (其余目标继续)">
+                  {removingUid === r.sec_uid ? '移出中…' : '移出'}
+                </button>
+              </span>
             </div>
           ))}
         </div>
@@ -823,6 +856,28 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
       )}
     </div>
   );
+}
+
+// 开播提醒 (2026-11-08): 页面内 toast + 系统通知 (已授权才用), 点通知聚焦页面
+function notifyLiveStart(room) {
+  const msg = `${room.label} 开播了${room.viewers != null ? ` (观众 ${room.viewers.toLocaleString()})` : ''}`;
+  try {
+    if (window.Notification && Notification.permission === 'granted') {
+      const n = new Notification('抖音开播提醒', { body: msg, tag: `live-${room.key}` });
+      n.onclick = () => { window.focus(); n.close(); };
+    }
+  } catch { /* 系统通知不可用 */ }
+  // 页面内 toast (全局铁律: 不用原生 alert)
+  try {
+    const box = document.getElementById('lm-toast-box')
+      || (() => { const d = document.createElement('div'); d.id = 'lm-toast-box'; document.body.appendChild(d); return d; })();
+    const t = document.createElement('div');
+    t.className = 'lm-toast';
+    t.textContent = `🔴 ${msg}`;
+    box.appendChild(t);
+    setTimeout(() => t.classList.add('show'), 30);
+    setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 400); }, 12000);
+  } catch { /* DOM 不可用 */ }
 }
 
 // ---- 扫码登录弹窗 (2026-11-08): 界面内显示二维码, 扫码后落 douyin_profile, 替代手动 login.bat ----
