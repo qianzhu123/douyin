@@ -198,12 +198,39 @@ def _common_q(**extra) -> dict:
 
 
 # ---- 响应解析: 全树扫 user 对象 (author 优先, sec_uid 去重) ----
+# display_info 粉丝文本: "粉丝: 4152.2万" / "粉丝: 1234" / "粉丝: 1.2亿"
+_FANS_RE = re.compile(r"^粉丝[::]\s*([\d.]+)(万|亿)?$")
+# 抖音号文本: "抖音号：9896719." (display_info 里兜底)
+_UID_RE = re.compile(r"^抖音号[::]\s*(.+)$")
+
+
+def _parse_wan(text: str) -> int:
+    """'4152.2万'/'1.2亿'/'1234' → int。"""
+    text = text.strip()
+    try:
+        if text.endswith("万"):
+            return int(float(text[:-1]) * 10000)
+        if text.endswith("亿"):
+            return int(float(text[:-1]) * 100000000)
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
 def _extract_users(body: dict) -> list[dict]:
     """递归收 (nickname+sec_uid) 对象。author 类 (带 follower_count) 优先排序。"""
     hits: dict[str, dict] = {}
 
     def walk(o: Any) -> None:
         if isinstance(o, dict):
+            # raw_data 是内嵌 JSON **字符串** (dynamic_patch.small_user 卡, 2026-11-08):
+            # 真正带粉丝数的 user_list 藏在里面, 必须解出来递归, 否则全树扫漏掉唯一粉丝源
+            rd = o.get("raw_data")
+            if isinstance(rd, str) and '"user_list"' in rd:
+                try:
+                    walk(json.loads(rd))
+                except Exception:
+                    pass
             sec = o.get("sec_uid")
             if sec and o.get("nickname"):
                 cur = hits.get(sec)
@@ -223,6 +250,14 @@ def _extract_users(body: dict) -> list[dict]:
                       or o.get("avatar_larger") or {})
                 urls = (av.get("url_list") or []) if isinstance(av, dict) else []
                 enriched["avatar_url"] = urls[0] if urls else ""
+                # display_info 粉丝数 (2026-11-08 实测: 接口已不给结构化 follower_count,
+                # 粉丝数藏在 display_info[].text 如 "粉丝: 4152.2万" → 解析回数值)
+                for di in (o.get("display_info") or []):
+                    if isinstance(di, dict):
+                        txt = str(di.get("text") or "")
+                        m = _FANS_RE.match(txt.strip())
+                        if m and not enriched["follower_count"]:
+                            enriched["follower_count"] = _parse_wan(m.group(1))
                 if cur is None:
                     hits[sec] = enriched
                 elif enriched["follower_count"] and not cur["follower_count"]:
