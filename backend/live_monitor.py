@@ -146,7 +146,10 @@ class LiveMonitor:
                 self._add_event("info", "全部目标已移出, 监控自动停止")
             else:
                 self._add_event("info", f"{removed['label']} 移出监控")
-            return {"removed": True, "running": self._state["running"]}
+        # 同步 users.json monitor 位 (2026-11-08): 面板移出/下播自动关闭都走这里,
+        # 库状态必须跟监控真实状态一致, 否则库显示"监控中"但实际已摘 (用户报的 bug)
+        _set_user_monitor(sec, False)
+        return {"removed": True, "running": self._state["running"]}
 
     def status(self) -> dict:
         with self._lock:
@@ -243,6 +246,8 @@ class LiveMonitor:
             self._state["running"] = False
             self._state["ended_at"] = time.time()
             self._add_event("info", "全部目标已下播, 监控自动停止")
+        # 下播自动关闭也同步 monitor 位 (2026-11-08): 库里不能残留"监控中"
+        threading.Thread(target=_set_user_monitor, args=(sec, False), daemon=True).start()
 
     def _loop(self) -> None:
         while True:
@@ -449,3 +454,15 @@ def _parse_viewers(value) -> int | None:
         return int(float(s))
     except ValueError:
         return None
+
+
+def _set_user_monitor(sec_uid: str, monitor: bool) -> None:
+    """users.json monitor 位同步 (失败绝不影响监控主循环)。"""
+    if not sec_uid:
+        return
+    try:
+        from .config import USERS_FILE
+        from .services import set_monitor_flag
+        set_monitor_flag(USERS_FILE, sec_uid, monitor)
+    except Exception:
+        pass

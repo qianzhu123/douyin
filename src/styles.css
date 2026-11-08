@@ -569,7 +569,7 @@ button:disabled {
 .candidate-row {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr) auto;
-  gap: 12px;
+  gap: 16px;
   align-items: center;
   border: 1px solid #dcecf8;
   border-radius: 8px;
@@ -978,6 +978,16 @@ button:disabled {
 .library-modal {
   width: min(720px, 100%);
 }
+/* 库内搜索结果区 (2026-11-08): 限高滚动, 与库列表区分 */
+.lib-cand-list {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px dashed #c9dff1;
+  border-radius: 8px;
+  background: #f6fbff;
+}
 /* ---- 扫码登录弹窗 (2026-11-08) ---- */
 .qr-login-body {
   display: flex;
@@ -1007,8 +1017,14 @@ button:disabled {
   border-radius: 50%;
 }
 .lib-row {
-  grid-template-columns: 44px minmax(0, 1fr) auto;
-  gap: 16px;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 20px;
+}
+/* 库行内文字块自身也拉开: 名称与监控状态上下留白 */
+.lib-row > div {
+  display: grid;
+  gap: 4px;
+  align-content: center;
 }
 .lib-row.monitored {
   border-color: #a7d2f6;
@@ -1039,6 +1055,19 @@ button:disabled {
 }
 .lib-actions .icon-button.danger:hover {
   background: #faddd7;
+}
+/* 无头像占位 (2026-11-08): 存量条目 avatar_url 为空时显示首字, 不出破图 */
+.avatar-fallback {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #d7ecff;
+  color: #1b6fc2;
+  font-weight: 750;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
 }
 .live-pill-inline {
   color: #1a9c5b;

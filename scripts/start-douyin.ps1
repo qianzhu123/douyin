@@ -249,5 +249,6 @@ if ($frontendAlready) {
     }
 }
 
-Start-Sleep -Seconds 1
-Start-Process $Url | Out-Null
+# 2026-11-08 用户定论: 启动/重启脚本不再自动打开界面 — 只把服务拉起就完。
+# 界面由用户自己开 http://127.0.0.1:5175 (日常双击 exe/改代码重启都不应弹浏览器)。
+Write-Host "[ok] 全部服务就绪: $Url (不自动打开浏览器)"

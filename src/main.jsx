@@ -737,7 +737,7 @@ function FansClubPanel({ apiRef }) {
 // ---- 直播实时监控 (阶段二: PC 直连快照轮询, 零浏览器; 嵌在账户列表面板内) ----
 // 目标双维度: sec_uid 账户维度 (每轮自动解析当前场次 room_id, 重新开播也跟得住)
 //            room_id 房间维度 (feed 在播房/手动加; 下播后失效)
-function LiveMonitorPanel({ embedded, onOpenLibrary }) {
+function LiveMonitorPanel({ embedded }) {
   // 主播库形态 (2026-11-07 用户定论): 目标从主播库弹窗勾选「加入监控」, 加入即监控;
   // 不再有"全量开关/临时粘贴目标"。下播后该目标由后端自动关闭 (live_monitor._remove_locked)。
   const [status, setStatus] = React.useState(null); // 后端 /api/live-monitor/status
@@ -767,10 +767,10 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
 
   React.useEffect(() => { loadStatus(); }, [loadStatus]);
   React.useEffect(() => {
-    // 轮询状态: 运行中 5s, 空闲 30s
-    const t = setInterval(loadStatus, running ? 5000 : 30000);
+    // 轮询状态: 统一 5s (2026-11-08: 空闲 30s 太钝, 加入目标后要等 30s 才显示监控中)
+    const t = setInterval(loadStatus, 5000);
     return () => clearInterval(t);
-  }, [running, loadStatus]);
+  }, [loadStatus]);
 
   const stopMonitor = async () => {
     setBusy(true);
@@ -808,9 +808,6 @@ function LiveMonitorPanel({ embedded, onOpenLibrary }) {
             : '空闲 · 从主播库加入主播后自动开始轮询（零浏览器直连）'}
         </span>
         <span className="lm-spacer" />
-        <button className="secondary" onClick={onOpenLibrary} title="打开主播库：加入 / 移出监控，查看详情">
-          <Search size={16} /> 主播库
-        </button>
         {running && (
           <button onClick={stopMonitor} disabled={busy}>全部停止</button>
         )}
@@ -972,107 +969,6 @@ function QrLoginModal({ onClose }) {
   );
 }
 
-// ---- 添加账户弹窗 (旧逻辑原样回归, 2026-11-07): 名称搜索→候选列表→添加入库 ----
-// 与主播库解耦: 添加只入库 (users.json), 默认不进监控 — 是否监控由主播库里的按钮决定。
-function AddAccountModal({ busy, setBusy, setMessage, onClose, onAdded }) {
-  const [keyword, setKeyword] = React.useState('');
-  const [candidates, setCandidates] = React.useState([]);
-
-  async function postJson(path, body = {}) {
-    let response;
-    try {
-      response = await fetch(`${API_BASE}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      throw new Error('无法连接后端服务，请确认 127.0.0.1:8000 正在运行。');
-    }
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '请求失败');
-    return data;
-  }
-
-  async function searchUsers() {
-    if (!keyword.trim()) {
-      setMessage('请输入需要添加的账户名称');
-      return;
-    }
-    setBusy(true);
-    try {
-      const data = await postJson('/api/users/search', { keyword: keyword.trim() });
-      setCandidates(data.candidates || []);
-      setMessage(`找到 ${data.candidates?.length || 0} 个候选用户`);
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addCandidate(candidate) {
-    setBusy(true);
-    try {
-      await postJson('/api/users', {
-        ...candidate,
-        label: candidate.nickname || candidate.unique_id || keyword,
-        monitor: false,
-      });
-      setMessage('账户已保存到 data/users.json (未加入监控)');
-      await onAdded();
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-      <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-head">
-          <div>
-            <h2>添加账户</h2>
-            <p>搜索名称后添加入库；是否监控请在主播库里用「加入监控」控制</p>
-          </div>
-          <button className="secondary" onClick={onClose}>关闭</button>
-        </div>
-        <div className="search-form">
-          <input
-            value={keyword}
-            onChange={(event) => setKeyword(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter') searchUsers(); }}
-            placeholder="输入账户名称"
-          />
-          <button onClick={searchUsers} disabled={busy}>
-            <Search size={16} /> 搜索
-          </button>
-        </div>
-        <div className="candidate-list">
-          {candidates.map((candidate) => (
-            <article className="candidate-row" key={candidate.sec_uid}>
-              <img src={candidate.avatar_url || ''} alt="" />
-              <div>
-                <strong>{candidate.nickname || '未命名用户'}</strong>
-                <small>{candidate.unique_id ? `抖音号：${candidate.unique_id}` : candidate.sec_uid.slice(0, 18)}</small>
-                <span>
-                  粉丝 {formatNumber(candidate.follower_count)} · 关注 {formatNumber(candidate.following_count)} · 获赞 {formatNumber(candidate.total_favorited)}
-                  {candidate.ip_location ? ` · ${candidate.ip_location}` : ''}
-                </span>
-              </div>
-              <button onClick={() => addCandidate(candidate)} disabled={busy}>
-                <Plus size={16} /> 添加
-              </button>
-            </article>
-          ))}
-          {candidates.length === 0 && <div className="empty">搜索结果会显示在这里</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ---- 主播库弹窗 (2026-11-07): 替代旧账户大表格 ----
 // 库 = users.json; 每行一个主播: 监控开关 (加入/移出即生效) / 详情按钮 / 删除。
 // 「详情」弹小窗展示最近一次检测结果 (profile_cache), 可手动刷基本。
@@ -1080,8 +976,11 @@ function StreamerLibraryModal({ onClose, onChanged }) {
   const [users, setUsers] = React.useState([]);
   const [busyUid, setBusyUid] = React.useState('');
   const [err, setErr] = React.useState('');
-  const [manual, setManual] = React.useState(''); // 主页链接/短链/sec_uid/抖音号/名称
-  const [addBusy, setAddBusy] = React.useState(false);
+  // 库内搜索添加 (2026-11-08 用户定论: 添加=展示搜索到的所有用户选择添加, 非粘贴解析)
+  const [keyword, setKeyword] = React.useState('');
+  const [candidates, setCandidates] = React.useState([]);
+  const [searchBusy, setSearchBusy] = React.useState(false);
+  const [addingSec, setAddingSec] = React.useState(''); // 正在入库的候选
   const [detailFor, setDetailFor] = React.useState(null); // {row, loading, error}
   const [deleteFor, setDeleteFor] = React.useState(null);
   const monitorCount = users.filter((u) => u.monitor).length;
@@ -1095,6 +994,12 @@ function StreamerLibraryModal({ onClose, onChanged }) {
   }, []);
 
   React.useEffect(() => { load(); }, [load]);
+  // 弹窗打开期间 5s 轮询 (2026-11-08 用户反馈: 加入/移出必须 F5 才变 —
+  // 状态可能来自监控面板移出/下播自动关闭, 不止自己的操作, 必须轮询对齐)
+  React.useEffect(() => {
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [load]);
 
   // 加入 / 移出监控: monitor 位落库 + live-monitor add/remove 动态挂摘 (一条龙)
   async function toggleMonitor(u) {
@@ -1116,34 +1021,41 @@ function StreamerLibraryModal({ onClose, onChanged }) {
     finally { setBusyUid(''); }
   }
 
-  // 粘贴解析入库 (复用 resolve-link 三段解析); 只入库不自动监控 — 与「添加账户」同语义
-  async function addManual() {
-    const v = manual.trim();
-    if (!v) { setErr('请输入主页链接 / 短链 / sec_uid / 抖音号 / 名称'); return; }
-    setAddBusy(true); setErr('');
+  // 库内搜索 (协议通道首选, 后端自动回落浏览器链); 候选列表点「添加」入库
+  async function searchCandidates() {
+    const kw = keyword.trim();
+    if (!kw) { setErr('请输入主播名称'); return; }
+    setSearchBusy(true); setErr('');
     try {
-      const r = await fetch(`${API_BASE}/api/users/resolve-link`, {
+      const r = await fetch(`${API_BASE}/api/users/search`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword: v }),
+        body: JSON.stringify({ keyword: kw }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : '解析失败');
-      if (d.kind === 'none') throw new Error('未解析到账户 — 换主页链接试试');
-      const c = d.kind === 'sec_uid'
-        ? { sec_uid: d.sec_uid, nickname: '', unique_id: '' }
-        : d.candidate;
-      const label = c.nickname || c.unique_id || c.sec_uid.slice(0, 12);
-      const ar = await fetch(`${API_BASE}/api/users`, {
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : '搜索失败');
+      setCandidates(d.candidates || []);
+    } catch (e) { setErr(e.message); }
+    finally { setSearchBusy(false); }
+  }
+
+  // 候选入库: 已在库里的显示「已入库」禁点; 只入库不自动监控
+  async function addCandidate(candidate) {
+    setAddingSec(candidate.sec_uid); setErr('');
+    try {
+      const r = await fetch(`${API_BASE}/api/users`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label, sec_uid: c.sec_uid, homepage_url: c.homepage_url || `https://www.douyin.com/user/${c.sec_uid}`, nickname: c.nickname || '', monitor: false }),
+        body: JSON.stringify({
+          ...candidate,
+          label: candidate.nickname || candidate.unique_id || keyword,
+          monitor: false,
+        }),
       });
-      const ad = await ar.json();
-      if (!ar.ok) throw new Error(ad.detail?.error || ad.detail || '入库失败');
-      setManual('');
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail?.error || d.detail || '入库失败');
       await load();
       if (onChanged) await onChanged();
     } catch (e) { setErr(e.message); }
-    finally { setAddBusy(false); }
+    finally { setAddingSec(''); }
   }
 
   // 详情: 拉该主播的检测结果 (先读库缓存, 再手动 /api/query 刷新)
@@ -1199,20 +1111,47 @@ function StreamerLibraryModal({ onClose, onChanged }) {
         {err && <div className="notice">{err}</div>}
 
         <div className="lm-add-row">
-          <input className="lm-add-input" value={manual}
-            onChange={(e) => setManual(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') addManual(); }}
-            placeholder="添加主播：主页链接 / 短链 / sec_uid，回车解析入库（名称搜索请用顶栏「添加账户」）"
+          <input className="lm-add-input" value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') searchCandidates(); }}
+            placeholder="搜索主播名称，从结果中选添加"
           />
-          <button className="secondary" onClick={addManual} disabled={addBusy}>
-            <Plus size={16} /> {addBusy ? '解析中…' : '添加'}
+          <button className="secondary" onClick={searchCandidates} disabled={searchBusy}>
+            <Search size={16} /> {searchBusy ? '搜索中…' : '搜索'}
           </button>
         </div>
+
+        {candidates.length > 0 && (
+          <div className="candidate-list lib-cand-list">
+            {candidates.map((candidate) => {
+              const inLib = users.some((u) => u.sec_uid === candidate.sec_uid);
+              return (
+                <article className="candidate-row" key={candidate.sec_uid}>
+                  <img src={candidate.avatar_url || ''} alt="" />
+                  <div>
+                    <strong>{candidate.nickname || '未命名用户'}</strong>
+                    <small>{candidate.unique_id ? `抖音号：${candidate.unique_id}` : candidate.sec_uid.slice(0, 18)}</small>
+                    <span>
+                      粉丝 {formatNumber(candidate.follower_count)}
+                      {candidate.ip_location ? ` · ${candidate.ip_location}` : ''}
+                    </span>
+                  </div>
+                  <button className="secondary" onClick={() => addCandidate(candidate)}
+                    disabled={inLib || addingSec === candidate.sec_uid}>
+                    {inLib ? '已入库' : (addingSec === candidate.sec_uid ? '添加中…' : (<><Plus size={16} /> 添加</>))}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )}
 
         <div className="candidate-list">
           {users.map((u) => (
             <article className={`candidate-row lib-row${u.monitor ? ' monitored' : ''}`} key={u.sec_uid}>
-              <img src={u.avatar_url || ''} alt="" />
+              {u.avatar_url
+                ? <img src={u.avatar_url} alt="" />
+                : <span className="avatar-fallback">{(u.label || u.nickname || '?').slice(0, 1)}</span>}
               <div>
                 <strong>{u.label || u.nickname || '未备注'}</strong>
                 <small title={u.sec_uid}>{u.monitor ? '监控中' : '未监控'}</small>
@@ -1242,7 +1181,7 @@ function StreamerLibraryModal({ onClose, onChanged }) {
               </div>
             </article>
           ))}
-          {users.length === 0 && <div className="empty">主播库为空 — 用上方输入框或顶栏「添加账户」添加主播</div>}
+          {users.length === 0 && <div className="empty">主播库为空 — 用上方搜索添加主播</div>}
         </div>
       </div>
 
@@ -1591,9 +1530,7 @@ function App() {
   const [downloadJobs, setDownloadJobs] = React.useState([]);
   // 账户大表格已撤 (2026-11-07): 库操作全在主播库弹窗; 这两个状态是顶栏检测按钮与弹窗刷新共用
   const [libraryOpen, setLibraryOpen] = React.useState(false);
-  // 旧「添加账户」弹窗回归 (2026-11-07): 名称搜索→候选→添加, 新账户默认不进监控
-  const [addOpen, setAddOpen] = React.useState(false);
-  // 扫码登录弹窗 (2026-11-08): 搜索登录墙的界面内解法
+  // 扫码登录弹窗 (2026-11-08): 顶栏按钮已撤 (协议搜索不依赖登录态), 保留状态兜底
   const [qrLoginOpen, setQrLoginOpen] = React.useState(false);
   const [message, setMessage] = React.useState('');
   const [busy, setBusy] = React.useState(false);
@@ -2049,12 +1986,6 @@ function App() {
             <button className="secondary" onClick={() => setLibraryOpen(true)}>
               主播库
             </button>
-            <button onClick={() => setAddOpen(true)} title="名称搜索→候选→添加入库">
-              <Plus size={16} /> 添加账户
-            </button>
-            <button className="secondary" onClick={() => setQrLoginOpen(true)} title="搜索报登录墙/验证码时, 扫码重登">
-              扫码登录
-            </button>
             <button
               onClick={() => detectTargets([])}
               disabled={detectingUids.size > 0}
@@ -2089,7 +2020,7 @@ function App() {
             </div>
           </div>
 
-          <LiveMonitorPanel embedded onOpenLibrary={() => setLibraryOpen(true)} />
+          <LiveMonitorPanel embedded />
         </section>
 
         <FansClubPanel apiRef={fansclubApi} />
@@ -2250,23 +2181,9 @@ function App() {
         />
       )}
 
-      {addOpen && (
-        <AddAccountModal
-          busy={busy}
-          setBusy={setBusy}
-          setMessage={setMessage}
-          onClose={() => setAddOpen(false)}
-          onAdded={async () => {
-            await loadAccounts();
-            setAddOpen(false);
-          }}
-        />
-      )}
-
       {qrLoginOpen && (
         <QrLoginModal onClose={() => setQrLoginOpen(false)} />
       )}
-
       {deleteTarget && (
         <DeleteAccountModal
           row={deleteTarget}

@@ -412,6 +412,10 @@ def _save_overview_cache(label: str, overview: dict) -> None:
     同时写 per-date 亲密度归档 (days.{YYYYMMDD}.{anchor_id} = intimacy):
     昨日亲密度列的数据源 — 凌晨 0 点自动检测到的 intimacy 即"昨天结束时的值"。
     只存数字不存整份 overview (防体积膨胀), 保留最近 7 天。
+
+    2026-11-08 修 bug: 当天归档只落第一次 — 凌晨 0:00 自动检测是全天最早的一次,
+    之后的白天检测 (手动/签到后自动/全量) 一律不覆写, 否则 yesterdayKey 第二天
+    读到的是昨晚最新累计值而不是凌晨快照 (用户实测: 昨日列显示成总亲密度)。
     """
     try:
         data: dict = {}
@@ -425,8 +429,10 @@ def _save_overview_cache(label: str, overview: dict) -> None:
             # 旧结构 days 可能整体被覆盖: 从文件里恢复该 label 的历史再合并今天
             prev_days = (data.get(label) or {}).get("days") or {}
             days = {**prev_days, **days}
-            days[today_str] = {str(c.get("anchor_id")): (c.get("intimacy") or 0)
-                               for c in (overview.get("clubs") or [])}
+            if today_str not in days:
+                # 只在当天尚无归档时写入 (首次=凌晨自动检测, 即昨日结束值)
+                days[today_str] = {str(c.get("anchor_id")): (c.get("intimacy") or 0)
+                                   for c in (overview.get("clubs") or [])}
             # 只留最近 7 天 (按日期字符串排序即时间序, YYYYMMDD 字典序=时间序)
             overview["days"] = dict(sorted(days.items())[-7:])
         data[label] = overview
