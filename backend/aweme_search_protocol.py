@@ -22,6 +22,10 @@
   恒带完整资料 → 递归扫全树收 (nickname+sec_uid) 对象, sec_uid 去重,
   author.follower_count 可信; relation_label.user_list 无粉丝数作次选。
 纪律: 只读 GET; oracle 调用 5s 超时即回落; 真机不在不重试不拖时。
+
+⚠️ 2026-11-09 用户决定: 协议通道暂时禁用 (CHANNEL_ENABLED = False),
+搜索回落浏览器登录链 (douyin_profile); 待另一会话完成 unidbg 离线签名
+oracle (摆脱真机依赖) 后再改回 True。
 """
 from __future__ import annotations
 
@@ -35,6 +39,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+# ---- 通道总开关 (2026-11-09 用户决定暂时禁用协议通道, 走浏览器登录链) ----
+CHANNEL_ENABLED = False
 
 # ---- lab 仓资源定位 (配置化, 找不到即通道不可用 → 静默回落) ----
 _LAB_ROOTS = [
@@ -291,6 +298,8 @@ def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
     root = _lab_root()
     if root is None:
         raise RuntimeError("lab 仓不存在")
+    if not CHANNEL_ENABLED:
+        raise RuntimeError("协议通道已禁用 (走浏览器登录链)")
     files = _read_lab_files(root)
     if files is None:
         raise RuntimeError("lab 头族/罐文件缺失")

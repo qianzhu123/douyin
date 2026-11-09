@@ -976,8 +976,9 @@ function QrLoginModal({ onClose }) {
 }
 
 // ---- 搜索弹窗 (2026-11-09 用户定论: 搜索从主播库拆出单独展示) ----
-// 输入名称 → 协议通道搜索 → 候选列表逐个「添加到主播库」(已在库=已入库禁点)。
-// 添加成功只入库不监控; 监控仍只在主播库里驱动。
+// 双通道 (2026-11-09): 协议通道 (快, 需真机抖音; 当前禁用待 unidbg) /
+// 浏览器登录通道 (需 douyin_profile 有登录态)。搜索失败若是登录态丢失,
+// 弹窗内给「扫码登录」入口 (QrLoginModal 注入 douyin_profile, 搜链立即可用)。
 function StreamerSearchModal({ onClose, onChanged }) {
   const [users, setUsers] = React.useState([]);
   const [keyword, setKeyword] = React.useState('');
@@ -985,6 +986,8 @@ function StreamerSearchModal({ onClose, onChanged }) {
   const [searchBusy, setSearchBusy] = React.useState(false);
   const [addingSec, setAddingSec] = React.useState('');
   const [err, setErr] = React.useState('');
+  // 登录态丢失时弹窗内直接给扫码入口 (QrLoginModal 嵌套在搜索弹窗上层)
+  const [qrOpen, setQrOpen] = React.useState(false);
 
   // 已入库候选「已入库」态要跟着库走: 打开期间 5s 轮询
   const load = React.useCallback(async () => {
@@ -1052,7 +1055,18 @@ function StreamerSearchModal({ onClose, onChanged }) {
           <button className="secondary" onClick={onClose}>关闭</button>
         </div>
 
-        {err && <div className="notice">{err}</div>}
+        {err && (
+          <div className="notice">
+            {err}
+            {/登录|验证码|captcha|风控/i.test(err) && (
+              <div style={{ marginTop: 8 }}>
+                <button className="secondary" onClick={() => setQrOpen(true)}>
+                  扫码登录后重试
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="lm-add-row">
           <input className="lm-add-input" value={keyword}
@@ -1092,6 +1106,10 @@ function StreamerSearchModal({ onClose, onChanged }) {
         )}
         {candidates.length === 0 && !searchBusy && (
           <div className="empty">输入名称后点「搜索」，候选会显示在这里</div>
+        )}
+
+        {qrOpen && (
+          <QrLoginModal onClose={() => setQrOpen(false)} />
         )}
       </div>
     </div>
