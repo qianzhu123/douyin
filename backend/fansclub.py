@@ -200,7 +200,14 @@ def account_overview(label: str, token: str) -> dict:
         clubs.append(row)
         time.sleep(0.25)
     clubs.sort(key=lambda r: (-(r["level"] or 0), -(r["intimacy"] or 0)))
-    return {"label": label, "ok": True, "clubs": clubs,
+    # days 亲密度归档随响应带回 (2026-11-09): 前端检测后整体覆盖 overview,
+    # 不带 days 会把前端缓存的历史归档冲掉 → 昨日亲密度列变 '—'
+    try:
+        cached = load_overview_cache().get(label) or {}
+        days = cached.get("days") or {}
+    except Exception:
+        days = {}
+    return {"label": label, "ok": True, "clubs": clubs, "days": days,
             "signed_count": sum(1 for c in clubs if c["signed"])}
 
 
