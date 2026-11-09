@@ -23,9 +23,9 @@
   author.follower_count 可信; relation_label.user_list 无粉丝数作次选。
 纪律: 只读 GET; oracle 调用 5s 超时即回落; 真机不在不重试不拖时。
 
-⚠️ 2026-11-09 用户决定: 协议通道暂时禁用 (CHANNEL_ENABLED = False),
-搜索回落浏览器登录链 (douyin_profile); 待另一会话完成 unidbg 离线签名
-oracle (摆脱真机依赖) 后再改回 True。
+⚠️ 2026-11-09: 短暂禁用后已恢复 (用户辅助真机调试, 设备 oracle 为交付基线)。
+unidbg 离线签名 = 已归档负结果 (E17b: 工作队列会话随机态不可伪造),
+后续路线 = 快照移植 (state snapshot transplant, 未试)。
 """
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# ---- 通道总开关 (2026-11-09 用户决定暂时禁用协议通道, 走浏览器登录链) ----
-CHANNEL_ENABLED = False
+# ---- 通道总开关 (2026-11-09 恢复 True: 设备 oracle 交付基线; 快照移植成功后再议离线) ----
+CHANNEL_ENABLED = True
 
 # ---- lab 仓资源定位 (配置化, 找不到即通道不可用 → 静默回落) ----
 _LAB_ROOTS = [
