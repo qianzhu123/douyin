@@ -359,14 +359,8 @@ def _do_sign(label: str, token: str) -> None:
                  signed_anchors=signed_anchors,
                  finished_at=time.time())
     state["log"].append(f"完成: 签 {ok} / 跳过 {skip} / 失败 {fail}")
-    # 签到完成 → 自动检测该账户并落盘 (状态列/今日亲密度直接拿到签到后真值;
-    # 之前只签不检, 非当前 tab 的账户表格永远停在签到前, 2026-11-07 用户定论: 签到完必须检测)
-    try:
-        ov = account_overview(label, token)
-        if ov.get("ok"):
-            _save_overview_cache(label, ov)
-    except Exception:
-        pass  # 检测失败不影响签到结果
+    # 2026-11-09 用户澄清: 签到完不要自动检测 (用户否认说过"签到完必须检测",
+    # 此前自动检测是误记) — 一键签到只做签到; 状态要刷新由用户自己点检测。
 
 
 def start_sign(label: str, token: str) -> dict:

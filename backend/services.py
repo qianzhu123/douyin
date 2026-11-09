@@ -137,86 +137,97 @@ class MonitorService:
                 return candidates[:12]
 
         payload: dict[str, Any] | None = None
-        async with async_playwright() as playwright:
-            # CDP 优先 (2026-11-05, 同 live_room 收编): 复用常驻 Chrome 9222 免冷启;
-            # CDP 不可达才冷启 chromium。探测完只关 page, 常驻浏览器绝不杀。
-            browser = None
-            owns_browser = False
-            context = None
-            if self._cdp_alive():
-                try:
-                    browser = await playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
-                    context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                except Exception:
-                    browser = None
-            if browser is None:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
-                owns_browser = True
-                context = await browser.new_context(
-                    viewport={"width": 1600, "height": 1000},
-                    user_agent=self.module.UA,
-                )
-            page = await context.new_page()
-            try:
-                await page.set_viewport_size({"width": 1600, "height": 1000})
-            except Exception:
-                pass
-            response_seen = asyncio.Event()
-
-            async def capture_response(response) -> None:
-                nonlocal payload
-                url = response.url
-                if "/aweme/v1/web/discover/search/" not in url or "search_channel=aweme_user_web" not in url:
-                    return
-                try:
-                    payload = await response.json()
-                    response_seen.set()
-                except Exception:
-                    return
-
-            page.on("response", lambda response: asyncio.create_task(capture_response(response)))
-
-            try:
-                try:
-                    await page.goto(
-                        f"https://www.douyin.com/search/{quote(keyword)}?type=user",
-                        wait_until="domcontentloaded",
-                        timeout=30000,
+        try:
+            async with async_playwright() as playwright:
+                # CDP 优先 (2026-11-05, 同 live_room 收编): 复用常驻 Chrome 9222 免冷启;
+                # CDP 不可达才冷启 chromium。探测完只关 page, 常驻浏览器绝不杀。
+                browser = None
+                owns_browser = False
+                context = None
+                if self._cdp_alive():
+                    try:
+                        browser = await playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                    except Exception:
+                        browser = None
+                if browser is None:
+                    browser = await playwright.chromium.launch(
+                        headless=True,
+                        args=["--disable-blink-features=AutomationControlled"],
                     )
-                    await asyncio.wait_for(response_seen.wait(), timeout=25)
-                except asyncio.TimeoutError:
-                    await page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=30000)
-                    await page.locator("input[placeholder*='搜索']").first.fill(keyword, timeout=12000)
-                    await page.keyboard.press("Enter")
-                    await page.wait_for_timeout(3000)
-                    try:
-                        await page.get_by_text("用户", exact=True).click(timeout=10000)
-                    except PlaywrightTimeoutError:
-                        pass
-                    try:
-                        await asyncio.wait_for(response_seen.wait(), timeout=20)
-                    except asyncio.TimeoutError:
-                        raise RuntimeError("Timed out waiting for Douyin user search response.")
-            finally:
+                    owns_browser = True
+                    context = await browser.new_context(
+                        viewport={"width": 1600, "height": 1000},
+                        user_agent=self.module.UA,
+                    )
+                page = await context.new_page()
                 try:
-                    await page.close()
+                    await page.set_viewport_size({"width": 1600, "height": 1000})
                 except Exception:
                     pass
-                if owns_browser:
+                response_seen = asyncio.Event()
+
+                async def capture_response(response) -> None:
+                    nonlocal payload
+                    url = response.url
+                    if "/aweme/v1/web/discover/search/" not in url or "search_channel=aweme_user_web" not in url:
+                        return
                     try:
-                        await context.close()
+                        payload = await response.json()
+                        response_seen.set()
+                    except Exception:
+                        return
+
+                page.on("response", lambda response: asyncio.create_task(capture_response(response)))
+
+                try:
+                    try:
+                        await page.goto(
+                            f"https://www.douyin.com/search/{quote(keyword)}?type=user",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await asyncio.wait_for(response_seen.wait(), timeout=25)
+                    except asyncio.TimeoutError:
+                        await page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=30000)
+                        await page.locator("input[placeholder*='搜索']").first.fill(keyword, timeout=12000)
+                        await page.keyboard.press("Enter")
+                        await page.wait_for_timeout(3000)
+                        try:
+                            await page.get_by_text("用户", exact=True).click(timeout=10000)
+                        except PlaywrightTimeoutError:
+                            pass
+                        try:
+                            await asyncio.wait_for(response_seen.wait(), timeout=20)
+                        except asyncio.TimeoutError:
+                            raise RuntimeError("Timed out waiting for Douyin user search response.")
+                finally:
+                    try:
+                        await page.close()
                     except Exception:
                         pass
-                    try:
-                        await browser.close()
-                    except Exception:
-                        pass
+                    if owns_browser:
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
+                        try:
+                            await browser.close()
+                        except Exception:
+                            pass
+        except Exception as exc:
+            # 手搓浏览器链任何异常 (输入框超时/页面导航失败) → 可读错误,
+            # 不让裸 playwright TimeoutError 冒泡成前端 "Failed to fetch"
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(f"浏览器搜索失败: {type(exc).__name__}: {str(exc)[:120]}") from exc
 
         if not payload:
-            return []
+            # 全链失败给可读错误 (2026-11-09): 协议通道离线+浏览器链被风控时,
+            # 原样抛 playwright TimeoutError 前端只见 "Failed to fetch" 没法排查
+            raise RuntimeError(
+                "搜索不可用: 协议通道离线 (真机抖音未运行) 且浏览器链无结果 "
+                "(douyin.com 未返回搜索响应, 可能登录墙/风控)")
         candidates = parse_search_candidates(payload)
         return candidates[:12]
 
