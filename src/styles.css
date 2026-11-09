@@ -1020,8 +1020,9 @@ button:disabled {
   grid-template-columns: 48px minmax(0, 1fr) auto;
   gap: 20px;
 }
-/* 库行内文字块自身也拉开: 名称与监控状态上下留白 */
-.lib-row > div {
+/* 库行内文字块自身也拉开: 名称与监控状态上下留白
+   ⚠️ 必须 :not(.lib-actions) — 否则 grid 覆盖 .lib-actions 的 flex, 按钮竖排 (2026-11-09) */
+.lib-row > div:not(.lib-actions) {
   display: grid;
   gap: 4px;
   align-content: center;
