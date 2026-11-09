@@ -538,14 +538,20 @@ function FansClubPanel({ apiRef }) {
     const g = (c.intimacy || 0) - b;
     return g > 0 ? `+${g}` : '0';
   };
-  // 昨日亲密度: 凌晨 0 点自动检测的归档 (overview.days[昨日YYYYMMDD][anchor_id] = intimacy)。
-  // 北京日期口径与 todayKey 相同 (+8h); 昨天无归档 (新账户/后端当天没跑) → '—' (有 title 说明, 不误导)
-  const yesterdayKey = new Date(Date.now() - 16 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+  // 昨日亲密度 (2026-11-09 用户定论: 语义=昨天**获得**的增量, 不是昨晚总值):
+  // 增量 = 昨日快照 − 前日快照 (两个归档都在才有; 缺前日=账户较新, 显示 '—')
+  const dayKey = (offsetDays) => new Date(Date.now() - offsetDays * 24 * 3600 * 1000)
+    .toISOString().slice(0, 10).replace(/-/g, ''); // 本机=北京时区, now-16h 即北京昨天
+  const yesterdayKey = dayKey(1);
+  const dayBeforeKey = dayKey(2);
   const yIntimacyFor = (c) => {
     const snap = overview?.days?.[yesterdayKey];
     if (!snap) return null;
     const v = snap[c.anchor_id];
-    return v == null ? null : v;
+    if (v == null) return null;
+    const prev = (overview?.days?.[dayBeforeKey] || {})[c.anchor_id];
+    if (prev == null) return null; // 无前日基准算不出增量
+    return v - prev;
   };
   const checking = loadingLabel === selected; // 只有当前账户自己在检查才算
   // 全量检查时当前账户是否正在被检查 (tab 上有橙色呼吸点, 但表格不打断)
@@ -626,7 +632,7 @@ function FansClubPanel({ apiRef }) {
       {!checking && clubs.length > 0 && (
         <div className={`fansclub-table${checking ? ' checking' : ''}`}>
           <div className="fansclub-row fansclub-header">
-            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span title="昨天结束时的亲密度 (来自每日凌晨 0 点自动检测的归档)">昨日亲密度</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
+            <span>主播</span><span>等级</span><span>勋章</span><span>连签</span><span>状态</span><span>上次签到</span><span>上次检测</span><span title="昨天一天获得的亲密度 (每日凌晨自动检测归档差值)">昨日亲密度</span><span>今日亲密度</span><span>亲密度</span><span>距下一级</span><span>入团</span><span>操作</span>
           </div>
           {clubs.map((c) => {
             const noCircle = c.has_join_circle === false;
@@ -666,7 +672,7 @@ function FansClubPanel({ apiRef }) {
                       {checkedAt ? fmtDayTime(checkedAt) : '—'}
                     </span>
                     <span className="y-intimacy"
-                      title={yIntimacyFor(c) != null ? '昨天结束时的亲密度 (凌晨0点自动检测归档)' : '昨日无归档 (后端凌晨未检测或账户较新)'}>
+                      title={yIntimacyFor(c) != null ? '昨天获得的亲密度 (昨日快照 − 前日快照)' : '昨日无增量数据 (归档不足两天或账户较新)'}>
                       {yIntimacyFor(c) != null ? yIntimacyFor(c).toLocaleString() : '—'}
                     </span>
                     <span className={todayGainFor(c) && todayGainFor(c) !== '0' ? 'today-gain' : 'muted'}
