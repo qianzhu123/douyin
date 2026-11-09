@@ -1010,7 +1010,12 @@ function StreamerSearchModal({ onClose, onChanged }) {
         body: JSON.stringify({ keyword: kw }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : '搜索失败');
+      // detail 可能是 string 或 {error, progress}: 透传后端可读错误, 别吞成'搜索失败'
+      if (!r.ok) {
+        const msg = typeof d.detail === 'string' ? d.detail
+          : (d.detail?.error || d.error || '搜索失败');
+        throw new Error(msg);
+      }
       setCandidates(d.candidates || []);
     } catch (e) { setErr(e.message); }
     finally { setSearchBusy(false); }
