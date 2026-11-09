@@ -540,8 +540,11 @@ function FansClubPanel({ apiRef }) {
   };
   // 昨日亲密度 (2026-11-09 用户定论: 语义=昨天**获得**的增量, 不是昨晚总值):
   // 增量 = 昨日快照 − 前日快照 (两个归档都在才有; 缺前日=账户较新, 显示 '—')
-  const dayKey = (offsetDays) => new Date(Date.now() - offsetDays * 24 * 3600 * 1000)
-    .toISOString().slice(0, 10).replace(/-/g, ''); // 本机=北京时区, now-16h 即北京昨天
+  // ⚠️ 键必须按北京时间构造 (裸 toISOString 是 UTC, 北京 00:00-07:59 间昨天/前天
+  // 两个键都错位一天 → 增量显示成前天增量, 2026-11-10 用户实测小号 762 显示成 5):
+  // 先 +8h 平移到北京日期轴再取 UTC 日期串, 与后端 _today_bj 归档口径一致
+  const dayKey = (offsetDays) => new Date(Date.now() + 8 * 3600 * 1000 - offsetDays * 24 * 3600 * 1000)
+    .toISOString().slice(0, 10).replace(/-/g, '');
   const yesterdayKey = dayKey(1);
   const dayBeforeKey = dayKey(2);
   const yIntimacyFor = (c) => {
