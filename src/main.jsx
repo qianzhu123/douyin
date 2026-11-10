@@ -1347,12 +1347,10 @@ function T6RankBoardPanel() {
     yesterday: ydata?.available ? [
       { key: 'fan_board', title: `昨日涨粉 (${ydata.prev_day} → ${ydata.day})`, field: 'follower_gain' },
       { key: 'club_board', title: '昨日粉丝团新增', field: 'club_gain' },
-      { key: 'light_board', title: '昨日灯牌点亮增量', field: 'light_gain' },
     ] : [],
     live: ldata?.available ? [
       { key: 'fan_board', title: '今日涨粉 (实时)', field: 'follower_gain' },
       { key: 'club_board', title: '今日粉丝团新增 (实时)', field: 'club_gain' },
-      { key: 'light_board', title: '今日灯牌点亮增量 (实时)', field: 'light_gain' },
     ] : [],
     stock: ldata?.available ? [
       { key: 'stock_board', title: '粉丝团人数榜', field: 'total_fans', stock: true },
@@ -1404,7 +1402,7 @@ function T6RankBoardPanel() {
               <div key={key} className="t6-board">
                 <div className="t6-board-title">{title}</div>
                 <div className="t6-board-rows">
-                  {list.slice(0, 10).map((item, i) => (
+                  {list.map((item, i) => (
                     <div key={item.sec_uid || item.anchor_id} className="t6-row">
                       <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{i + 1}</span>
                       <span className="t6-name" title={item.nickname}>{item.nickname}</span>
