@@ -575,3 +575,25 @@ def admin_restart_backend() -> dict:
             pass
     _th_admin.Thread(target=_kick, daemon=True).start()
     return {"queued": True, "script": str(script)}
+
+
+# ---- T6 主播榜单 (只读 lab 快照库, 2026-11-10) ----
+from . import t6_ranks as _t6
+
+
+@app.get("/api/t6/status")
+def t6_status() -> dict:
+    """快照库可用性 + 最近采集时间 (前端显示数据新鲜度)."""
+    return _t6.status()
+
+
+@app.get("/api/t6/ranks/live")
+def t6_ranks_live() -> dict:
+    """当日实时榜: 粉丝/团/灯牌增量 + 团人数/灯牌点亮存量榜."""
+    return _t6.live_ranks()
+
+
+@app.get("/api/t6/ranks/yesterday")
+def t6_ranks_yesterday() -> dict:
+    """昨日三榜: 相邻两快照日收盘差值 (完整跨天口径)."""
+    return _t6.yesterday_ranks()

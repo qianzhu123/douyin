@@ -1081,3 +1081,75 @@ button:disabled {
 @keyframes spin360 {
   to { transform: rotate(360deg); }
 }
+
+/* ---- 主播榜单面板 (T6, 2026-11-10) ---- */
+.t6-panel .fansclub-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.t6-boards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.t6-board {
+  background: #f2f7fd;
+  border: 1px solid #d4e3f5;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.t6-board-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: #17324d;
+  margin-bottom: 8px;
+}
+
+.t6-board-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.t6-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: #fff;
+}
+
+.t6-rank {
+  width: 34px;
+  flex: none;
+  color: #7a8ba0;
+  font-variant-numeric: tabular-nums;
+}
+
+.t6-rank.top {
+  color: #2f8cff;
+  font-weight: 700;
+}
+
+.t6-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.t6-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #1f7a3d;
+}
+
+.t6-row:nth-child(-n+3) .t6-value { color: #2f8cff; }

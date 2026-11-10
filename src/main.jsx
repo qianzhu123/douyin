@@ -69,6 +69,7 @@ function mergeAccount(account) {
 // ---- 左侧快速导航 (用户指定 2026-11-04: 项目内容过多, 侧边栏跳转) ----
 const NAV_ITEMS = [
   { id: 'sec-accounts', label: '账户与直播' },
+  { id: 'sec-t6', label: '主播榜单' },
   { id: 'sec-fansclub', label: '粉丝团' },
   { id: 'sec-posts', label: '作品/评论' },
   { id: 'sec-download', label: '视频下载' },
@@ -1312,6 +1313,114 @@ function StreamerDetailModal({ detail, onClose }) {
   );
 }
 
+function T6RankBoardPanel() {
+  // 主播榜单 (T6 聚合层): 数据 = 逆向 lab 每日 00:05 计划任务采集的快照库
+  const [tab, setTab] = React.useState('yesterday'); // yesterday | live | stock
+  const [ydata, setYdata] = React.useState(null);
+  const [ldata, setLdata] = React.useState(null);
+  const [st, setSt] = React.useState(null);
+  const [error, setError] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const [s, y, l] = await Promise.all([
+        fetch(`${API_BASE}/api/t6/status`).then((r) => r.json()),
+        fetch(`${API_BASE}/api/t6/ranks/yesterday`).then((r) => r.json()),
+        fetch(`${API_BASE}/api/t6/ranks/live`).then((r) => r.json()),
+      ]);
+      setSt(s);
+      setYdata(y);
+      setLdata(l);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const boards = {
+    yesterday: ydata?.available ? [
+      { key: 'fan_board', title: `昨日涨粉 (${ydata.prev_day} → ${ydata.day})`, field: 'follower_gain' },
+      { key: 'club_board', title: '昨日粉丝团新增', field: 'club_gain' },
+      { key: 'light_board', title: '昨日灯牌点亮增量', field: 'light_gain' },
+    ] : [],
+    live: ldata?.available ? [
+      { key: 'fan_board', title: '今日涨粉 (实时)', field: 'follower_gain' },
+      { key: 'club_board', title: '今日粉丝团新增 (实时)', field: 'club_gain' },
+      { key: 'light_board', title: '今日灯牌点亮增量 (实时)', field: 'light_gain' },
+    ] : [],
+    stock: ldata?.available ? [
+      { key: 'stock_board', title: '粉丝团人数榜', field: 'total_fans', stock: true },
+      { key: 'light_stock_board', title: '灯牌点亮人数榜', field: 'light_up', stock: true },
+    ] : [],
+  };
+  const current = boards[tab] || [];
+
+  return (
+    <section className="panel t6-panel" id="sec-t6">
+      <div className="panel-head">
+        <div>
+          <h2>主播榜单</h2>
+          <p>
+            {st?.available
+              ? `${st.anchors} 个主播 · 最近采集 ${st.last_profile_at}${st.last_club_at && st.last_club_at !== st.last_profile_at ? ` / 团 ${st.last_club_at}` : ''} · 每日 00:05 自动采`
+              : (st?.reason || '快照库未就绪')}
+          </p>
+        </div>
+        <div className="panel-actions">
+          <button onClick={load} disabled={busy}>{busy ? '刷新中…' : '刷新'}</button>
+        </div>
+      </div>
+
+      <div className="fansclub-toolbar">
+        {[['yesterday', '昨日榜'], ['live', '今日实时'], ['stock', '存量榜']].map(([k, label]) => (
+          <button
+            key={k}
+            className={`fansclub-tab${tab === k ? ' active' : ''}`}
+            onClick={() => setTab(k)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {error && <div className="notice">{error}</div>}
+      {!st?.available && <div className="empty">快照库不可读: {st?.reason || '…'}</div>}
+      {st?.available && tab === 'yesterday' && !ydata?.available && (
+        <div className="empty">昨日榜需两个快照日 (现有: {(ydata?.days || []).join(', ') || '无'}) — 明晨自动出现</div>
+      )}
+
+      {current.length ? (
+        <div className="t6-boards">
+          {current.map(({ key, title, field }) => {
+            const list = (tab === 'yesterday' ? ydata : ldata)?.[key] || [];
+            if (!list.length) return null;
+            return (
+              <div key={key} className="t6-board">
+                <div className="t6-board-title">{title}</div>
+                <div className="t6-board-rows">
+                  {list.slice(0, 10).map((item, i) => (
+                    <div key={item.sec_uid || item.anchor_id} className="t6-row">
+                      <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{i + 1}</span>
+                      <span className="t6-name" title={item.nickname}>{item.nickname}</span>
+                      <span className="t6-value">{(item[field] ?? 0).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function PostsPanel({ accounts }) {
   const [secUid, setSecUid] = React.useState('');
   // 自定义数量 (用户指定 2026-11-04: 仅支持自定义, 不做预设档位)
@@ -2103,6 +2212,8 @@ function App() {
 
           <LiveMonitorPanel embedded />
         </section>
+
+        <T6RankBoardPanel />
 
         <FansClubPanel apiRef={fansclubApi} />
         {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
