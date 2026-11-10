@@ -539,14 +539,17 @@ function FansClubPanel({ apiRef }) {
     return g > 0 ? `+${g}` : '0';
   };
   // 昨日亲密度 (2026-11-09 用户定论: 语义=昨天**获得**的增量, 不是昨晚总值):
-  // 增量 = 昨日快照 − 前日快照 (两个归档都在才有; 缺前日=账户较新, 显示 '—')
-  // ⚠️ 键必须按北京时间构造 (裸 toISOString 是 UTC, 北京 00:00-07:59 间昨天/前天
-  // 两个键都错位一天 → 增量显示成前天增量, 2026-11-10 用户实测小号 762 显示成 5):
-  // 先 +8h 平移到北京日期轴再取 UTC 日期串, 与后端 _today_bj 归档口径一致
+  // 归档口径: days[D] 写于 D 日 00:08, 值 = D-1 日结束时的亲密度。
+  // 所以 "昨天获得的" = 昨天结束值 − 前天结束值 = days[今天快照] − days[昨天快照]
+  //                  = days[dayKey(0)] − days[dayKey(1)]
+  // (2026-11-10 实锤: 旧取法 dayKey(1)−dayKey(2) 是**前天**获得的, 导致昨日列
+  //  慢一天 — 只有挂直播到凌晨的团 (陈泽/千逐) 看似 >0, 其他团全 0)
+  // ⚠️ 键必须按北京时间构造 (裸 toISOString 是 UTC, 北京 00:00-07:59 间错位一天,
+  //  2026-11-10 用户实测小号 762 显示成 5): +8h 平移后再取日期串
   const dayKey = (offsetDays) => new Date(Date.now() + 8 * 3600 * 1000 - offsetDays * 24 * 3600 * 1000)
     .toISOString().slice(0, 10).replace(/-/g, '');
-  const yesterdayKey = dayKey(1);
-  const dayBeforeKey = dayKey(2);
+  const yesterdayKey = dayKey(0);   // 今天凌晨快照 = 昨天结束值
+  const dayBeforeKey = dayKey(1);   // 昨天凌晨快照 = 前天结束值
   const yIntimacyFor = (c) => {
     const snap = overview?.days?.[yesterdayKey];
     if (!snap) return null;
