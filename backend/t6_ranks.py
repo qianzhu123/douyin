@@ -173,9 +173,12 @@ def yesterday_ranks() -> dict:
 
 
 def live_ranks() -> dict:
-    """当日实时榜: 开盘→收盘差值 (当日第一条 vs 最后一条, 掉粉为负) + 存量榜.
+    """当日实时榜: 较昨日收盘的增量 (2026-11-11 修口径) + 存量榜.
 
-    注意: 不能用 max-min — 会把净下降显示成正增长 (2026-11-10 用户指错后修正)。
+    此前算"今天第一条 vs 最后一条"→ 凌晨只有一条快照时恒 0 (用户报 0)。
+    修正: 基准 = 今天之前最后一条快照 (昨日收盘, 通常 23:55 边界轮),
+    增量 = 最新值 − 昨日收盘, 00:00 起的涨幅立即显现。掉粉为负,
+    禁 max-min (2026-11-10 用户指错)。
     """
     db = _connect()
     if db is None:
@@ -185,42 +188,42 @@ def live_ranks() -> dict:
         nick = _nicknames(db)
         su2uid = {r[1]: r[0] for r in db.execute(
             "SELECT uid, sec_uid FROM snapshots WHERE uid != ''")}
-        # 当日 开盘(第一条) / 收盘(最后一条)
-        fan_open = dict(db.execute(
+        # 基准 = 昨日收盘 (今天之前的最后一条); 无则退回今天第一条
+        fan_base = dict(db.execute(
             "SELECT sec_uid, follower_count FROM snapshots s "
-            "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
-            "(SELECT MIN(ts) FROM snapshots s2 WHERE s2.sec_uid=s.sec_uid "
-            " AND date(s2.ts,'unixepoch','localtime')=?)", (today, today)).fetchall())
-        fan_close = dict(db.execute(
+            "WHERE ts = (SELECT MAX(ts) FROM snapshots s2 "
+            " WHERE s2.sec_uid=s.sec_uid AND s2.ts < ?) AND s.sec_uid IN "
+            "(SELECT DISTINCT sec_uid FROM snapshots "
+            " WHERE date(ts,'unixepoch','localtime')=?)",
+            (int(time.mktime(time.strptime(today, "%Y-%m-%d"))), today)).fetchall())
+        fan_latest = dict(db.execute(
             "SELECT sec_uid, follower_count FROM snapshots s "
-            "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
-            "(SELECT MAX(ts) FROM snapshots s2 WHERE s2.sec_uid=s.sec_uid "
-            " AND date(s2.ts,'unixepoch','localtime')=?)", (today, today)).fetchall())
-        # club 开盘/收盘
-        club_open, club_close = {}, {}
+            "WHERE ts = (SELECT MAX(ts) FROM snapshots s2 "
+            " WHERE s2.sec_uid=s.sec_uid)", ()).fetchall())
+        # club 基准/最新
+        club_base, club_latest = {}, {}
         for aid, tf, lu in db.execute(
                 "SELECT anchor_id, total_fans, light_up FROM club_info c "
-                "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
-                "(SELECT MIN(ts) FROM club_info c2 WHERE c2.anchor_id=c.anchor_id "
-                " AND date(c2.ts,'unixepoch','localtime')=?)", (today, today)):
-            club_open[aid] = (tf or 0, lu or 0)
+                "WHERE ts = (SELECT MAX(ts) FROM club_info c2 "
+                " WHERE c2.anchor_id=c.anchor_id AND c2.ts < ?)",
+                (int(time.mktime(time.strptime(today, "%Y-%m-%d"))),)):
+            club_base[aid] = (tf or 0, lu or 0)
         for aid, tf, lu in db.execute(
                 "SELECT anchor_id, total_fans, light_up FROM club_info c "
-                "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
-                "(SELECT MAX(ts) FROM club_info c2 WHERE c2.anchor_id=c.anchor_id "
-                " AND date(c2.ts,'unixepoch','localtime')=?)", (today, today)):
-            club_close[aid] = (tf or 0, lu or 0)
+                "WHERE ts = (SELECT MAX(ts) FROM club_info c2 "
+                " WHERE c2.anchor_id=c.anchor_id)"):
+            club_latest[aid] = (tf or 0, lu or 0)
         fan_board = []
-        for su, close_v in fan_close.items():
-            open_v = fan_open.get(su)
-            if open_v is None:
+        for su, latest_v in fan_latest.items():
+            base = fan_base.get(su)
+            if base is None:
                 continue
             item = {"sec_uid": su, "nickname": nick.get(su, su[:12]),
-                    "follower_gain": close_v - open_v}
+                    "follower_gain": latest_v - base}
             aid = su2uid.get(su)
-            if aid and aid in club_open and aid in club_close:
-                item["club_gain"] = club_close[aid][0] - club_open[aid][0]
-                item["light_gain"] = club_close[aid][1] - club_open[aid][1]
+            if aid and aid in club_base and aid in club_latest:
+                item["club_gain"] = club_latest[aid][0] - club_base[aid][0]
+                item["light_gain"] = club_latest[aid][1] - club_base[aid][1]
             fan_board.append(item)
         # 存量榜 (最新快照)
         latest = {}
