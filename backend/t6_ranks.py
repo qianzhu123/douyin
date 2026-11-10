@@ -86,33 +86,73 @@ def _nicknames(db) -> dict[str, str]:
         "SELECT sec_uid, MAX(nickname) FROM snapshots GROUP BY sec_uid")}
 
 
+def _day_open_follower(db, day: str) -> dict[str, int]:
+    """每主播当日第一条 follower_count."""
+    return dict(db.execute(
+        "SELECT sec_uid, follower_count FROM snapshots s "
+        "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
+        "(SELECT MIN(ts) FROM snapshots s2 WHERE s2.sec_uid=s.sec_uid "
+        " AND date(s2.ts,'unixepoch','localtime')=?)", (day, day)).fetchall())
+
+
+def _day_open_club(db, day: str) -> dict[str, tuple[int, int]]:
+    """每主播当日第一条 (total_fans, light_up)."""
+    out = {}
+    for aid, tf, lu in db.execute(
+            "SELECT anchor_id, total_fans, light_up FROM club_info c "
+            "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
+            "(SELECT MIN(ts) FROM club_info c2 WHERE c2.anchor_id=c.anchor_id "
+            " AND date(c2.ts,'unixepoch','localtime')=?)", (day, day)):
+        out[aid] = (tf or 0, lu or 0)
+    return out
+
+
 def yesterday_ranks() -> dict:
-    """昨日三榜: 相邻两快照日收盘差值 (完整跨天差 = 爱播查查口径)."""
+    """昨日榜: 最近一个**完整**快照日的全天增量 (2026-11-11 修语义).
+
+    此前取最后两个快照日收盘差 → 凌晨时段变成 23:55↔00:05 的 12 分钟
+    边界差 ≈ 0 (用户报"全是 0")。修正: 目标日 = 今天之前最近的快照日;
+    基准 = 前一快照日收盘 (有则完整跨天差), 否则目标日当日首快照 (近似,
+    缺凌晨窗口, window 字段标注口径)。
+    """
     db = _connect()
     if db is None:
         return {"available": False}
     try:
         days = [r[0] for r in db.execute(
             "SELECT DISTINCT date(ts,'unixepoch','localtime') d FROM snapshots ORDER BY d")]
-        if len(days) < 2:
-            return {"available": False, "reason": "快照日不足两天",
+        today = time.strftime("%Y-%m-%d")
+        complete = [d for d in days if d < today]
+        if not complete:
+            return {"available": False, "reason": "还没有完整快照日 (今天之后才有)",
                     "days": days}
-        prev_day, last_day = days[-2], days[-1]
-        fc_prev, fc_last = _day_close_follower(db, prev_day), _day_close_follower(db, last_day)
-        cl_prev, cl_last = _day_close_club(db, prev_day), _day_close_club(db, last_day)
-        uid2su = {r[0]: r[1] for r in db.execute(
+        target = complete[-1]
+        idx = days.index(target)
+        prev_day = days[idx - 1] if idx > 0 else None
+        fc_target = _day_close_follower(db, target)
+        cl_target = _day_close_club(db, target)
+        if prev_day:
+            fc_base = _day_close_follower(db, prev_day)
+            cl_base = _day_close_club(db, prev_day)
+            window = f"{prev_day} 收盘 → {target} 收盘"
+        else:
+            fc_base = _day_open_follower(db, target)
+            cl_base = _day_open_club(db, target)
+            window = f"{target} 当日首末快照差 (缺凌晨窗口, 近似)"
+        su2uid = {r[1]: r[0] for r in db.execute(
             "SELECT uid, sec_uid FROM snapshots WHERE uid != ''")}
         nick = _nicknames(db)
         fan_board, club_board, light_board = [], [], []
-        for su in fc_last:
-            if su not in fc_prev:
+        for su in fc_target:
+            base = fc_base.get(su)
+            if base is None:
                 continue
             item = {"sec_uid": su, "nickname": nick.get(su, su[:12]),
-                    "follower_gain": fc_last[su] - fc_prev[su]}
-            aid = uid2su.get(su)
-            if aid and aid in cl_prev and aid in cl_last:
-                item["club_gain"] = cl_last[aid][0] - cl_prev[aid][0]
-                item["light_gain"] = cl_last[aid][1] - cl_prev[aid][1]
+                    "follower_gain": fc_target[su] - base}
+            aid = su2uid.get(su)
+            if aid and aid in cl_base and aid in cl_target:
+                item["club_gain"] = cl_target[aid][0] - cl_base[aid][0]
+                item["light_gain"] = cl_target[aid][1] - cl_base[aid][1]
             fan_board.append(item)
         club_board = sorted(
             (i for i in fan_board if i.get("club_gain") is not None),
@@ -122,7 +162,8 @@ def yesterday_ranks() -> dict:
             key=lambda x: -x["light_gain"])
         fan_board.sort(key=lambda x: -x["follower_gain"])
         last_ts = db.execute("SELECT MAX(ts) FROM snapshots").fetchone()[0]
-        return {"available": True, "prev_day": prev_day, "day": last_day,
+        return {"available": True, "prev_day": prev_day, "day": target,
+                "window": window,
                 "as_of": datetime.fromtimestamp(last_ts).strftime("%H:%M") if last_ts else None,
                 "fan_board": fan_board[:50],
                 "club_board": club_board[:50],
@@ -142,7 +183,7 @@ def live_ranks() -> dict:
     try:
         today = time.strftime("%Y-%m-%d")
         nick = _nicknames(db)
-        uid2su = {r[0]: r[1] for r in db.execute(
+        su2uid = {r[1]: r[0] for r in db.execute(
             "SELECT uid, sec_uid FROM snapshots WHERE uid != ''")}
         # 当日 开盘(第一条) / 收盘(最后一条)
         fan_open = dict(db.execute(
@@ -176,7 +217,7 @@ def live_ranks() -> dict:
                 continue
             item = {"sec_uid": su, "nickname": nick.get(su, su[:12]),
                     "follower_gain": close_v - open_v}
-            aid = next((a for a, s in uid2su.items() if s == su), None)
+            aid = su2uid.get(su)
             if aid and aid in club_open and aid in club_close:
                 item["club_gain"] = club_close[aid][0] - club_open[aid][0]
                 item["light_gain"] = club_close[aid][1] - club_open[aid][1]
@@ -187,7 +228,7 @@ def live_ranks() -> dict:
                 "SELECT anchor_id, total_fans, light_up, today_new, club_name "
                 "FROM club_info c WHERE ts = (SELECT MAX(ts) FROM club_info c2 "
                 "WHERE c2.anchor_id=c.anchor_id)"):
-            su = uid2su.get(aid)
+            su = su2uid.get(aid)
             latest[aid] = {"anchor_id": aid, "sec_uid": su,
                            "nickname": nick.get(su, cname or aid),
                            "total_fans": tf or 0, "light_up": lu or 0,

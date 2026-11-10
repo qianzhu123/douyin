@@ -1157,3 +1157,26 @@ button:disabled {
 .t6-value.neg {
   color: #d64545;
 }
+
+.t6-board-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.t6-expand {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(127, 145, 170, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  color: #2f8cff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.t6-expand:hover {
+  color: #5aa9ff;
+  border-color: #5aa9ff;
+}

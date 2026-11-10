@@ -1321,6 +1321,8 @@ function T6RankBoardPanel() {
   const [st, setSt] = React.useState(null);
   const [error, setError] = React.useState('');
   const [busy, setBusy] = React.useState(false);
+  // 每榜默认展示 10 名, 点击"展开全部"看完整榜 (再点收起)
+  const [expanded, setExpanded] = React.useState({});
 
   const load = React.useCallback(async () => {
     setBusy(true);
@@ -1345,7 +1347,7 @@ function T6RankBoardPanel() {
 
   const boards = {
     yesterday: ydata?.available ? [
-      { key: 'fan_board', title: `昨日涨粉 (${ydata.prev_day} → ${ydata.day})`, field: 'follower_gain' },
+      { key: 'fan_board', title: `昨日涨粉 (${ydata.window || ydata.day})`, field: 'follower_gain' },
       { key: 'club_board', title: '昨日粉丝团新增', field: 'club_gain' },
     ] : [],
     live: ldata?.available ? [
@@ -1396,11 +1398,20 @@ function T6RankBoardPanel() {
       {current.length ? (
         <div className="t6-boards">
           {current.map(({ key, title, field }) => {
-            const list = (tab === 'yesterday' ? ydata : ldata)?.[key] || [];
-            if (!list.length) return null;
+            const full = (tab === 'yesterday' ? ydata : ldata)?.[key] || [];
+            if (!full.length) return null;
+            const open = !!expanded[key];
+            const list = open ? full : full.slice(0, 10);
             return (
               <div key={key} className="t6-board">
-                <div className="t6-board-title">{title}</div>
+                <div className="t6-board-title">
+                  <span>{title}</span>
+                  {full.length > 10 && (
+                    <button className="t6-expand" onClick={() => setExpanded((m) => ({ ...m, [key]: !open }))}>
+                      {open ? '收起' : `展开全部 ${full.length} 名`}
+                    </button>
+                  )}
+                </div>
                 <div className="t6-board-rows">
                   {list.map((item, i) => (
                     <div key={item.sec_uid || item.anchor_id} className="t6-row">
