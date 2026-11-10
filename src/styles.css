@@ -1153,3 +1153,7 @@ button:disabled {
 }
 
 .t6-row:nth-child(-n+3) .t6-value { color: #2f8cff; }
+
+.t6-value.neg {
+  color: #d64545;
+}

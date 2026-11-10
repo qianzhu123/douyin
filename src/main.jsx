@@ -1368,7 +1368,7 @@ function T6RankBoardPanel() {
           <h2>主播榜单</h2>
           <p>
             {st?.available
-              ? `${st.anchors} 个主播 · 最近采集 ${st.last_profile_at}${st.last_club_at && st.last_club_at !== st.last_profile_at ? ` / 团 ${st.last_club_at}` : ''} · 每日 00:05 自动采`
+              ? `${st.anchors} 个主播 · 数据截至 ${(tab === 'yesterday' ? ydata?.as_of : ldata?.as_of) || st.last_profile_at} · 每日 00:05 自动采`
               : (st?.reason || '快照库未就绪')}
           </p>
         </div>
@@ -1408,7 +1408,9 @@ function T6RankBoardPanel() {
                     <div key={item.sec_uid || item.anchor_id} className="t6-row">
                       <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{i + 1}</span>
                       <span className="t6-name" title={item.nickname}>{item.nickname}</span>
-                      <span className="t6-value">{(item[field] ?? 0).toLocaleString()}</span>
+                      <span className={`t6-value${(item[field] ?? 0) < 0 ? ' neg' : ''}`}>
+                        {(item[field] ?? 0) < 0 ? '' : '+'}{(item[field] ?? 0).toLocaleString()}
+                      </span>
                     </div>
                   ))}
                 </div>

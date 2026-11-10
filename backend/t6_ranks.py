@@ -121,7 +121,9 @@ def yesterday_ranks() -> dict:
             (i for i in fan_board if i.get("light_gain") is not None),
             key=lambda x: -x["light_gain"])
         fan_board.sort(key=lambda x: -x["follower_gain"])
+        last_ts = db.execute("SELECT MAX(ts) FROM snapshots").fetchone()[0]
         return {"available": True, "prev_day": prev_day, "day": last_day,
+                "as_of": datetime.fromtimestamp(last_ts).strftime("%H:%M") if last_ts else None,
                 "fan_board": fan_board[:50],
                 "club_board": club_board[:50],
                 "light_board": light_board[:50]}
@@ -130,7 +132,10 @@ def yesterday_ranks() -> dict:
 
 
 def live_ranks() -> dict:
-    """当日实时榜: 当日已见 max-min 差值 (轮次越多越接近全天) + 存量榜."""
+    """当日实时榜: 开盘→收盘差值 (当日第一条 vs 最后一条, 掉粉为负) + 存量榜.
+
+    注意: 不能用 max-min — 会把净下降显示成正增长 (2026-11-10 用户指错后修正)。
+    """
     db = _connect()
     if db is None:
         return {"available": False}
@@ -139,30 +144,43 @@ def live_ranks() -> dict:
         nick = _nicknames(db)
         uid2su = {r[0]: r[1] for r in db.execute(
             "SELECT uid, sec_uid FROM snapshots WHERE uid != ''")}
-        # 当日粉丝增量 (max-min)
-        fan_rows = db.execute(
-            "SELECT sec_uid, MAX(follower_count), MIN(follower_count) "
-            "FROM snapshots WHERE date(ts,'unixepoch','localtime')=? "
-            "GROUP BY sec_uid", (today,)).fetchall()
-        fan_board = sorted(
-            ({"sec_uid": su, "nickname": nick.get(su, su[:12]),
-              "follower_gain": (hi or 0) - (lo or 0)} for su, hi, lo in fan_rows),
-            key=lambda x: -x["follower_gain"])
-        # 当日团/灯牌增量
-        club_rows = db.execute(
-            "SELECT anchor_id, MAX(total_fans), MIN(total_fans), "
-            "MAX(light_up), MIN(light_up) FROM club_info "
-            "WHERE date(ts,'unixepoch','localtime')=? GROUP BY anchor_id",
-            (today,)).fetchall()
-        club_map = {}
-        for aid, thi, tlo, lhi, llo in club_rows:
-            club_map[aid] = {"club_gain": (thi or 0) - (tlo or 0),
-                             "light_gain": (lhi or 0) - (llo or 0)}
-        for item in fan_board:
-            aid = next((a for a, s in uid2su.items() if s == item["sec_uid"]), None)
-            g = club_map.get(aid)
-            if g:
-                item.update(g)
+        # 当日 开盘(第一条) / 收盘(最后一条)
+        fan_open = dict(db.execute(
+            "SELECT sec_uid, follower_count FROM snapshots s "
+            "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
+            "(SELECT MIN(ts) FROM snapshots s2 WHERE s2.sec_uid=s.sec_uid "
+            " AND date(s2.ts,'unixepoch','localtime')=?)", (today, today)).fetchall())
+        fan_close = dict(db.execute(
+            "SELECT sec_uid, follower_count FROM snapshots s "
+            "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
+            "(SELECT MAX(ts) FROM snapshots s2 WHERE s2.sec_uid=s.sec_uid "
+            " AND date(s2.ts,'unixepoch','localtime')=?)", (today, today)).fetchall())
+        # club 开盘/收盘
+        club_open, club_close = {}, {}
+        for aid, tf, lu in db.execute(
+                "SELECT anchor_id, total_fans, light_up FROM club_info c "
+                "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
+                "(SELECT MIN(ts) FROM club_info c2 WHERE c2.anchor_id=c.anchor_id "
+                " AND date(c2.ts,'unixepoch','localtime')=?)", (today, today)):
+            club_open[aid] = (tf or 0, lu or 0)
+        for aid, tf, lu in db.execute(
+                "SELECT anchor_id, total_fans, light_up FROM club_info c "
+                "WHERE date(ts,'unixepoch','localtime')=? AND ts = "
+                "(SELECT MAX(ts) FROM club_info c2 WHERE c2.anchor_id=c.anchor_id "
+                " AND date(c2.ts,'unixepoch','localtime')=?)", (today, today)):
+            club_close[aid] = (tf or 0, lu or 0)
+        fan_board = []
+        for su, close_v in fan_close.items():
+            open_v = fan_open.get(su)
+            if open_v is None:
+                continue
+            item = {"sec_uid": su, "nickname": nick.get(su, su[:12]),
+                    "follower_gain": close_v - open_v}
+            aid = next((a for a, s in uid2su.items() if s == su), None)
+            if aid and aid in club_open and aid in club_close:
+                item["club_gain"] = club_close[aid][0] - club_open[aid][0]
+                item["light_gain"] = club_close[aid][1] - club_open[aid][1]
+            fan_board.append(item)
         # 存量榜 (最新快照)
         latest = {}
         for aid, tf, lu, tn, cname in db.execute(
@@ -176,8 +194,11 @@ def live_ranks() -> dict:
                            "today_new": tn or 0, "club_name": cname}
         stock_board = sorted(latest.values(), key=lambda x: -x["total_fans"])
         light_stock = sorted(latest.values(), key=lambda x: -x["light_up"])
+        # 数据时点 (面板显示新鲜度)
+        last_ts = db.execute("SELECT MAX(ts) FROM club_info").fetchone()[0]
         return {"available": True, "day": today,
-                "fan_board": fan_board[:50],
+                "as_of": datetime.fromtimestamp(last_ts).strftime("%H:%M") if last_ts else None,
+                "fan_board": sorted(fan_board, key=lambda x: -x["follower_gain"])[:50],
                 "club_board": sorted((i for i in fan_board if "club_gain" in i),
                                      key=lambda x: -x["club_gain"])[:50],
                 "light_board": sorted((i for i in fan_board if "light_gain" in i),
