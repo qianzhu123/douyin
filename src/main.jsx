@@ -1053,7 +1053,7 @@ function StreamerSearchModal({ onClose, onChanged }) {
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="modal library-modal" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="modal streamer-search-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <div>
             <h2>搜索主播</h2>

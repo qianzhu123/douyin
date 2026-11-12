@@ -978,6 +978,13 @@ button:disabled {
 .library-modal {
   width: min(720px, 100%);
 }
+/* 搜索主播弹窗 (2026-11-12 用户定论: 720 太挤, 回标准 840 宽 + 候选区加高) */
+.streamer-search-modal {
+  width: min(840px, 100%);
+}
+.streamer-search-modal .lib-cand-list {
+  max-height: 420px;
+}
 /* 库内搜索结果区 (2026-11-08): 限高滚动, 与库列表区分 */
 .lib-cand-list {
   max-height: 240px;

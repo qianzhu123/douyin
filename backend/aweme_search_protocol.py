@@ -333,7 +333,13 @@ def _extract_users(body: dict) -> list[dict]:
                 av = (o.get("avatar_thumb") or o.get("avatar_medium")
                       or o.get("avatar_larger") or {})
                 urls = (av.get("url_list") or []) if isinstance(av, dict) else []
-                enriched["avatar_url"] = urls[0] if urls else ""
+                # App 域 CDN 头像默认 .heic — Chrome <img> 不支持 HEIC 全破图
+                # (2026-11-12 实测)。同路径 .heic→.jpeg 后缀替换 CDN 直接回 image/jpeg;
+                # 带查询串的 (?from=...) 也要替换路径段里的 .heic。
+                url0 = urls[0] if urls else ""
+                if ".heic" in url0:
+                    url0 = url0.replace(".heic", ".jpeg")
+                enriched["avatar_url"] = url0
                 # display_info 粉丝数 (2026-11-08 实测: 接口已不给结构化 follower_count,
                 # 粉丝数藏在 display_info[].text 如 "粉丝: 4152.2万" → 解析回数值)
                 for di in (o.get("display_info") or []):
@@ -428,4 +434,13 @@ def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
     users = _extract_users(body)
     if not users:
         raise RuntimeError("协议搜索无用户结果")
+    # 相关性过滤 (2026-11-12 用户反馈: 候选混入大量无关视频作者)。general 搜索的
+    # aweme 卡 author 是"视频提到词"的泛化结果, 与搜索意图无关; 只留名字/抖音号
+    # 真含查询词的 (去空格不区分大小写), 精确命中永远排首。
+    kw_norm = re.sub(r"\s+", "", keyword).lower()
+    related = [u for u in users
+               if kw_norm in re.sub(r"\s+", "", u.get("nickname", "")).lower()
+               or kw_norm in (u.get("unique_id", "") or "").lower()]
+    if related:
+        users = related
     return users, f"protocol ({sign_note}, {len(users)} 候选)"
