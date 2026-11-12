@@ -126,6 +126,54 @@ function FansClubPanel({ apiRef }) {
   });
   const [signJobs, setSignJobs] = React.useState([]);
   const [signingAll, setSigningAll] = React.useState(false);
+  // ---- token 健康系统 (2026-11-12): 年龄预警 + 掉登录红横幅 + 一键重抓 ----
+  // 用户诉求: 掉登录不隐藏数据改弹横幅; 记录每次掉登录时间; 长龄 token 预警提示重抓
+  const [tokenHealth, setTokenHealth] = React.useState(null); // {accounts, warn_age_days, events}
+  const [recapture, setRecapture] = React.useState(null); // {running, current, log}
+  const [confirmRecapture, setConfirmRecapture] = React.useState(null); // 待确认的 label (null=关, ''=全部)
+  const loadTokenHealth = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/token-health`);
+      if (r.ok) setTokenHealth(await r.json());
+    } catch { /* 网络断不影响主面板 */ }
+  }, []);
+  const loadRecaptureStatus = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/recapture-status`);
+      if (r.ok) setRecapture(await r.json());
+    } catch { /* ignore */ }
+  }, []);
+  // 重抓进行中: 3s 轮询状态; 结束后刷新健康表
+  React.useEffect(() => {
+    if (!recapture?.running) return undefined;
+    const t = setInterval(loadRecaptureStatus, 3000);
+    return () => clearInterval(t);
+  }, [recapture?.running, loadRecaptureStatus]);
+  React.useEffect(() => {
+    if (recapture && !recapture.running && recapture.log?.length) loadTokenHealth();
+  }, [recapture?.running, loadTokenHealth]);
+  React.useEffect(() => { loadTokenHealth(); loadRecaptureStatus(); }, [loadTokenHealth, loadRecaptureStatus]);
+  const healthFor = (label) => (tokenHealth?.accounts || []).find((a) => a.label === label) || null;
+  // 掉登录的账户集合: 20003 事件且之后没有 refreshed → 仍处于掉登录态
+  const invalidLabels = React.useMemo(() => {
+    const evs = tokenHealth?.events || [];
+    const last = {};
+    evs.forEach((e) => { last[e.label] = e.event; });
+    return new Set(Object.entries(last).filter(([, ev]) => ev === 'invalid').map(([lb]) => lb));
+  }, [tokenHealth]);
+  async function startRecapture(label) {
+    setConfirmRecapture(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/fansclub/recapture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(label ? { label } : {}),
+      });
+      const d = await r.json();
+      if (d.ok) { showToast('ok', d.reason); loadRecaptureStatus(); }
+      else showToast('err', d.reason || d.detail || '未能启动');
+    } catch (e) { showToast('err', e.message); }
+  }
   // 向顶栏暴露动作与状态 (用户指定 2026-11-04: 滚到粉丝团区域时顶栏按钮组切换为粉丝团操作)
   React.useEffect(() => {
     if (!apiRef) return undefined;
@@ -579,6 +627,75 @@ function FansClubPanel({ apiRef }) {
       </div>
 
       {error && <div className="notice">{error}</div>}
+
+      {/* 掉登录红横幅: 数据保留 (localStorage 缓存照常展示), 只提示凭证失效需重抓 (用户指定 2026-11-12) */}
+      {invalidLabels.size > 0 && (
+        <div className="fc-token-banner">
+          <span>
+            ⚠ {Array.from(invalidLabels).join('、')} 登录态已失效（token 过期）
+            {recapture?.running ? ' — 重抓进行中…' : ' — 点击右侧按钮真机重抓'}
+          </span>
+          <div className="fc-token-banner-actions">
+            {Array.from(invalidLabels).map((lb) => (
+              <button key={lb} className="secondary" disabled={recapture?.running}
+                onClick={() => setConfirmRecapture(lb)}>
+                重抓 {lb}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* token 健康条: 每账户 token 年龄 (≥10 天黄色预警), 事件日志悬停可查 */}
+      {tokenHealth?.accounts?.length > 0 && (
+        <div className="fc-token-health">
+          <span className="fc-token-health-label">凭证健康：</span>
+          {tokenHealth.accounts.map((a) => (
+            <span key={a.label}
+              className={`fc-token-age${a.warn ? ' warn' : ''}${invalidLabels.has(a.label) ? ' invalid' : ''}`}
+              title={invalidLabels.has(a.label) ? `${a.label} 登录态失效`
+                : a.age_days != null ? `${a.label} token 已用 ${a.age_days} 天 (≥${tokenHealth.warn_age_days} 天建议重抓)`
+                : `${a.label} 无抓取时间记录`}>
+              {a.label} {invalidLabels.has(a.label) ? '失效' : a.age_days != null ? `${a.age_days}天` : '年龄?'}
+            </span>
+          ))}
+          <button className="secondary fc-recapture-btn" disabled={recapture?.running}
+            onClick={() => setConfirmRecapture('')}>
+            {recapture?.running ? `重抓中 (${recapture.current})…` : '重新拉取登录态'}
+          </button>
+          {recapture?.running && <span className="tab-check-dot checking" title="真机重抓进行中" />}
+        </div>
+      )}
+      {/* 重抓完成结果一览 */}
+      {!recapture?.running && recapture?.log?.length > 0 && (
+        <div className="notice multi">
+          {recapture.log.map((r) => `${r.ok ? '✓' : '✗'} ${r.label}: ${r.detail}`).join('\n')}
+        </div>
+      )}
+      {/* 重抓确认弹窗 (用户指定: 弹窗提示确保当前真机状态然后开始抓) */}
+      {confirmRecapture !== null && (
+        <div className="modal-backdrop" onClick={() => setConfirmRecapture(null)}>
+          <div className="modal compact-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>重新拉取登录态{confirmRecapture ? ` (${confirmRecapture})` : ' (全部账户)'}</h3>
+            </div>
+            <div style={{ fontSize: 14, lineHeight: 1.7 }}>
+              <p>开始前请确认真机状态：</p>
+              <ul>
+                <li>Pixel 2 XL 已开机、屏幕解锁、与电脑同一网络（192.168.43.35）</li>
+                <li>抖音没有被手动操作中（脚本会切用户空间并拉起抖音）</li>
+                <li>各账户登录态仍在（用户空间常驻，正常情况无需重新扫码）</li>
+              </ul>
+              <p>流程：切换用户空间 → 拉起抖音 → hook 抓取 token → 校验 → 自动部署。
+                约 1.5 分钟/账户{!confirmRecapture && '，全部账户约 6 分钟'}。</p>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+              <button className="secondary" onClick={() => setConfirmRecapture(null)}>取消</button>
+              <button onClick={() => startRecapture(confirmRecapture || '')}>确认开始</button>
+            </div>
+          </div>
+        </div>
+      )}
       {accounts.length === 0 && (
         <div className="empty">
           未找到凭证文件。请在 data/fansclub_tokens/ 放入 {'{label, x_tt_token}'}.json。

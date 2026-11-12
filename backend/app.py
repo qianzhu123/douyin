@@ -602,6 +602,11 @@ def t6_ranks_yesterday() -> dict:
 # ---- T6 手动采集触发 (2026-11-11): web 按钮跨仓调 lab 采集脚本 ----
 import subprocess as _sp
 import threading as _threading
+import os as _os
+
+# ---- token 健康系统 (2026-11-12): 年龄预警 + 掉登录日志 + 一键重抓 ----
+# 重抓全链 (切用户空间→拉抖音→hook→抓token→校验) 由 lab 侧 e120_recapture.py 编排,
+# 本地真机 (192.168.43.35) + .venv-frida16; web 只负责触发、状态、成功后部署落盘。
 
 _T6_COLLECT_SCRIPT = r"D:\code\android\androidre\douyin\tools\e113_daily_job.py"
 _T6_COLLECT_COOLDOWN = 600  # 秒: 10 分钟冷却, 防连点触发风控
@@ -637,3 +642,89 @@ def t6_collect() -> dict:
 
     _threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "reason": "采集已启动 (约 1-2 分钟, 完成后刷新看新数据)"}
+
+
+# ---- token 健康系统 (2026-11-12): 年龄预警 + 掉登录日志 + 一键重抓 ----
+# 重抓全链 (切用户空间→拉抖音→hook→抓token→校验) 由 lab 侧 e120_recapture.py 编排,
+# 本地真机 (192.168.43.35) + .venv-frida16; web 只负责触发、状态、成功后部署落盘。
+# 用户空间常驻 (dy2=10/dy3=11/dy4=12, 用户 2026-11-12 定论不删) → 重抓无需重新登录。
+
+_FC_RECAPTURE_USER_IDS = {"dy1": None, "dy2": 10, "dy3": 11, "dy4": 12}  # dy1=主空间0
+_RECAPTURE_SCRIPT = r"D:\code\android\androidre\douyin\tools\e120_recapture.py"
+_RECAPTURE_TOKEN_DIR = r"D:\code\android\androidre\douyin\logs\accounts"
+_recapture_lock = _threading.Lock()
+_recapture_state: dict = {"running": False, "current": "", "log": []}  # log: 已完成账户结果
+
+
+@app.get("/api/fansclub/recapture-status")
+def fansclub_recapture_status() -> dict:
+    return {**_recapture_state}
+
+
+@app.post("/api/fansclub/recapture")
+def fansclub_recapture(body: dict) -> dict:
+    """触发一键重抓 (异步): 无 label=全账户顺序抓, 有 label=单账户。
+
+    前置条件 (前端弹窗负责告知用户): 真机在线、屏幕解锁、抖音未被人手动操作中。
+    全链约 1.5 分钟/账户。抓到并校验通过后自动部署到 data/fansclub_tokens/。
+    """
+    label = str(body.get("label", "")).strip() or None
+    if label and label not in _FC_RECAPTURE_USER_IDS:
+        raise HTTPException(400, f"未知账户 {label}")
+    with _recapture_lock:
+        if _recapture_state["running"]:
+            return {"ok": False, "reason": f"重抓进行中 ({_recapture_state['current'] or '准备中'})"}
+        _recapture_state["running"] = True
+        _recapture_state["current"] = label or "全部账户"
+        _recapture_state["log"] = []
+
+    def _run() -> None:
+        labels = [label] if label else list(_FC_RECAPTURE_USER_IDS)
+        import json as _json
+        for lb in labels:
+            try:
+                r = _sp.run(["python", "-X", "utf8", _RECAPTURE_SCRIPT, lb],
+                            capture_output=True, timeout=420)
+                out = (r.stdout or b"").decode("utf-8", "replace")
+                ok = r.returncode == 0
+                detail = ""
+                if ok:
+                    # 抓取成功 → 自动部署 (读 lab 侧落盘的 token)
+                    src = _os.path.join(_RECAPTURE_TOKEN_DIR, f"{lb}.json")
+                    tok = _json.load(open(src, encoding="utf-8")).get("x_tt_token", "")
+                    d = _fc.deploy_token(lb, tok, source="recapture")
+                    ok = bool(d.get("ok"))
+                    detail = d.get("reason", "已部署")
+                else:
+                    detail = f"exit={r.returncode}"
+                _recapture_state["log"].append({"label": lb, "ok": ok, "detail": detail})
+            except Exception as e:
+                _recapture_state["log"].append({"label": lb, "ok": False, "detail": str(e)[:120]})
+        _recapture_state["running"] = False
+        _recapture_state["current"] = ""
+
+    _threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "reason": f"重抓已启动 ({'单账户 ' + label if label else '全部账户顺序抓'}, 约 1.5 分钟/账户)"}
+
+
+@app.get("/api/fansclub/token-health")
+def fansclub_token_health() -> dict:
+    """各账户 token 年龄 + 最近事件日志 (掉登录/刷新史)。"""
+    return _fc.token_health()
+
+
+@app.post("/api/fansclub/deploy-token")
+def fansclub_deploy_token(body: dict) -> dict:
+    """把 lab 侧刚抓到的 token 登记部署 (label + token 字段; 可选 captured_at)。
+
+    抓取本体走 lab 工具链 (e79_token_grab.py), 此处只落盘+记日志,
+    让前端'重新拉取登录态'按钮的闭环可追溯。
+    """
+    label = str(body.get("label", "")).strip()
+    token = str(body.get("token", "")).strip()
+    if not label or not token:
+        raise HTTPException(400, "需要 label 和 token")
+    if label not in _FC_RECAPTURE_USER_IDS:
+        raise HTTPException(400, f"未知账户 {label}")
+    _fc.deploy_token(label, token, source="manual")
+    return {"ok": True, "label": label}

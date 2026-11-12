@@ -23,6 +23,52 @@ from pathlib import Path
 from .config import DATA_DIR
 
 TOKENS_DIR = DATA_DIR / "fansclub_tokens"
+TOKEN_LOG_FILE = DATA_DIR / "fansclub_token_log.json"
+
+# token 生命周期 (2026-11-12 定): 10-31 抓的 11-12 全失效 → 实测寿命 ~12 天。
+# 第 age_warn_days 天起黄色预警, 面板显示年龄; 掉登录/刷新均记 token_log。
+TOKEN_AGE_WARN_DAYS = 10
+
+
+def token_log() -> list[dict]:
+    """token 事件日志 [{ts, label, event, detail}] (掉登录/刷新时间线)."""
+    try:
+        return json.loads(TOKEN_LOG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _log_token_event(label: str, event: str, detail: str = "") -> None:
+    events = token_log()
+    events.append({"ts": time.time(), "label": label, "event": event,
+                   "detail": detail[:120]})
+    try:
+        TOKEN_LOG_FILE.write_text(
+            json.dumps(events[-500:], ensure_ascii=False, indent=1),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
+def token_health() -> dict:
+    """四账户 token 年龄健康表 (面板预警数据源)."""
+    out = []
+    for a in load_tokens():
+        p = TOKENS_DIR / f"{a['label']}.json"
+        captured_at = None
+        try:
+            captured_at = json.loads(p.read_text(encoding="utf-8")).get("captured_at")
+        except Exception:
+            pass
+        age_days = (time.time() - captured_at) / 86400 if captured_at else None
+        out.append({
+            "label": a["label"],
+            "captured_at": captured_at,
+            "age_days": round(age_days, 1) if age_days is not None else None,
+            "warn": bool(age_days is None or age_days >= TOKEN_AGE_WARN_DAYS),
+        })
+    return {"accounts": out, "warn_age_days": TOKEN_AGE_WARN_DAYS,
+            "events": token_log()[-50:]}
 # 检测结果落盘缓存: 后端定时检测的结果存这里, 页面打开直接读最新份,
 # 不再依赖"页面当时开着才能把结果拉回前端缓存" (2026-11-03 断链修复)
 OVERVIEW_CACHE_FILE = DATA_DIR / "fansclub_overview_cache.json"
@@ -97,6 +143,19 @@ def load_tokens() -> list[dict]:
     return out
 
 
+def deploy_token(label: str, token: str, source: str = "manual") -> dict:
+    """写入/更新 token 文件 (重抓流程终点; captured_at 供年龄预警)."""
+    if not token or len(token) < 50:
+        return {"ok": False, "reason": "token 形状不对"}
+    TOKENS_DIR.mkdir(parents=True, exist_ok=True)
+    (TOKENS_DIR / f"{label}.json").write_text(
+        json.dumps({"label": label, "x_tt_token": token,
+                    "captured_at": time.time()}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
+    _log_token_event(label, "refreshed", source)
+    return {"ok": True, "label": label}
+
+
 def club_list(token: str) -> list[dict]:
     q = {"count": 50, "offset": 0}
     data = _req("GET", BASE_WEBCAST, "/webcast/fansclub/user_auto_light_up_list/", q, token)
@@ -147,7 +206,11 @@ def account_overview(label: str, token: str) -> dict:
     try:
         raw = club_list(token)
     except Exception as exc:
-        return {"label": label, "ok": False, "error": str(exc)[:120], "clubs": []}
+        err = str(exc)[:120]
+        # 掉登录事件记录 (20003 = User doesn't login): 面板横幅数据源
+        if "20003" in err:
+            _log_token_event(label, "invalid", err)
+        return {"label": label, "ok": False, "error": err, "clubs": []}
     for f in raw:
         u = f.get("user_fansclub_info") or {}
         ai = f.get("anchor_info") or {}
