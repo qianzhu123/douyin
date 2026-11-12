@@ -21,15 +21,19 @@
   user 卡按 rank 抖动 (陈泽两次搜索一次有一 lần无), 但 aweme 卡的 author 对象
   恒带完整资料 → 递归扫全树收 (nickname+sec_uid) 对象, sec_uid 去重,
   author.follower_count 可信; relation_label.user_list 无粉丝数作次选。
-纪律: 只读 GET; oracle 调用 5s 超时即回落; 真机不在不重试不拖时。
+纪律: 只读 GET; 真机不在不重试不拖时。
 
-⚠️ 2026-11-09: 短暂禁用后已恢复 (用户辅助真机调试, 设备 oracle 为交付基线)。
-unidbg 离线签名 = 已归档负结果 (E17b: 工作队列会话随机态不可伪造),
-后续路线 = 快照移植 (state snapshot transplant, 未试)。
+签名源演进 (2026-11-12):
+  ① unidbg 离线签名 (E37f v26 快照移植 SEVEN HEADS, 首选) — 纯 Java 离线出七头
+     blob ~12s/次, 不依赖真机/frida/aweme 进程; 只需 lab 仓 e37i 快照文件 +
+     真实 sessionid (签名输入)。旧负结果 (E17b 工作队列随机态) 已被快照移植推翻。
+  ② 设备 oracle (frida 27042 直调, 降级) — 真机在且 probe 通过才用, 5s 超时。
+两级都失败 → 抛 RuntimeError 由上层静默回落浏览器链。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import ssl
 import subprocess
@@ -40,7 +44,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# ---- 通道总开关 (2026-11-09 恢复 True: 设备 oracle 交付基线; 快照移植成功后再议离线) ----
+# ---- 通道总开关 (2026-11-12: unidbg 离线签名首选, 设备 oracle 降级) ----
 CHANNEL_ENABLED = True
 
 # ---- lab 仓资源定位 (配置化, 找不到即通道不可用 → 静默回落) ----
@@ -49,9 +53,13 @@ _LAB_ROOTS = [
 ]
 ADB_SERIAL = "192.168.43.35:5555"
 FRIDA_PORT = 27042
-SIGN_TIMEOUT_S = 5     # oracle 单次签名超时 (超时即回落, 不拖时)
+SIGN_TIMEOUT_S = 5      # 设备 oracle 单次签名超时 (超时即回落, 不拖时)
+UNIDBG_TIMEOUT_S = 120  # unidbg 离线签名超时 (~12s 常态, 首次含 mvn compile 放宽)
 HTTP_TIMEOUT_S = 15
 ORACLE_MAX_CALLS = 40  # 单 oracle 会话签名次数上限 (§48.3 会话漂移防线, 超限重建)
+
+MVN = r"D:\tools\Dev\Runtime\apache-maven\bin\mvn"
+JDK = r"D:\tools\Dev\Runtime\jdk21"
 
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
@@ -60,7 +68,8 @@ CTX.verify_mode = ssl.CERT_NONE
 
 def _lab_root() -> Path | None:
     for p in _LAB_ROOTS:
-        if (p / "tools" / "sign_client.py").exists():
+        if (p / "tools" / "sign_client.py").exists() \
+                and (p / "unidbg-lab" / "pom.xml").exists():
             return p
     return None
 
@@ -186,6 +195,44 @@ def _sign(root: Path, url: str, min_jar: str) -> dict | None:
         return None
 
 
+# ---- unidbg 离线签名 (E37f v26 快照移植, 2026-11-12 SEVEN HEADS) ----
+_unidbg_lock = threading.Lock()  # mvn 仓并发写保护 (同一 JVM 目标串行签)
+
+
+def _sign_unidbg(root: Path, url: str, min_jar: str) -> dict:
+    """离线签一次 → heads dict。失败/超时抛 RuntimeError (由上层回落 oracle/浏览器)。
+
+    纯 Java 离线: JNI_OnLoad + e37i 快照移植 + 直调 0x2e01c0, 无真机/frida 依赖。
+    cookie 的 \\r\\n 用 | 转义传命令行 (v26 约定); 出签行 BLOB=X-H|v|X-H|v|...
+    """
+    ck_pipe = min_jar.replace("\r\n", "|")
+    cmd = [MVN + ".cmd", "-q", "compile", "exec:java",
+           "-Dexec.mainClass=com.re.douyin.E37fSnapshotTransplant",
+           f"-Dexec.args={url} {ck_pipe}"]
+    env = dict(os.environ)
+    env["JAVA_HOME"] = JDK
+    with _unidbg_lock:
+        try:
+            proc = subprocess.run(cmd, cwd=str(root / "unidbg-lab"), env=env,
+                                  capture_output=True, timeout=UNIDBG_TIMEOUT_S)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"unidbg 签名超时 >{UNIDBG_TIMEOUT_S}s") from exc
+    out = (proc.stdout or b"").decode("utf-8", errors="replace") + \
+          (proc.stderr or b"").decode("utf-8", errors="replace")
+    m = re.search(r"^BLOB=(.*)$", out, re.M)
+    if not m:
+        raise RuntimeError(f"unidbg 未出 BLOB (rc={proc.returncode}), "
+                           f"尾部: {out[-200:]}")
+    heads: dict[str, str] = {}
+    parts = m.group(1).strip().split("|")
+    for i in range(len(parts) - 1):
+        if re.fullmatch(r"X-[A-Za-z-]+", parts[i]):
+            heads[parts[i]] = parts[i + 1]
+    if not heads:
+        raise RuntimeError("unidbg blob 解析出 0 头")
+    return heads
+
+
 # ---- 37 参数模板 (e112f common_q 原样移植) ----
 def _common_q(**extra) -> dict:
     q = dict(iid="1765185923070852", device_id="5967213509056", ac="wifi",
@@ -294,6 +341,7 @@ def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
     """协议通道搜索。返回 (candidates, note); 不可用/失败抛 RuntimeError 由上层回落。
 
     candidates 为 SearchCandidate 兼容 dict 列表; note 为进度标注 ("protocol+...")。
+    签名两级: unidbg 离线 (首选, 无真机) → 设备 oracle (降级, 真机在才通)。
     """
     root = _lab_root()
     if root is None:
@@ -303,10 +351,6 @@ def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
     files = _read_lab_files(root)
     if files is None:
         raise RuntimeError("lab 头族/罐文件缺失")
-
-    ok, reason = probe_available()
-    if not ok:
-        raise RuntimeError(f"oracle 不可达: {reason}")
 
     sid = f"{int(time.time() * 1000)}7000000000000000000"
     q = _common_q(query=keyword, count=count, offset=0, search_id=sid,
@@ -323,9 +367,20 @@ def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
         raise RuntimeError("真罐缺 install_id/sessionid")
     min_jar = f"install_id={ck_map['install_id']}\r\nsessionid={ck_map['sessionid']}"
 
-    heads = _sign(root, url, min_jar)
-    if not heads:
-        raise RuntimeError("oracle 签名失败 (超时/漂移)")
+    # 签名两级: unidbg 离线首选; oracle 需真机, probe 不过直接跳过不拖时
+    heads: dict[str, str] | None = None
+    sign_note = ""
+    try:
+        heads = _sign_unidbg(root, url, min_jar)
+        sign_note = "unidbg 离线签名"
+    except Exception as exc:
+        ok, reason = probe_available()
+        if not ok:
+            raise RuntimeError(f"unidbg 签名失败({str(exc)[:60]}), oracle 也不可达: {reason}")
+        heads = _sign(root, url, min_jar)
+        if not heads:
+            raise RuntimeError("unidbg 与设备 oracle 双双签名失败")
+        sign_note = "oracle 七头"
 
     headers = dict(json.loads(files["headers"]))
     headers["Cookie"] = files["cookie"].strip().replace("\r\n", "; ")
@@ -343,4 +398,4 @@ def search(keyword: str, count: int = 20) -> tuple[list[dict], str]:
     users = _extract_users(body)
     if not users:
         raise RuntimeError("协议搜索无用户结果")
-    return users, f"protocol (oracle 七头, {len(users)} 候选)"
+    return users, f"protocol ({sign_note}, {len(users)} 候选)"
