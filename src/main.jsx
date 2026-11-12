@@ -1323,6 +1323,9 @@ function T6RankBoardPanel() {
   const [busy, setBusy] = React.useState(false);
   // 每榜默认展示 10 名, 点击"展开全部"看完整榜 (再点收起)
   const [expanded, setExpanded] = React.useState({});
+  // 手动采集: 跨仓调 lab 采集脚本 (后端 10 分钟冷却), 完成后自动刷新榜单
+  const [collectMsg, setCollectMsg] = React.useState('');
+  const [collecting, setCollecting] = React.useState(false);
 
   const load = React.useCallback(async () => {
     setBusy(true);
@@ -1342,6 +1345,27 @@ function T6RankBoardPanel() {
       setBusy(false);
     }
   }, []);
+
+  const collect = React.useCallback(async () => {
+    setCollecting(true);
+    setCollectMsg('');
+    try {
+      const r = await fetch(`${API_BASE}/api/t6/collect`, { method: 'POST' });
+      const d = await r.json();
+      setCollectMsg(d.reason || (d.ok ? '已启动' : '失败'));
+      if (d.ok) {
+        // 采集约 1-2 分钟: 先等 75s 再查, 未落新数据再等 30s 重查一次
+        await new Promise((res) => setTimeout(res, 75000));
+        await load();
+        await new Promise((res) => setTimeout(res, 30000));
+        await load();
+      }
+    } catch (e) {
+      setCollectMsg(String(e.message || e));
+    } finally {
+      setCollecting(false);
+    }
+  }, [load]);
 
   React.useEffect(() => { load(); }, [load]);
 
@@ -1373,9 +1397,13 @@ function T6RankBoardPanel() {
           </p>
         </div>
         <div className="panel-actions">
+          <button onClick={collect} disabled={busy || collecting}>
+            {collecting ? '采集中…' : '立即采集'}
+          </button>
           <button onClick={load} disabled={busy}>{busy ? '刷新中…' : '刷新'}</button>
         </div>
       </div>
+      {collectMsg && <div className="notice">{collectMsg}</div>}
 
       <div className="fansclub-toolbar">
         {[['yesterday', '昨日榜'], ['live', '今日实时'], ['stock', '存量榜']].map(([k, label]) => (

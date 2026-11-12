@@ -1,14 +1,15 @@
-"""backend/live_monitor.py — 直播间实时监控 (PC 直连快照轮询, 零浏览器).
+"""backend/live_monitor.py — 直播间实时监控 (PC 直连快照轮询, 零浏览器, 不进房).
 
-阶段二 (用户 2026-11-04)。复用两头配方 2.0 (X-Tt-Token + sdk-version, 见
-live_analysis.py, lab §81 验证): 定时对房间 POST /webcast/room/enter/ 取快照,
-礼貌 leave。全程直连, 不开浏览器 — 与旧 watch 轮询 (浏览器探测) 互补。
+方案 A (用户 2026-11-12 定论): 监控不得进直播间 — 旧版 POST /webcast/room/enter/
++ leave 会在服务端留反复进出场痕迹, 已废。人数改走 GET /webcast/feed/ 广场列表
+(§81 两头配方, X-Tt-Token + sdk-version, 纯 GET 不进房), room_view_stats.display_value。
+代价: 人数是展示值 ('1.2万'); 目标不在广场流时该轮缺数 (记 stale 事件)。
 
 目标两种 (用户 2026-11-04: 账户维度优先):
 - {sec_uid}  账户维度 — 每轮先直连 profile/other 轻量版 (/aweme/v1/user/,
   阶段一验证通) 解析**当前场次** room_id, 主播重新开播换房间号也跟得住。
   room_id 解析带 10 分钟缓存, 未开播轮空。
-- {room_id}  房间维度 — 旧方式, 下播后 room_id 失效 (enter 30003)。
+- {room_id}  房间维度 — 旧方式, 下播后 room_id 失效。
 
 事件: 开播 / 下播 / 标题变化。人数在房间表实时展示, 不发事件。
 """
@@ -346,40 +347,43 @@ class LiveMonitor:
         return True
 
     def _snapshot(self, rid: str, st: dict, tok: str) -> None:
-        q = common_q(room_id=rid, anchor_id="0", enter_type=0, mean_type=1,
-                     room_tab="sale_hot", enter_from_merge="webcast_feed",
-                     live_id=1, request_tag="from", action_type="click")
-        ent = _http("POST", "/webcast/room/enter/", q, tok)
+        """快照 (2026-11-12 方案 A): 走 /webcast/feed/ 广场列表读人数, 不进房.
+
+        旧版 POST enter/leave 会在服务端留下反复进出场痕迹 (用户 2026-11-11
+        定论: 监控不得进直播间)。feed 是纯 GET 列表接口 (§81 两头配方已验),
+        每条 room 带 room_view_stats.display_value。代价:
+        - 人数是展示值 ('1.2万'), 非精确值
+        - 目标房间不在广场推荐流时取不到 → 记 stale 事件, 下轮再试
+        """
+        feed_room = None
+        for pull in ("1", "2", "3"):
+            d = _http("GET", "/webcast/feed/",
+                      common_q(count="20", offset="0", pull_type=pull), tok)
+            for it in (d.get("data") or []):
+                r = it.get("data") or {}
+                if str(r.get("id_str") or "") == rid and r.get("status") == 2:
+                    feed_room = r
+                    break
+            if feed_room:
+                break
+            time.sleep(0.5)
         st["last_tick"] = time.time()
-        sc = ent.get("status_code")
-        if sc != 0:
-            if sc == 30003:
-                # 房间失效: 账户维度目标下轮自动重解析; 房间维度目标需手动换
-                if st.get("sec_uid"):
-                    st["resolved_rid"] = ""  # 强制下轮重新解析
-                    st["resolved_at"] = 0.0
-                    hint = " (场次已失效, 下轮自动重新解析)"
-                else:
-                    hint = " (room_id 已失效, 下播后每场房间号独立 — 请刷新候选)"
-            else:
-                hint = ""
-            self._add_event("error", f"{st['label']} enter sc={sc} "
-                            f"{str(ent.get('status_msg') or '')[:40]}{hint}",
-                            st.get("sec_uid") or rid)
+        if feed_room is None:
+            # 不在广场流: 可能未开播或无推荐权重。用 profile 的 live_status 区分 —
+            # 仍在播 (resolved_rid 有效) 却不在流里 → 只能本轮缺数, 不发下播事件
+            self._add_event("stale", f"{st['label']} 未在广场流 (人数本轮缺)", rid)
             return
-        room = ent.get("data") or {}
-        brief = _room_brief(room if isinstance(room, dict) else {})
-        status = brief.get("status")
+        brief = _room_brief(feed_room)
         viewers = brief.get("viewers")
         viewers_int = _parse_viewers(viewers)
-        snap = {"t": time.time(), "status": status, "viewers_str": viewers,
+        snap = {"t": time.time(), "status": brief.get("status"), "viewers_str": viewers,
                 "viewers": viewers_int, "like_count": brief.get("like_count"),
                 "total_user": brief.get("total_user")}
         st["history"].append(snap)
         st["last"] = brief
         st["viewers"] = viewers_int
 
-        live = status == 2
+        live = brief.get("status") == 2
         # 开播 / 下播 (下播 → 该目标监控自动关闭, 2026-11-07 用户定论)
         if live and not st["was_live"]:
             self._add_event("live", f"{st['label']} 开播: {brief.get('title') or ''}", rid)
@@ -393,12 +397,7 @@ class LiveMonitor:
             self._add_event("info", f"{st['label']} 改标题: {new_title[:30]}", rid)
         st["title"] = new_title
         # 观众涨跌事件已撤 (2026-11-05 用户定论: 只留开播/下播/标题, 人数表格里看)
-        # 礼貌离房
-        try:
-            ql = common_q(room_id=rid, room_id_str=rid, leave_type=0, reason=2)
-            _http("POST", "/webcast/room/leave/", ql, tok)
-        except Exception:
-            pass
+        # 旧 enter/leave 礼貌离房已废 (方案 A: 不进房, 无需离房)
         # 回写 profile_cache (2026-11-05 打通断链): 账户表格的直播间/人数列直接吃到监控数据。
         # 只动 live 相关字段, 基础信息 (粉丝/昵称等) 一概不碰 — 与手动检测解耦。
         if st.get("sec_uid"):

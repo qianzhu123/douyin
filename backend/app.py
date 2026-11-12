@@ -597,3 +597,43 @@ def t6_ranks_live() -> dict:
 def t6_ranks_yesterday() -> dict:
     """昨日三榜: 相邻两快照日收盘差值 (完整跨天口径)."""
     return _t6.yesterday_ranks()
+
+
+# ---- T6 手动采集触发 (2026-11-11): web 按钮跨仓调 lab 采集脚本 ----
+import subprocess as _sp
+import threading as _threading
+
+_T6_COLLECT_SCRIPT = r"D:\code\android\androidre\douyin\tools\e113_daily_job.py"
+_T6_COLLECT_COOLDOWN = 600  # 秒: 10 分钟冷却, 防连点触发风控
+_t6_collect_lock = _threading.Lock()
+_t6_collect_last: dict = {"ts": 0.0, "running": False}
+
+
+@app.post("/api/t6/collect")
+def t6_collect() -> dict:
+    """手动触发一轮采集 (异步跑, 立即返回状态; 10 分钟冷却).
+
+    脚本自带安全门控: aweme 不存活静默跳过, 绝不冷启 (TikTok 保护)。
+    """
+    import time as _time
+    with _t6_collect_lock:
+        now = _time.time()
+        if _t6_collect_last["running"]:
+            return {"ok": False, "reason": "上一轮采集还在跑, 稍候"}
+        if now - _t6_collect_last["ts"] < _T6_COLLECT_COOLDOWN:
+            wait = int(_T6_COLLECT_COOLDOWN - (now - _t6_collect_last["ts"]))
+            return {"ok": False, "reason": f"冷却中, {wait // 60 + 1} 分钟后可再采"}
+        _t6_collect_last["running"] = True
+        _t6_collect_last["ts"] = now
+
+    def _run() -> None:
+        try:
+            _sp.run(["python", "-X", "utf8", _T6_COLLECT_SCRIPT],
+                    capture_output=True, timeout=300)
+        except Exception:
+            pass
+        finally:
+            _t6_collect_last["running"] = False
+
+    _threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "reason": "采集已启动 (约 1-2 分钟, 完成后刷新看新数据)"}
