@@ -199,6 +199,16 @@ def _sign(root: Path, url: str, min_jar: str) -> dict | None:
 _unidbg_lock = threading.Lock()  # mvn 仓并发写保护 (同一 JVM 目标串行签)
 
 
+def _kill_tree(pid: int) -> None:
+    """Windows 下连孙进程一起杀 (mvn.cmd → java 链; 普通 kill 留 java 孤儿)。"""
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+    # rc=128 (进程已不在) 也算成功
+
+
 def _sign_unidbg(root: Path, url: str, min_jar: str) -> dict:
     """离线签一次 → heads dict。失败/超时抛 RuntimeError (由上层回落 oracle/浏览器)。
 
@@ -212,13 +222,33 @@ def _sign_unidbg(root: Path, url: str, min_jar: str) -> dict:
     env = dict(os.environ)
     env["JAVA_HOME"] = JDK
     with _unidbg_lock:
+        proc = None
         try:
-            proc = subprocess.run(cmd, cwd=str(root / "unidbg-lab"), env=env,
-                                  capture_output=True, timeout=UNIDBG_TIMEOUT_S)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"unidbg 签名超时 >{UNIDBG_TIMEOUT_S}s") from exc
-    out = (proc.stdout or b"").decode("utf-8", errors="replace") + \
-          (proc.stderr or b"").decode("utf-8", errors="replace")
+            # stdin=DEVNULL 三重意义 (2026-11-12 后端挂死根因修复):
+            # ① unidbg 异常时 SimpleARM64Debugger 用 Scanner(System.in).nextLine()
+            #    阻塞读 stdin; 后端无控制台 → stdin 无效句柄 → 永久阻塞不 EOF 秒退,
+            #    JVM 挂死 1.4GB 内存白占。DEVNULL 使 read 立即 EOF → 秒退。
+            # ② timeout 杀进程时 mvn.cmd→java 是孙进程, kill 只杀 cmd 层,
+            #    java 变孤儿。taskkill /T 按父子链整树杀才能带走 java。
+            proc = subprocess.Popen(cmd, cwd=str(root / "unidbg-lab"), env=env,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            try:
+                out_b, err_b = proc.communicate(timeout=UNIDBG_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc.pid)
+                out_b, err_b = proc.communicate()
+                raise RuntimeError(f"unidbg 签名超时 >{UNIDBG_TIMEOUT_S}s (已杀进程树)")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            if proc is not None:
+                _kill_tree(proc.pid)
+            raise RuntimeError(f"unidbg 签名进程失败: {str(exc)[:80]}") from exc
+    out = (out_b or b"").decode("utf-8", errors="replace") + \
+          (err_b or b"").decode("utf-8", errors="replace")
     m = re.search(r"^BLOB=(.*)$", out, re.M)
     if not m:
         raise RuntimeError(f"unidbg 未出 BLOB (rc={proc.returncode}), "
