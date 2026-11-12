@@ -112,7 +112,7 @@ class MonitorService:
         try:
             from . import aweme_search_protocol as proto
             users, note = await asyncio.to_thread(proto.search, keyword)
-            return [SearchCandidate(
+            candidates = [SearchCandidate(
                 nickname=u.get("nickname", ""), unique_id=u.get("unique_id", ""),
                 signature=u.get("signature", ""), avatar_url=u.get("avatar_url", ""),
                 follower_count=int(u.get("follower_count") or 0),
@@ -123,6 +123,32 @@ class MonitorService:
                 live_status=int(u.get("live_status") or 0),
                 room_id=u.get("room_id", ""),
             ) for u in users][:12]
+            # 粉丝数补齐 (2026-11-13): general 搜索只给精确命中粉丝数, 泛化候选
+            # follower_count 恒 0 (服务器端脱敏)。复用主播监控的 profile 工具
+            # (常驻 Chromium 池 + user/profile/other XHR) 并行补齐 fans=0 的候选。
+            need = [c.sec_uid for c in candidates if not c.follower_count]
+            if need:
+                try:
+                    # 串行补齐 (2026-11-13 实测: 并行 5 页互踩全 None, 串行 3/3 成功);
+                    # 单个 ~7s, 最坏 6 候选 ~40s, _search_with_budget 60s 内。
+                    fans_map: dict[str, int] = {}
+                    for sec in need:
+                        try:
+                            info = await asyncio.wait_for(
+                                self.module.fetch_profile(sec), timeout=15)
+                            if info and info.get("sec_uid"):
+                                fans_map[info["sec_uid"]] = int(info.get("follower_count") or 0)
+                        except Exception:
+                            continue
+                    if fans_map:
+                        candidates = [
+                            c.model_copy(update={"follower_count": fans_map[c.sec_uid]})
+                            if c.sec_uid in fans_map else c
+                            for c in candidates
+                        ]
+                except Exception:
+                    pass  # 补齐失败不影响候选返回 (显示 0)
+            return candidates
         except Exception:
             pass  # 协议通道任何失败 → 浏览器链 (不拖时: 协议内部 5s 超时)
 

@@ -656,6 +656,73 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+/* token 健康条 (2026-11-12): 年龄预警 + 一键重抓入口 */
+.fc-token-health {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.fc-token-health-label {
+  color: #5a7ba0;
+  font-weight: 600;
+}
+
+.fc-token-age {
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: #eef4fb;
+  border: 1px solid #d4e3f5;
+  color: #17324d;
+}
+
+.fc-token-age.warn {
+  background: #fff7e0;
+  border-color: #e0b93e;
+  color: #8a6a00;
+}
+
+.fc-token-age.invalid {
+  background: #fdeaea;
+  border-color: #d9534f;
+  color: #a02622;
+}
+
+.fc-recapture-btn {
+  margin-left: auto;
+}
+
+/* 掉登录红横幅: 数据保留不隐藏, 只提示重抓 (用户指定) */
+.fc-token-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-left: 4px solid #d9534f;
+  background: #fdeaea;
+  color: #a02622;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+
+.fc-token-banner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 重抓确认弹窗 (复用 modal 体系, 若无则此处兜底定义) */
+.fc-token-banner .secondary:disabled,
+.fc-recapture-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .fansclub-tab {
   background: #eef4fb;
   color: #17324d;
@@ -978,12 +1045,21 @@ button:disabled {
 .library-modal {
   width: min(720px, 100%);
 }
-/* 搜索主播弹窗 (2026-11-12 用户定论: 720 太挤, 回标准 840 宽 + 候选区加高) */
+/* 搜索主播弹窗 (2026-11-12 用户定论: 720 太挤, 回标准 840 宽 + 候选区加高;
+   2026-11-13 再定论: 改窄长 — 左右收 560px, 上下候选区更高) */
 .streamer-search-modal {
-  width: min(840px, 100%);
+  width: min(560px, 100%);
 }
 .streamer-search-modal .lib-cand-list {
-  max-height: 420px;
+  max-height: 520px;
+}
+/* 候选行名称与抖音号拉开距离 (2026-11-13 用户反馈: 太近) */
+.candidate-row strong {
+  display: block;
+  margin-bottom: 5px;
+}
+.candidate-row small {
+  display: block;
 }
 /* 库内搜索结果区 (2026-11-08): 限高滚动, 与库列表区分 */
 .lib-cand-list {
