@@ -1165,6 +1165,10 @@ def preview_douyin_url(module: Any, url: str) -> dict[str, Any]:
                 "duration": 0,
                 "media": [],
             }
+            # SSR stats 四计数透出 (2026-11-13): _extract_stats 已挖到 digg/comment/
+            # collect/share, 之前丢弃 — 预览面板直接展示, 免再发请求
+            if meta.get("stats"):
+                details["stats"] = meta["stats"]
             if content_type == "video":
                 info = module._extract_video_info(page)
                 details["title"] = info.get("title") or details["title"]

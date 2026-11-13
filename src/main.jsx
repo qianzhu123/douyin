@@ -72,6 +72,7 @@ const NAV_ITEMS = [
   { id: 'sec-t6', label: '主播榜单' },
   { id: 'sec-fansclub', label: '粉丝团' },
   { id: 'sec-posts', label: '作品/评论' },
+  { id: 'sec-liked', label: '我的喜欢' },
   { id: 'sec-download', label: '视频下载' },
   { id: 'sec-logs', label: '日志' },
 ];
@@ -1469,14 +1470,28 @@ function T6RankBoardPanel() {
     try {
       const r = await fetch(`${API_BASE}/api/t6/collect`, { method: 'POST' });
       const d = await r.json();
-      setCollectMsg(d.reason || (d.ok ? '已启动' : '失败'));
-      if (d.ok) {
-        // 采集约 1-2 分钟: 先等 75s 再查, 未落新数据再等 30s 重查一次
-        await new Promise((res) => setTimeout(res, 75000));
-        await load();
-        await new Promise((res) => setTimeout(res, 30000));
-        await load();
+      if (!d.ok) {
+        setCollectMsg(d.reason || '失败');
+        return;
       }
+      setCollectMsg(d.reason || '已启动');
+      // 轮询真实结果 (通道A约2分钟/通道B约6分钟; 最长等 8 分钟)
+      for (let i = 0; i < 32; i++) {
+        await new Promise((res) => setTimeout(res, 15000));
+        const s = await fetch(`${API_BASE}/api/t6/collect-status`).then((x) => x.json());
+        if (!s.running) {
+          const rr = s.result;
+          if (rr && rr.ok > 0) {
+            setCollectMsg(`采集完成: 成功 ${rr.ok} 个${rr.fail ? `, 失败 ${rr.fail}` : ''}${rr.via === 'B' ? ' (unidbg 离线降级, 无粉丝团数据)' : ''}`);
+          } else if (rr) {
+            setCollectMsg(`采集未成功: ${rr.error || `成功 ${rr.ok} / 失败 ${rr.fail}${rr.skipped ? ` / 跳过 ${rr.skipped}` : ''}`}`);
+          } else {
+            setCollectMsg('采集已结束 (无结果回报)');
+          }
+          break;
+        }
+      }
+      await load();
     } catch (e) {
       setCollectMsg(String(e.message || e));
     } finally {
@@ -1588,6 +1603,7 @@ function PostsPanel({ accounts }) {
   const [checked, setChecked] = React.useState(new Set());
   const [commentsFor, setCommentsFor] = React.useState(null); // {aweme_id, desc}
   const [comments, setComments] = React.useState(null);
+  const [commentsSorted, setCommentsSorted] = React.useState(true); // 高赞评论: 默认按赞降序 (2026-11-13)
   const [commentsBusy, setCommentsBusy] = React.useState(false);
   const [commentsError, setCommentsError] = React.useState('');
   const [batchBusy, setBatchBusy] = React.useState(false);
@@ -1719,16 +1735,24 @@ function PostsPanel({ accounts }) {
               <label className="posts-check">
                 <input type="checkbox" checked={checked.has(p.aweme_id)} onChange={() => toggleCheck(p.aweme_id)} />
               </label>
+              {p.cover && (
+                <img className="posts-cover" src={p.cover} alt="" loading="lazy" />
+              )}
               <div className="posts-main">
                 <div className="posts-desc" title={p.desc}>{p.desc || '(无文案)'}</div>
                 <div className="posts-stats">
                   {p.is_image_post ? `图集×${p.image_count}` : formatNumber(p.digg_count) + ' 赞'}
                   {' · '}评 {formatNumber(p.comment_count)}{' · '}藏 {formatNumber(p.collect_count)}
+                  {' · '}转 {formatNumber(p.share_count)}
                   {' · '}{p.aweme_id}
                 </div>
               </div>
               <div className="posts-actions">
                 <button onClick={() => openComments(p)} title="查看评论">评论</button>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(p.page_url).then(() => {}, () => {}); }}
+                  title="复制直链 (未登录态可看)"
+                >复制链接</button>
                 <a href={p.page_url} target="_blank" rel="noreferrer" title="打开原页"><ExternalLink size={14} /></a>
               </div>
             </div>
@@ -1740,13 +1764,24 @@ function PostsPanel({ accounts }) {
         <div className="comments-drawer">
           <div className="comments-head">
             <span title={commentsFor.desc}>{commentsFor.desc || commentsFor.aweme_id}</span>
+            <label className="comments-sort-toggle">
+              <input
+                type="checkbox"
+                checked={commentsSorted}
+                onChange={(e) => setCommentsSorted(e.target.checked)}
+              />
+              按赞排序
+            </label>
             <button onClick={() => { setCommentsFor(null); setComments(null); }}>收起</button>
           </div>
           {commentsBusy && <div className="empty">评论拉取中…</div>}
           {commentsError && <div className="notice">{commentsError}</div>}
           {comments && (
             <div className="comments-list">
-              {comments.comments.map((c) => (
+              {(commentsSorted
+                ? [...comments.comments].sort((a, b) => (b.digg_count || 0) - (a.digg_count || 0))
+                : comments.comments
+              ).map((c) => (
                 <div key={c.cid} className="comment-row">
                   <div className="comment-text">{c.text}</div>
                   <div className="comment-meta">
@@ -2376,6 +2411,8 @@ function App() {
 
         <PostsPanel accounts={accounts} />
 
+        <LikedVideosPanel />
+
         <section className="panel download-panel" id="sec-download">
           <div className="panel-head">
             <div>
@@ -2548,6 +2585,196 @@ function App() {
         />
       )}
     </main>
+  );
+}
+
+// 下载预览列表 (2026-11-13 恢复: dda2aed 主播库重构误删了本组件但引用仍在,
+// 解析预览一点就 ReferenceError。顺带透出 SSR 四计数 stats)。stats 形状见
+// backend/services.py preview_douyin_url → item.stats = {digg,comment,collect,share}
+function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onToggleMedia, onToggleMediaBulk, onRemove }) {
+  const dragState = React.useRef({ active: false, url: '', mode: 'add', last: -1 });
+
+  const beginDrag = (event, item, firstIndex) => {
+    if (event.button !== 0) return;
+    const picked = new Set(selectedMedia[item.url] || []);
+    dragState.current = {
+      active: true,
+      url: item.url,
+      mode: picked.has(firstIndex) ? 'remove' : 'add',
+      last: firstIndex,
+    };
+    applyDrag(firstIndex);
+    event.preventDefault();
+  };
+
+  const applyDrag = (index) => {
+    const ds = dragState.current;
+    if (!ds.active) return;
+    if (ds.last === index) return;
+    ds.last = index;
+    const current = new Set(selectedMedia[ds.url] || []);
+    if (ds.mode === 'add') current.add(index);
+    else current.delete(index);
+    onToggleMediaBulk(ds.url, Array.from(current).sort((a, b) => a - b));
+  };
+
+  const endDrag = () => {
+    if (dragState.current.active) dragState.current.active = false;
+  };
+
+  React.useEffect(() => {
+    window.addEventListener('mouseup', endDrag);
+    return () => window.removeEventListener('mouseup', endDrag);
+  }, []);
+
+  return (
+    <div className="preview-list">
+      {(preview.items || []).map((item) => {
+        const isImageType = item.type === 'image' || item.type === 'slide';
+        const media = item.media || [];
+        const multiImage = isImageType && media.length > 1;
+        const picked = new Set(selectedMedia[item.url] || []);
+        const allPicked = multiImage && picked.size === media.length;
+        const nonePicked = multiImage && picked.size === 0;
+        const toggleAll = () => {
+          if (allPicked) {
+            media.forEach((m) => onToggleMedia(item.url, m.index));
+          } else {
+            const toAdd = media.filter((m) => !picked.has(m.index));
+            toAdd.forEach((m) => onToggleMedia(item.url, m.index));
+          }
+        };
+        const st = item.stats || null;
+        return (
+        <article className="preview-row" key={item.url}>
+          <label className="select-cell">
+            <input type="checkbox" checked={selectedUrls.has(item.url)} onChange={() => onToggle(item.url)} />
+          </label>
+          <div className="preview-cover">
+            {item.cover_url ? <img src={item.cover_url} alt="" /> : <span>{item.type}</span>}
+          </div>
+          <div className="preview-main">
+            <strong>{item.title || `链接 ${item.index}`}</strong>
+            <small>{item.author || item.url}</small>
+            <span>
+              {item.type || 'link'} · {item.duration ? formatDuration(item.duration) : '时长未知'} · {media.length || 1} 个媒体项
+              {multiImage && picked.size > 0 ? ` · 已选 ${picked.size} 张` : ''}
+            </span>
+            {st && (
+              <span className="preview-stats">
+                {formatNumber(st.digg_count ?? 0)} 赞 · {formatNumber(st.comment_count ?? 0)} 评
+                {' · '}{formatNumber(st.collect_count ?? 0)} 藏 · {formatNumber(st.share_count ?? 0)} 转
+              </span>
+            )}
+            {item.error && <small className="error-text">{item.error}</small>}
+            {multiImage && (
+              <div
+                className="media-strip"
+                onMouseLeave={endDrag}
+              >
+                <button className="secondary media-toggle-all" onClick={toggleAll} type="button">
+                  {allPicked ? '取消全选' : '全选'}
+                </button>
+                <small className="media-hint">提示：按住鼠标在图片上拖动可批量勾选/取消</small>
+                {media.map((m) => {
+                  const checked = picked.has(m.index);
+                  return (
+                    <div
+                      className={`media-chip${checked ? ' picked' : ''}`}
+                      key={`${item.url}-${m.index}`}
+                      title={`第 ${m.index} 张 · ${m.type}`}
+                      onMouseDown={(e) => beginDrag(e, item, m.index)}
+                      onMouseEnter={() => applyDrag(m.index)}
+                      onClick={(e) => { e.preventDefault(); onToggleMedia(item.url, m.index); }}
+                    >
+                      {m.cover_url ? <img src={m.cover_url} alt="" loading="lazy" draggable="false" /> : <span>{m.type}</span>}
+                      <small>{m.index}</small>
+                    </div>
+                  );
+                })}
+                {nonePicked && <small className="error-text">未勾选图片时将下载全部 {media.length} 张</small>}
+              </div>
+            )}
+          </div>
+          <button className="icon-button preview-remove" onClick={() => onRemove(item.url)} title="删除该预览" type="button">
+            <Trash2 size={16} />
+          </button>
+        </article>
+        );
+      })}
+    </div>
+  );
+}
+
+// 我的喜欢/收藏面板 (任务④ 2026-11-13): dy1 登录态 (CDP Chrome), 封面+标题+复制/跳转。
+// 链接一律 /video/<id> 直链 (后端 liked_videos.py 已规约), 未登录态可看 —
+// 不用喜欢列表聚合链接 (需登录)。
+function LikedVideosPanel() {
+  const [kind, setKind] = React.useState('like'); // like | collect
+  const [data, setData] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [copied, setCopied] = React.useState('');
+
+  const load = React.useCallback(async (k, refresh) => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/videos?kind=${k}${refresh ? '&refresh=1' : ''}`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      setData(d);
+      if (!d.ok) setError(d.error || '拉取失败');
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  React.useEffect(() => { load(kind, false); }, [kind, load]);
+
+  const copyLink = (item) => {
+    navigator.clipboard.writeText(item.url).then(() => {
+      setCopied(item.aweme_id);
+      setTimeout(() => setCopied(''), 1500);
+    }, () => {});
+  };
+
+  const items = (data && data.items) || [];
+  return (
+    <section className="panel liked-panel" id="sec-liked">
+      <div className="panel-head">
+        <div>
+          <h2>我的喜欢 / 收藏</h2>
+          <p>dy1 登录态的点赞与收藏视频 · 封面卡片 · 链接为作品直链 (未登录可看)</p>
+        </div>
+        <div className="panel-actions">
+          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => setKind('like')} disabled={busy}>喜欢</button>
+          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => setKind('collect')} disabled={busy}>收藏</button>
+          <button onClick={() => load(kind, true)} disabled={busy}>{busy ? '拉取中…' : '刷新'}</button>
+        </div>
+      </div>
+      {error && <div className="notice">{error}</div>}
+      {data && data.cached && !busy && <div className="empty">5 分钟内缓存 · 点"刷新"强制重拉</div>}
+      {busy && !items.length && <div className="empty">正在打开 dy1 登录态页面拉取 (约 15-30 秒)…</div>}
+      {!busy && data && data.ok && items.length === 0 && <div className="empty">列表为空</div>}
+      <div className="liked-grid">
+        {items.map((it) => (
+          <div key={it.aweme_id} className="liked-card">
+            <a href={it.url} target="_blank" rel="noreferrer" className="liked-cover" title={it.title}>
+              {it.cover ? <img src={it.cover} alt="" loading="lazy" /> : <span className="liked-noimg">无封面</span>}
+            </a>
+            <div className="liked-title" title={it.title}>{it.title || '(无标题)'}</div>
+            {it.author && <div className="liked-author">{it.author}</div>}
+            <div className="liked-actions">
+              <button onClick={() => copyLink(it)}>{copied === it.aweme_id ? '已复制' : '复制链接'}</button>
+              <a href={it.url} target="_blank" rel="noreferrer" title="打开原页"><ExternalLink size={14} /></a>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

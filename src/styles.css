@@ -1263,3 +1263,48 @@ button:disabled {
   color: #5aa9ff;
   border-color: #5aa9ff;
 }
+
+/* ---- 我的喜欢/收藏 (liked-panel, 2026-11-13 任务④) ---- */
+.liked-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.liked-card {
+  display: flex; flex-direction: column;
+  border: 1px solid #e2ecf7; border-radius: 8px;
+  background: #fbfdff; overflow: hidden;
+}
+.liked-cover { display: block; aspect-ratio: 3 / 4; background: #eef3f8; }
+.liked-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.liked-noimg {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; font-size: 12px; color: #8a97a5;
+}
+.liked-title {
+  font-size: 12.5px; color: #223a52; padding: 7px 9px 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; min-height: 32px;
+}
+.liked-author { font-size: 11px; color: #8a97a5; padding: 0 9px; }
+.liked-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 9px 8px;
+}
+.liked-actions button {
+  padding: 2px 9px; font-size: 11.5px;
+  border: 1px solid #d5e2f0; border-radius: 5px;
+  background: #fff; color: #3d5a75; cursor: pointer;
+}
+.liked-actions button:hover { background: #f0f6fc; }
+.liked-actions a { color: #6b8299; display: flex; }
+.posts-cover {
+  flex-shrink: 0; width: 44px; height: 58px; object-fit: cover;
+  border-radius: 4px; border: 1px solid #e2ecf7; background: #eef3f8;
+}
+.comments-sort-toggle {
+  flex-shrink: 0; display: flex; align-items: center; gap: 4px;
+  font-size: 12px; font-weight: 400; color: #3d5a75; cursor: pointer;
+}
+.preview-stats { font-size: 11.5px; color: #5a7ba6; }

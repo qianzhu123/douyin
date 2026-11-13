@@ -37,3 +37,5 @@ tests/live_room_analysis/out/
 data/fansclub_tokens/
 data/fansclub_overview_cache.json
 data/fansclub_token_log.json
+# 浏览器 profile (34M, 含站点存储; 运行时产物勿入仓库)
+data/search_profile/

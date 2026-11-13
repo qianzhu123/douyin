@@ -468,6 +468,32 @@ def comments_list(payload: CommentListRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
 
 
+# ---- dy1 喜欢/收藏视频 (CDP Chrome 登录态 DOM 采集, 见 backend/liked_videos.py) ----
+import time as _time_lv
+import threading as _threading_lv
+from . import liked_videos as _lv
+
+_liked_lock = _threading_lv.Lock()
+_liked_cache: dict = {"like": {"ts": 0.0, "data": None}, "collect": {"ts": 0.0, "data": None}}
+_LIKED_CACHE_TTL = 300.0  # 5 分钟缓存: 面板刷新频繁, 不必每次都真开页面
+
+
+@app.get("/api/liked/videos")
+def liked_videos(kind: str = "like", refresh: bool = False, max_items: int = 60) -> dict:
+    """dy1 登录态喜欢/收藏视频卡片 (封面+标题+直链; 5 分钟缓存; 只读)."""
+    kind = "collect" if kind == "collect" else "like"
+    now = _time_lv.time()
+    with _liked_lock:
+        ent = _liked_cache[kind]
+        if not refresh and ent["data"] and now - ent["ts"] < _LIKED_CACHE_TTL:
+            return {**ent["data"], "cached": True}
+    data = _lv.fetch_liked_items(kind=kind, max_items=max(10, min(200, max_items)))
+    if data.get("ok"):
+        with _liked_lock:
+            _liked_cache[kind] = {"ts": _time_lv.time(), "data": data}
+    return {**data, "cached": False}
+
+
 # ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----
 from .schemas import PostBatchDownloadRequest
 
@@ -618,7 +644,9 @@ _t6_collect_last: dict = {"ts": 0.0, "running": False}
 def t6_collect() -> dict:
     """手动触发一轮采集 (异步跑, 立即返回状态; 10 分钟冷却).
 
-    脚本自带安全门控: aweme 不存活静默跳过, 绝不冷启 (TikTok 保护)。
+    双通道 (2026-11-13): aweme 存活 → oracle 全采 (含 club); 不存活 →
+    unidbg search 离线降级 (仅粉丝数, 无 club)。脚本尾行 RESULT 如实回报,
+    后端解析后存 _t6_collect_last 供前端轮询。
     """
     import time as _time
     with _t6_collect_lock:
@@ -633,15 +661,33 @@ def t6_collect() -> dict:
 
     def _run() -> None:
         try:
-            _sp.run(["python", "-X", "utf8", _T6_COLLECT_SCRIPT],
-                    capture_output=True, timeout=300)
-        except Exception:
-            pass
+            p = _sp.run(["python", "-X", "utf8", _T6_COLLECT_SCRIPT],
+                        capture_output=True, timeout=600)
+            out = (p.stdout or b"").decode("utf-8", "replace")
+            m = _re.search(r"RESULT ok=(\d+) fail=(\d+) skipped=(\d+) via=(\w)",
+                           out.strip().splitlines()[-1] if out.strip() else "")
+            if m:
+                _t6_collect_last["result"] = {
+                    "ok": int(m.group(1)), "fail": int(m.group(2)),
+                    "skipped": int(m.group(3)), "via": m.group(4),
+                }
+            else:
+                _t6_collect_last["result"] = {"ok": 0, "fail": 0, "skipped": 1,
+                                              "via": "?", "error": "无 RESULT 输出 (脚本异常)"}
+        except Exception as exc:
+            _t6_collect_last["result"] = {"ok": 0, "fail": 0, "skipped": 1,
+                                          "via": "?", "error": str(exc)[:120]}
         finally:
             _t6_collect_last["running"] = False
 
     _threading.Thread(target=_run, daemon=True).start()
-    return {"ok": True, "reason": "采集已启动 (约 1-2 分钟, 完成后刷新看新数据)"}
+    return {"ok": True, "reason": "采集已启动 (通道A约2分钟/通道B约6分钟, 完成后刷新看新数据)"}
+
+
+@app.get("/api/t6/collect-status")
+def t6_collect_status() -> dict:
+    """前端轮询: 采集是否在跑 + 上一轮真实结果."""
+    return {**_t6_collect_last}
 
 
 # ---- token 健康系统 (2026-11-12): 年龄预警 + 掉登录日志 + 一键重抓 ----
