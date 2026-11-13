@@ -157,11 +157,20 @@ def deploy_token(label: str, token: str, source: str = "manual") -> dict:
 
 
 def club_list(token: str) -> list[dict]:
-    q = {"count": 50, "offset": 0}
-    data = _req("GET", BASE_WEBCAST, "/webcast/fansclub/user_auto_light_up_list/", q, token)
-    if data.get("status_code") != 0:
-        raise RuntimeError(f"club_list status={data.get('status_code')}")
-    return data["data"]["user_auto_light_up_list"]
+    """全量团列表 (分页循环; 服务端单页上限 50, 团数超过会被静默截断 — 2026-11-13 补翻页)."""
+    out = []
+    offset = 0
+    while True:
+        q = {"count": 50, "offset": offset}
+        data = _req("GET", BASE_WEBCAST, "/webcast/fansclub/user_auto_light_up_list/", q, token)
+        if data.get("status_code") != 0:
+            raise RuntimeError(f"club_list status={data.get('status_code')}")
+        page = data["data"]["user_auto_light_up_list"]
+        out.extend(page)
+        if len(page) < 50:  # 不足一页 = 已到末页
+            break
+        offset += 50
+    return out
 
 
 def calendar_map(token: str, anchor_id: str) -> tuple[dict, dict]:
