@@ -660,13 +660,15 @@ def t6_collect() -> dict:
         _t6_collect_last["ts"] = now
 
     def _run() -> None:
+        import re as _re_t6   # 模块级无 re 别名 (_re 只在另一函数作用域内), 原代码
+                              # 靠 NameError 落进 except → 结果永远解析不出来 (2026-11-14 修)
         try:
             p = _sp.run(["python", "-X", "utf8", _T6_COLLECT_SCRIPT],
                         capture_output=True, timeout=900)
             out = (p.stdout or b"").decode("utf-8", "replace")
             # 全量搜 RESULT 行, 不能只看最后一行: 脚本尾行是 "=== daily job end ==="
             # (log() 同样写 stdout), 取 [-1] 会导致成功也判为"无 RESULT"(2026-11-14 修)
-            m = _re.search(r"RESULT ok=(\d+) fail=(\d+) skipped=(\d+) via=(\w+)"
+            m = _re_t6.search(r"RESULT ok=(\d+) fail=(\d+) skipped=(\d+) via=(\w+)"
                            r"(?: truncated=(\d+))?(?: secs=(\d+))?", out)
             if m:
                 _t6_collect_last["result"] = {
