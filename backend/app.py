@@ -662,14 +662,18 @@ def t6_collect() -> dict:
     def _run() -> None:
         try:
             p = _sp.run(["python", "-X", "utf8", _T6_COLLECT_SCRIPT],
-                        capture_output=True, timeout=600)
+                        capture_output=True, timeout=900)
             out = (p.stdout or b"").decode("utf-8", "replace")
-            m = _re.search(r"RESULT ok=(\d+) fail=(\d+) skipped=(\d+) via=(\w)",
-                           out.strip().splitlines()[-1] if out.strip() else "")
+            # 全量搜 RESULT 行, 不能只看最后一行: 脚本尾行是 "=== daily job end ==="
+            # (log() 同样写 stdout), 取 [-1] 会导致成功也判为"无 RESULT"(2026-11-14 修)
+            m = _re.search(r"RESULT ok=(\d+) fail=(\d+) skipped=(\d+) via=(\w+)"
+                           r"(?: truncated=(\d+))?(?: secs=(\d+))?", out)
             if m:
                 _t6_collect_last["result"] = {
                     "ok": int(m.group(1)), "fail": int(m.group(2)),
                     "skipped": int(m.group(3)), "via": m.group(4),
+                    "truncated": m.group(5) == "1",
+                    "secs": int(m.group(6)) if m.group(6) else None,
                 }
             else:
                 _t6_collect_last["result"] = {"ok": 0, "fail": 0, "skipped": 1,
@@ -681,7 +685,7 @@ def t6_collect() -> dict:
             _t6_collect_last["running"] = False
 
     _threading.Thread(target=_run, daemon=True).start()
-    return {"ok": True, "reason": "采集已启动 (通道A约2分钟/通道B约6分钟, 完成后刷新看新数据)"}
+    return {"ok": True, "reason": "采集已启动 (通道A约2分钟/通道B约8分钟, 完成后刷新看新数据)"}
 
 
 @app.get("/api/t6/collect-status")

@@ -1475,14 +1475,17 @@ function T6RankBoardPanel() {
         return;
       }
       setCollectMsg(d.reason || '已启动');
-      // 轮询真实结果 (通道A约2分钟/通道B约6分钟; 最长等 8 分钟)
-      for (let i = 0; i < 32; i++) {
+      // 轮询真实结果 (通道A约2分钟/通道B最多8分钟; 后端预算 15 分钟, 这里等到 12 分钟)
+      for (let i = 0; i < 48; i++) {
         await new Promise((res) => setTimeout(res, 15000));
         const s = await fetch(`${API_BASE}/api/t6/collect-status`).then((x) => x.json());
         if (!s.running) {
           const rr = s.result;
           if (rr && rr.ok > 0) {
-            setCollectMsg(`采集完成: 成功 ${rr.ok} 个${rr.fail ? `, 失败 ${rr.fail}` : ''}${rr.via === 'B' ? ' (unidbg 离线降级, 无粉丝团数据)' : ''}`);
+            const tail = `${rr.via === 'B' ? ' (unidbg 离线降级, 无粉丝团数据)' : ''}` +
+              `${rr.secs ? `, 用时 ${rr.secs}s` : ''}` +
+              `${rr.truncated ? ', ⏱ 到时间预算提前收尾, 未采完' : ''}`;
+            setCollectMsg(`采集完成: 成功 ${rr.ok} 个${rr.fail ? `, 失败 ${rr.fail}` : ''}${tail}`);
           } else if (rr) {
             setCollectMsg(`采集未成功: ${rr.error || `成功 ${rr.ok} / 失败 ${rr.fail}${rr.skipped ? ` / 跳过 ${rr.skipped}` : ''}`}`);
           } else {
