@@ -803,6 +803,27 @@ def liked_download(payload: LikedDownloadRequest) -> dict:
             "output_dir": str(_LIKED_DL_ROOT), "job_id": job.id}
 
 
+@app.post("/api/liked/download/open-folder")
+def liked_download_open_folder(path: str = "") -> dict:
+    """在资源管理器中打开下载文件夹 (七轮 2026-11-15: 界面直接给路径+打开按钮)。
+
+    仅放行项目内路径 (前缀必须是 _LIKED_DL_ROOT), 防任意目录打开。
+    """
+    import os
+    import subprocess
+    from pathlib import Path as _Path
+    target = _Path(path or "").resolve()
+    root = _Path(str(_LIKED_DL_ROOT)).resolve()
+    if not str(target).startswith(str(root)):
+        raise HTTPException(status_code=400, detail="仅允许打开下载根目录内的文件夹")
+    if not target.exists():
+        target = root
+        root.mkdir(parents=True, exist_ok=True)
+    # 不存在则建根目录并打开根; 存在则直接开
+    os.startfile(str(target))  # noqa: S606 (本地桌面意图, 路径已白名单校验)
+    return {"ok": True, "opened": str(target)}
+
+
 # ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----
 from .schemas import PostBatchDownloadRequest
 

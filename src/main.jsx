@@ -2736,6 +2736,7 @@ function LikedVideosPanel() {
   const [authors, setAuthors] = React.useState([]);  // 作者去重列表
   const [delArm, setDelArm] = React.useState(null);  // 删除账户二次点击确认
   const [downloading, setDownloading] = React.useState(false); // 一键下载进行中
+  const [dlPath, setDlPath] = React.useState('');   // 下载任务文件夹路径横幅 (七轮)
   const [sel, setSel] = React.useState({});          // 选中集合 {aweme_id: true}
   const noticeTimer = React.useRef(null);
   const moreLock = React.useRef(false);              // 滚动加载防重入
@@ -2964,7 +2965,7 @@ function LikedVideosPanel() {
         body: JSON.stringify({ kind, items: targets.map((it) => ({ url: it.url, title: it.title, author: it.author })), mode: 3, comments: true }),
       });
       const dd = await r.json();
-      if (dd.ok) flashNotice(`已创建下载任务: ${dd.total} 个视频 → liked_downloads/ (在"下载"面板看进度)`);
+      if (dd.ok) setDlPath(dd.output_dir || `已创建下载任务: ${dd.total} 个视频`);
       else flashNotice(dd.detail || '创建下载任务失败');
     } catch (e) { flashNotice(String(e.message || e)); }
     finally { setDownloading(false); }
@@ -3032,10 +3033,6 @@ function LikedVideosPanel() {
         {acct && (
           <div className={`liked-acct-current${logged ? ' ok' : ' bad'}`}>
             <span className={`liked-dot ${logged ? 'on' : 'off'}`} />
-            {logged && acct.avatar && (
-              <img className="liked-avatar" src={acct.avatar} alt="" referrerPolicy="no-referrer"
-                   onError={(e) => { e.target.style.display = 'none'; }} />
-            )}
             <strong>{acct.cdp ? (logged ? (acct.nickname || '已登录') : '未登录') : '调试 Chrome 未运行'}</strong>
             {!logged && <button className="liked-acct-login" onClick={() => doLogin(curSlot || 1)}>扫码登录</button>}
             {logged && <span className="liked-acct-hint">· {acct.nickname ? '' : '槽位 '}{curSlot}</span>}
@@ -3098,6 +3095,22 @@ function LikedVideosPanel() {
         )}
         <span className="liked-filter-hint">本地即时过滤 (缓存 {grandTotal} 条)</span>
       </div>
+
+      {/* 下载文件夹横幅 (七轮): 直接给出绝对路径 + 一键打开, 常驻直到下载新任务 */}
+      {dlPath && (
+        <div className="liked-dl-banner">
+          <span className="liked-dl-banner-label">下载文件夹:</span>
+          <code className="liked-dl-banner-path" title="点击复制路径"
+                onClick={() => { navigator.clipboard.writeText(dlPath); flashNotice('路径已复制'); }}>
+            {dlPath}
+          </code>
+          <button className="liked-dl-open" onClick={() => {
+            fetch(`${API_BASE}/api/liked/download/open-folder?path=${encodeURIComponent(dlPath)}`, { method: 'POST' })
+              .catch(() => flashNotice('打开失败 (后端未响应)'));
+          }}>打开文件夹</button>
+          <button className="liked-dl-banner-close" onClick={() => setDlPath('')}>×</button>
+        </div>
+      )}
 
       {notice && <div className="empty">{notice}</div>}
       {error && <div className="notice">{error}</div>}
