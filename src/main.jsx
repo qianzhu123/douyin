@@ -2709,33 +2709,103 @@ function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onTog
   );
 }
 
-// 我的喜欢/收藏面板 (任务④ 2026-11-13): dy1 登录态 (CDP Chrome), 封面+标题+复制/跳转。
-// 链接一律 /video/<id> 直链 (后端 liked_videos.py 已规约), 未登录态可看 —
-// 不用喜欢列表聚合链接 (需登录)。
+// 我的喜欢/收藏面板 (2026-11-14 重做):
+//   · 不再"开一次界面就拉一次" → 只在点「拉取」按钮时拉, 结果长缓存(1h)
+//   · 登录态状态显示 (CDP/槽位/昵称头像) + 扫码登录 + 切换账户 (每账户独立 profile)
+//   · 分页: 首屏 16 (两行), 后台默认补到 40, 「继续加载」每次 +8
+//   · 卡片三重过滤 (后端已滤页脚 SEO 链接), 链接一律 /video/<id> 直链
 function LikedVideosPanel() {
-  const [kind, setKind] = React.useState('like'); // like | collect
-  const [data, setData] = React.useState(null);
-  const [busy, setBusy] = React.useState(false);
+  const [kind, setKind] = React.useState('like');
+  const [items, setItems] = React.useState([]);
+  const [total, setTotal] = React.useState(0);
+  const [busy, setBusy] = React.useState(false);          // 切片读取中
+  const [fetching, setFetching] = React.useState(false);  // 后台拉取中
+  const [progress, setProgress] = React.useState(0);
   const [error, setError] = React.useState('');
   const [copied, setCopied] = React.useState('');
+  const [acct, setAcct] = React.useState(null);
+  const [acctBusy, setAcctBusy] = React.useState(false);
+  const [login, setLogin] = React.useState(null);
+  const [showLogin, setShowLogin] = React.useState(false);
+  const [notice, setNotice] = React.useState('');
+  const PAGE = 16, STEP = 8;
 
-  const load = React.useCallback(async (k, refresh) => {
-    setBusy(true);
-    setError('');
+  // 账户状态 (不触发拉取; probe=1 会读一次昵称头像)
+  const loadAcct = React.useCallback(async (probe) => {
     try {
-      const r = await fetch(`${API_BASE}/api/liked/videos?kind=${k}${refresh ? '&refresh=1' : ''}`);
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || r.statusText);
-      setData(d);
-      if (!d.ok) setError(d.error || '拉取失败');
-    } catch (e) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy(false);
-    }
+      const r = await fetch(`${API_BASE}/api/liked/account?probe=${probe ? 1 : 0}`);
+      setAcct(await r.json());
+    } catch (e) { /* 状态读不到不阻塞面板 */ }
   }, []);
 
-  React.useEffect(() => { load(kind, false); }, [kind, load]);
+  // 只读缓存切片 (不触发任何拉取)
+  const loadSlice = React.useCallback(async (k, offset, limit) => {
+    const r = await fetch(`${API_BASE}/api/liked/videos?kind=${k}&offset=${offset}&limit=${limit}`);
+    return r.json();
+  }, []);
+
+  React.useEffect(() => { loadAcct(true); }, [loadAcct]);
+
+  // 切 tab / 首次进入: 只读缓存, 不触发拉取 (用户要求)
+  React.useEffect(() => {
+    let alive = true;
+    setBusy(true); setError('');
+    loadSlice(kind, 0, PAGE).then((d) => {
+      if (!alive) return;
+      setItems(d.items || []); setTotal(d.total || 0);
+      if (d.error) setError(d.error);
+      setFetching(!!d.running);
+      if (d.running) setProgress((d.fetch_state || {}).count || 0);
+      setBusy(false);
+    }).catch((e) => { if (alive) { setError(String(e.message || e)); setBusy(false); } });
+    return () => { alive = false; };
+  }, [kind, loadSlice]);
+
+  // 后台拉取中: 轮询进度 + 增量刷新已显示部分
+  React.useEffect(() => {
+    if (!fetching) return undefined;
+    const t = setInterval(async () => {
+      const d = await loadSlice(kind, 0, Math.max(PAGE, items.length));
+      setProgress((d.fetch_state || {}).count || 0);
+      if (!d.running) {
+        setFetching(false);
+        setItems(d.items || []); setTotal(d.total || 0);
+        if (d.error) setError(d.error);
+        loadAcct(true);
+      } else if ((d.items || []).length > items.length) {
+        setItems(d.items || []); setTotal(d.total || 0);
+      }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [fetching, kind, items.length, loadSlice, loadAcct]);
+
+  // 「拉取」按钮: 起后台拉取 (先 16 → 默认补到 40)
+  const doFetch = async (target) => {
+    setError(''); setNotice('');
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/fetch?kind=${kind}&target=${target || 0}`, { method: 'POST' });
+      const d = await r.json();
+      if (!d.ok) { setNotice(d.reason || '无法开始'); return; }
+      setNotice(d.reason || '已开始');
+      setFetching(true); setProgress(0);
+      const s = await loadSlice(kind, 0, PAGE);
+      setItems(s.items || []); setTotal(s.total || 0);
+    } catch (e) { setError(String(e.message || e)); }
+  };
+
+  // 「继续加载」: 缓存够就只多显示, 不够才拉 (每次 +STEP)
+  const doMore = async () => {
+    const wantShown = items.length + STEP;
+    if (wantShown <= total) {
+      setBusy(true);
+      try {
+        const d = await loadSlice(kind, 0, wantShown);
+        setItems(d.items || []); setTotal(d.total || 0);
+      } finally { setBusy(false); }
+      return;
+    }
+    await doFetch(Math.max(total + STEP, 40));
+  };
 
   const copyLink = (item) => {
     navigator.clipboard.writeText(item.url).then(() => {
@@ -2744,24 +2814,104 @@ function LikedVideosPanel() {
     }, () => {});
   };
 
-  const items = (data && data.items) || [];
+  const doSwitch = async (slot) => {
+    setAcctBusy(true); setNotice('');
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/account/switch?slot=${slot}`, { method: 'POST' });
+      const d = await r.json();
+      setNotice(d.ok ? `已切换到账户 ${slot}` : (d.error || '切换失败'));
+      setItems([]); setTotal(0);
+      await loadAcct(true);
+    } finally { setAcctBusy(false); }
+  };
+
+  const doLogin = async (slot) => {
+    setLogin({ phase: 'running' });
+    setShowLogin(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/login/start?slot=${slot}`, { method: 'POST' });
+      setLogin(await r.json());
+    } catch (e) { setLogin({ phase: 'error', error: String(e.message || e) }); }
+  };
+
+  // 扫码轮询
+  React.useEffect(() => {
+    if (!showLogin || !login || login.phase !== 'running') return undefined;
+    const t = setInterval(async () => {
+      const s = await fetch(`${API_BASE}/api/liked/login/status`).then((x) => x.json());
+      setLogin(s);
+      if (s.phase === 'success') { loadAcct(true); setTimeout(() => setShowLogin(false), 1500); }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [showLogin, login, loadAcct]);
+
+  const logged = acct && acct.logged_in;
+  const curSlot = acct && acct.slot;
+
   return (
     <section className="panel liked-panel" id="sec-liked">
       <div className="panel-head">
         <div>
           <h2>我的喜欢 / 收藏</h2>
-          <p>dy1 登录态的点赞与收藏视频 · 封面卡片 · 链接为作品直链 (未登录可看)</p>
+          <p>当前登录账户的点赞与收藏 · 封面卡片 · 链接为作品直链 (未登录可看)</p>
         </div>
         <div className="panel-actions">
-          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => setKind('like')} disabled={busy}>喜欢</button>
-          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => setKind('collect')} disabled={busy}>收藏</button>
-          <button onClick={() => load(kind, true)} disabled={busy}>{busy ? '拉取中…' : '刷新'}</button>
+          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => setKind('like')}>喜欢</button>
+          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => setKind('collect')}>收藏</button>
+          <button onClick={() => doFetch(0)} disabled={fetching}>
+            {fetching ? `拉取中… ${progress}` : '拉取'}
+          </button>
         </div>
       </div>
+
+      {/* 登录态状态条 */}
+      <div className="liked-acct">
+        {!acct && <span className="liked-acct-hint">正在读取登录态…</span>}
+        {acct && !acct.cdp && (
+          <>
+            <span className="liked-dot off" />
+            <span>调试 Chrome 未运行 —— 无法读取登录态</span>
+            <button onClick={() => doLogin(curSlot || 1)}>扫码登录</button>
+          </>
+        )}
+        {acct && acct.cdp && !logged && (
+          <>
+            <span className="liked-dot off" />
+            <span>未登录 (槽位 {curSlot || 1})</span>
+            <button onClick={() => doLogin(curSlot || 1)}>扫码登录</button>
+          </>
+        )}
+        {acct && acct.cdp && logged && (
+          <>
+            <span className="liked-dot on" />
+            {acct.avatar && <img className="liked-avatar" src={acct.avatar} alt="" />}
+            <strong>{acct.nickname || '已登录'}</strong>
+            <span className="liked-acct-hint">· 槽位 {curSlot}</span>
+          </>
+        )}
+        <span className="liked-acct-spacer" />
+        {(acct?.slots || []).map((s) => (
+          <button key={s.slot} className={`liked-slot${s.active ? ' active' : ''}`}
+                  onClick={() => doSwitch(s.slot)} disabled={acctBusy || s.active}
+                  title={`切换到${s.name}`}>
+            {s.name}
+          </button>
+        ))}
+        {acct && acct.cdp && logged && (
+          <button onClick={() => doLogin(curSlot || 1)} disabled={acctBusy}>重新登录</button>
+        )}
+      </div>
+
+      {notice && <div className="empty">{notice}</div>}
       {error && <div className="notice">{error}</div>}
-      {data && data.cached && !busy && <div className="empty">5 分钟内缓存 · 点"刷新"强制重拉</div>}
-      {busy && !items.length && <div className="empty">正在打开 dy1 登录态页面拉取 (约 15-30 秒)…</div>}
-      {!busy && data && data.ok && items.length === 0 && <div className="empty">列表为空</div>}
+      {fetching && <div className="empty">后台拉取中… 已载入 {progress} 个 (可继续浏览, 完成后自动刷新)</div>}
+      {busy && !items.length && !fetching && <div className="empty">读取缓存…</div>}
+      {!busy && !fetching && !items.length && (
+        <div className="empty">
+          {logged ? '尚未拉取 —— 点右上「拉取」加载当前账户的列表' : '请先扫码登录'}
+        </div>
+      )}
+
       <div className="liked-grid">
         {items.map((it) => (
           <div key={it.aweme_id} className="liked-card">
@@ -2777,6 +2927,38 @@ function LikedVideosPanel() {
           </div>
         ))}
       </div>
+
+      {(total > items.length || fetching) && (
+        <div className="liked-more">
+          <button onClick={doMore} disabled={busy || fetching}>
+            {busy ? '加载中…' : fetching ? `后台拉取中… (${progress})` : `继续加载 (${items.length}/${total})`}
+          </button>
+        </div>
+      )}
+
+      {showLogin && (
+        <div className="liked-login-modal">
+          <div className="liked-login-box">
+            <h3>扫码登录{login && login.slot ? ` (账户 ${login.slot})` : ''}</h3>
+            {login && login.phase === 'running' && !login.qr && <p>正在获取二维码…</p>}
+            {login && login.qr && <img className="liked-qr" src={login.qr} alt="抖音登录二维码" />}
+            {login && login.phase === 'running' && login.avatar && (
+              <p className="liked-scan-hint"><img src={login.avatar} alt="" /> 已扫码, 请在手机上确认</p>
+            )}
+            {login && login.phase === 'success' && (
+              <p>登录成功{login.injected_live ? ' (已即时生效)' : ''}</p>
+            )}
+            {login && login.phase === 'timeout' && <p>超时未扫码</p>}
+            {login && login.phase === 'error' && <p className="error-text">{login.error}</p>}
+            <div className="liked-login-actions">
+              <button onClick={() => setShowLogin(false)}>关闭</button>
+              {login && login.phase === 'running' && (
+                <button onClick={() => { fetch(`${API_BASE}/api/liked/login/cancel`, { method: 'POST' }); }}>取消</button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

@@ -468,30 +468,170 @@ def comments_list(payload: CommentListRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
 
 
-# ---- dy1 喜欢/收藏视频 (CDP Chrome 登录态 DOM 采集, 见 backend/liked_videos.py) ----
+# ---- 喜欢/收藏视频 + 多账户登录态 (CDP Chrome, 见 backend/liked_videos.py)
+#      用户 2026-11-14 需求:
+#        · 不再"开一次界面就拉一次" → 只在点全局拉取按钮时拉, 结果长缓存
+#        · 登录态状态显示 + 扫码登录 + 切换账户 (每账户独立 profile 槽位)
+#        · 分页: 首屏 16 (两行), 后台默认补到 40 (三排24余量), 继续加载每次 +8
 import time as _time_lv
 import threading as _threading_lv
 from . import liked_videos as _lv
+from . import liked_profiles as _lp
 
 _liked_lock = _threading_lv.Lock()
-_liked_cache: dict = {"like": {"ts": 0.0, "data": None}, "collect": {"ts": 0.0, "data": None}}
-_LIKED_CACHE_TTL = 300.0  # 5 分钟缓存: 面板刷新频繁, 不必每次都真开页面
+_liked_cache: dict = {"like": {"ts": 0.0, "items": [], "error": "", "slot": None},
+                      "collect": {"ts": 0.0, "items": [], "error": "", "slot": None}}
+_LIKED_CACHE_TTL = 3600.0     # 1 小时: 仅"拉取"时刷新, 切tab/开界面都读缓存
+_LIKED_BG_TARGET = 40         # 用户定案: 首屏 16 之后后台默认补到 40 (三排24 的余量)
+_LIKED_PAGE_STEP = 8          # "继续加载"每次 +8
+
+_liked_fetch: dict = {"running": False, "kind": "", "count": 0, "target": 0,
+                      "error": "", "ts": 0.0, "slot": None}
+
+
+def _liked_cached_items(kind: str) -> list:
+    with _liked_lock:
+        return list(_liked_cache[kind]["items"])
+
+
+def _liked_do_fetch(kind: str, target: int) -> None:
+    """后台拉取: 先 16 张落缓存 → 再补到 target (用户点继续加载时 target 递增)。"""
+    global _liked_fetch
+    slot = _lp.active_slot()
+    try:
+        with _liked_lock:
+            _liked_fetch.update({"running": True, "kind": kind, "count": 0,
+                                 "target": target, "error": "", "slot": slot})
+
+        def prog(n: int) -> None:
+            with _liked_lock:
+                _liked_fetch["count"] = n
+                # 阶段性可见: 每滚出一批就更新缓存, 前端轮询能逐步看到
+                if n:
+                    pass
+
+        data = _lv.fetch_liked_items(kind=kind, target=target, on_progress=prog)
+        with _liked_lock:
+            if data.get("ok"):
+                _liked_cache[kind] = {"ts": _time_lv.time(),
+                                      "items": data["items"],
+                                      "error": "", "slot": slot}
+            else:
+                _liked_cache[kind] = {"ts": _time_lv.time(),
+                                      "items": [], "error": data.get("error") or "拉取失败",
+                                      "slot": slot}
+            _liked_fetch.update({"running": False, "count": len(data.get("items") or []),
+                                 "error": "" if data.get("ok") else (data.get("error") or ""),
+                                 "ts": _time_lv.time()})
+    except Exception as exc:
+        with _liked_lock:
+            _liked_fetch.update({"running": False, "error": str(exc)[:160],
+                                 "ts": _time_lv.time()})
+
+
+def _liked_start(kind: str, target: int) -> bool:
+    """起一个后台拉取线程 (已在跑则拒绝)。"""
+    with _liked_lock:
+        if _liked_fetch["running"]:
+            return False
+        _liked_fetch.update({"running": True, "kind": kind, "count": 0,
+                             "target": target, "error": "", "ts": _time_lv.time()})
+    t = _threading_lv.Thread(target=_liked_do_fetch, args=(kind, target), daemon=True)
+    t.start()
+    return True
+
+
+@app.get("/api/liked/account")
+def liked_account(probe: bool = True) -> dict:
+    """当前登录态: CDP 是否在 / 活跃槽位 / 是否已登录 / 昵称头像。只读。"""
+    st = _lp.login_state(with_profile=probe)
+    st["slots"] = [{"slot": s, "name": _lp.slot_name(s),
+                    "active": (st.get("slot") == s)} for s in sorted(_lp.SLOTS)]
+    return st
+
+
+@app.post("/api/liked/account/switch")
+def liked_account_switch(slot: int = 1) -> dict:
+    """切换账户槽位 (停旧 headless Chrome → 用目标 profile 起新)。"""
+    r = _lp.switch_slot(slot)
+    # 换了账户, 旧缓存作废
+    with _liked_lock:
+        for k in _liked_cache:
+            _liked_cache[k] = {"ts": 0.0, "items": [], "error": "", "slot": None}
+    return r
+
+
+@app.post("/api/liked/login/start")
+def liked_login_start(slot: int = 1) -> dict:
+    """扫码登录到指定槽位: 起 headless Chrome 开登录页, 旁听二维码。"""
+    from .liked_login import liked_qr_session
+    return liked_qr_session.start(slot)
+
+
+@app.get("/api/liked/login/status")
+def liked_login_status() -> dict:
+    from .liked_login import liked_qr_session
+    return liked_qr_session.status()
+
+
+@app.post("/api/liked/login/cancel")
+def liked_login_cancel() -> dict:
+    from .liked_login import liked_qr_session
+    liked_qr_session.cancel()
+    return {"ok": True}
 
 
 @app.get("/api/liked/videos")
-def liked_videos(kind: str = "like", refresh: bool = False, max_items: int = 60) -> dict:
-    """dy1 登录态喜欢/收藏视频卡片 (封面+标题+直链; 5 分钟缓存; 只读)."""
+def liked_videos(kind: str = "like", offset: int = 0, limit: int = 16,
+                 refresh: bool = False) -> dict:
+    """喜欢的/收藏的 分页切片 (只读缓存; 不触发拉取 — 拉取走 /api/liked/fetch)。
+
+    refresh=1 时若无缓存则自动起一轮后台拉取 (方便首次进入自动填首屏)。
+    返回 {ok, items(切片), total(已缓存总数), offset, limit, has_more,
+          cached, running, fetch_state, error}
+    """
     kind = "collect" if kind == "collect" else "like"
-    now = _time_lv.time()
+    offset = max(0, int(offset))
+    limit = max(1, min(200, int(limit)))
     with _liked_lock:
         ent = _liked_cache[kind]
-        if not refresh and ent["data"] and now - ent["ts"] < _LIKED_CACHE_TTL:
-            return {**ent["data"], "cached": True}
-    data = _lv.fetch_liked_items(kind=kind, max_items=max(10, min(200, max_items)))
-    if data.get("ok"):
+        items = list(ent["items"])
+        err = ent["error"]
+        fs = dict(_liked_fetch)
+        stale = (not items) or (_time_lv.time() - ent["ts"] > _LIKED_CACHE_TTL)
+    if refresh and not items and not fs["running"]:
+        _liked_start(kind, _LIKED_BG_TARGET)
         with _liked_lock:
-            _liked_cache[kind] = {"ts": _time_lv.time(), "data": data}
-    return {**data, "cached": False}
+            fs = dict(_liked_fetch)
+    return {
+        "ok": bool(items), "kind": kind,
+        "items": items[offset:offset + limit],
+        "total": len(items), "offset": offset, "limit": limit,
+        "has_more": len(items) > offset + limit,
+        "cached": bool(items) and not stale,
+        "running": fs["running"], "fetch_state": fs,
+        "error": err,
+    }
+
+
+@app.post("/api/liked/fetch")
+def liked_fetch(kind: str = "like", target: int = 0) -> dict:
+    """全局拉取按钮 / 继续加载: 起后台拉取 (首屏16 → 默认补到40 → 每次+8)。
+
+    target=0 → 首屏: 已有缓存则拉到 max(已缓存, 40); 无缓存则 40。
+    显式 target → 按 target 拉 (继续加载传 total+8)。
+    """
+    kind = "collect" if kind == "collect" else "like"
+    have = len(_liked_cached_items(kind))
+    if target and target > 0:
+        want = max(1, min(5000, int(target)))
+    else:
+        want = max(_LIKED_BG_TARGET, have)
+    if have >= want:
+        return {"ok": True, "reason": "已缓存足够, 无需再拉", "total": have, "target": want}
+    if not _liked_start(kind, want):
+        return {"ok": False, "reason": "已有拉取在进行中", "target": want}
+    return {"ok": True, "reason": f"已开始拉取 (目标 {want} 个)", "target": want}
 
 
 # ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----
