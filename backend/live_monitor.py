@@ -20,7 +20,7 @@ import threading
 import time
 from collections import deque
 
-from .live_analysis import _http, common_q, _room_brief, _pick_token
+from .live_analysis import _http, common_q, _room_brief, _pick_token, BASE
 from .aweme_read import _req_direct_lab
 
 # 单房间两次 enter 最小间隔 (礼貌; 用户 interval 低于此值会被钳到该值)
@@ -352,68 +352,74 @@ class LiveMonitor:
         return True
 
     def _snapshot(self, rid: str, st: dict, tok: str) -> None:
-        """快照 (2026-11-12 方案 A): 走 /webcast/feed/ 广场列表读人数, 不进房.
+        """快照 (2026-11-14 方案 B): /webcast/room/enter_preload/ 按 room_id 直查.
 
-        旧版 POST enter/leave 会在服务端留下反复进出场痕迹 (用户 2026-11-11
-        定论: 监控不得进直播间)。feed 是纯 GET 列表接口 (§81 两头配方已验),
-        每条 room 带 room_view_stats.display_value。代价:
-        - 人数是展示值 ('1.2万'), 非精确值
-        - 目标房间不在广场推荐流时取不到 → 记 stale 事件, 下轮再试
+        用户定论: 为什么绕广场流? 广场是推荐流, 无权重房间时有时无 → 刷 stale。
+        enter_preload 是官方"弱网预取"只读 GET (不真进房, 无 enter/leave 痕迹),
+        按 room_id 精确直达: 人数是精确值 (非 '1.2万'), 且不依赖推荐权重。
+        判定: 30001 (房间不存在/已结束) → 下播; status=2 → 正常快照;
+        其余 (网络瞬断/未知码) → 静默跳过本轮, 绝不误判下播。
         """
-        feed_room = None
-        for pull in ("1", "2", "3"):
-            d = _http("GET", "/webcast/feed/",
-                      common_q(count="20", offset="0", pull_type=pull), tok)
-            for it in (d.get("data") or []):
-                r = it.get("data") or {}
-                if str(r.get("id_str") or "") == rid and r.get("status") == 2:
-                    feed_room = r
-                    break
-            if feed_room:
-                break
-            time.sleep(0.5)
         st["last_tick"] = time.time()
-        if feed_room is None:
-            # 不在广场流: 可能未开播或无推荐权重 → 只能本轮缺数, 不发下播事件。
-            # 2026-11-14: 事件限频 — 广场流本就时有时无, 每轮都报会刷屏
-            # (用户实测 ~30s 一条连刷 4 分钟)。首条立即报, 之后每 10 分钟一条。
-            now_ts = time.time()
-            if now_ts - st.get("last_stale_event", 0.0) >= STALE_EVENT_GAP_S:
-                st["last_stale_event"] = now_ts
-                self._add_event("stale", f"{st['label']} 未在广场流 (人数本轮缺, 之后10分钟内静默重试)", rid)
+        import urllib.request
+        import urllib.parse
+        import ssl as _ssl
+        try:
+            q = common_q(room_id=str(rid), is_login="1")
+            url = f"{BASE}/webcast/room/enter_preload/?{urllib.parse.urlencode(q)}"
+            req = urllib.request.Request(url, headers={"X-Tt-Token": tok,
+                                                       "sdk-version": "2",
+                                                       "User-Agent": "okhttp/4.9.3"})
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                j = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception:
+            j = {}
+        room = j.get("data") if isinstance(j.get("data"), dict) else {}
+        code = j.get("status_code")
+        if code == 30001:
+            # 30001 = 房间不存在/已结束 → 下播 (自动关闭监控目标, 与旧链路一致)
+            if st["was_live"]:
+                self._add_event("offline", f"{st['label']} 已下播 (监控自动结束)", rid)
+                st["was_live"] = False
+                self._remove_locked(st["sec_uid"], f"{st['label']} 下播自动关闭")
             return
-        brief = _room_brief(feed_room)
-        viewers = brief.get("viewers")
-        viewers_int = _parse_viewers(viewers)
-        snap = {"t": time.time(), "status": brief.get("status"), "viewers_str": viewers,
-                "viewers": viewers_int, "like_count": brief.get("like_count"),
-                "total_user": brief.get("total_user")}
-        st["history"].append(snap)
-        st["last"] = brief
-        st["viewers"] = viewers_int
+        if room.get("status") != 2:
+            # 其余 (网络瞬断/未知 status) → 静默跳过本轮, 绝不误判下播
+            return
+        viewers_int = room.get("user_count")
+        title = room.get("title") or ""
+        status = room.get("status")
+        if status == 2 and viewers_int is not None:
+            snap = {"t": time.time(), "status": status, "viewers_str": str(viewers_int),
+                    "viewers": int(viewers_int), "like_count": None, "total_user": None}
+            st["history"].append(snap)
+            st["viewers"] = int(viewers_int)
+            st["last"] = {"room_id": str(rid), "status": status,
+                          "title": title, "viewers": int(viewers_int)}
+        live = status == 2
+        self._live_events(rid, st, live, title, viewers_int)
+        if st.get("sec_uid"):
+            try:
+                brief = {"room_id": str(rid), "status": status, "title": title}
+                self._write_back(st["sec_uid"], live, viewers_int, brief)
+            except Exception:
+                pass
 
-        live = brief.get("status") == 2
-        # 开播 / 下播 (下播 → 该目标监控自动关闭, 2026-11-07 用户定论)
+    def _live_events(self, rid: str, st: dict, live: bool, title: str,
+                     viewers_int) -> None:
+        """开播/下播/标题变化 (从 _snapshot 抽出, feed 兜底路径复用)。"""
         if live and not st["was_live"]:
-            self._add_event("live", f"{st['label']} 开播: {brief.get('title') or ''}", rid)
+            self._add_event("live", f"{st['label']} 开播: {title}", rid)
         elif not live and st["was_live"]:
             self._add_event("offline", f"{st['label']} 已下播 (监控自动结束)", rid)
             self._remove_locked(st["sec_uid"], f"{st['label']} 下播自动关闭")
         st["was_live"] = live
-        # 标题变化
-        new_title = brief.get("title") or ""
-        if st["title"] and new_title and new_title != st["title"]:
-            self._add_event("info", f"{st['label']} 改标题: {new_title[:30]}", rid)
-        st["title"] = new_title
-        # 观众涨跌事件已撤 (2026-11-05 用户定论: 只留开播/下播/标题, 人数表格里看)
-        # 旧 enter/leave 礼貌离房已废 (方案 A: 不进房, 无需离房)
-        # 回写 profile_cache (2026-11-05 打通断链): 账户表格的直播间/人数列直接吃到监控数据。
-        # 只动 live 相关字段, 基础信息 (粉丝/昵称等) 一概不碰 — 与手动检测解耦。
-        if st.get("sec_uid"):
-            try:
-                self._write_back(st["sec_uid"], live, viewers_int, brief)
-            except Exception:
-                pass  # 回写失败绝不影响监控主循环
+        if st["title"] and title and title != st["title"]:
+            self._add_event("info", f"{st['label']} 改标题: {title[:30]}", rid)
+        st["title"] = title
 
     def _write_back(self, sec_uid: str, live: bool, viewers_int: int | None,
                     brief: dict) -> None:
