@@ -37,6 +37,109 @@ _ROOM_RESOLVE_TTL_S = 600
 STALE_EVENT_GAP_S = 600
 
 
+# CDP live 页提取缓存: web_rid -> (room_id, ts); 10 分钟
+_CDP_RESOLVE_TTL_S = 600
+_cdp_live_cache: dict = {}
+
+
+def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
+    """CDP 登录态: 主页读「直播中」web_rid → live 页 HTML 提取 room_id。
+
+    纯只读: 只 GET 主页/live 页静态 HTML (与手动开网页一致), 不调进房接口。
+    CDP 不可用/登录态失效返回 "" (本轮跳过, 不当未开播处理 — 登录态问题
+    不应触发"下播自动关闭", 那会把整库目标误清)。
+    """
+    import asyncio
+    import httpx
+    import re
+
+    now = time.time()
+    cached = _cdp_live_cache.get(sec_uid)
+    if cached and now - cached[1] < _CDP_RESOLVE_TTL_S:
+        return cached[0]
+
+    async def _run():
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.connect_over_cdp(
+                "http://127.0.0.1:9222", timeout=5000)
+            ctx = browser.contexts[0]
+            page = await ctx.new_page()
+            try:
+                await page.goto(f"https://www.douyin.com/user/{sec_uid}",
+                                wait_until="domcontentloaded", timeout=25000)
+                await page.wait_for_timeout(4500)
+                links = await page.evaluate(
+                    """() => [...document.querySelectorAll('a[href]')]
+                        .map(a => a.getAttribute('href') || '')
+                        .filter(h => /live\\.douyin\\.com\\/[0-9]+/.test(h))""")
+                return links[0] if links else ""
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            live_url = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+    except Exception as exc:
+        # CDP 没起/页超时 → 与登录态失效同判: 不清目标, 只报一条错误
+        add_event("error", f"{label} 房间解析失败 (CDP): {str(exc)[:60]}",
+                  sec_uid[:12])
+        return ""
+
+    m = re.search(r"live\.douyin\.com/(\d+)", live_url or "")
+    if not m:
+        # 主页没有直播中入口 = 未开播 (这是真下播信号)
+        _cdp_live_cache[sec_uid] = ("", now)
+        return ""
+    web_rid = m.group(1)
+    # live 页静态 HTML 提取 roomStore.roomInfo.room.id_str (带登录 cookie)
+    try:
+        r = httpx.get(f"https://live.douyin.com/{web_rid}", timeout=15,
+                      headers={
+                          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                        "Chrome/120 Safari/537.36",
+                          "Referer": "https://www.douyin.com/",
+                          "Cookie": _cdp_cookie_header(),
+                      }, follow_redirects=True)
+        t = r.text.replace('\\"', '"')
+        rm = re.search(r'"roomInfo":\{"room":\{"id_str":"(\d{10,25})"', t)
+        rid = rm.group(1) if rm else ""
+    except Exception:
+        rid = ""
+    if rid:
+        _cdp_live_cache[sec_uid] = (rid, now)
+    return rid
+
+
+def _cdp_cookie_header() -> str:
+    """CDP Chrome 的 douyin cookie 串 (live 页请求用; 失败返回空)。"""
+    import asyncio
+
+    async def _run():
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.connect_over_cdp(
+                "http://127.0.0.1:9222", timeout=5000)
+            ctx = browser.contexts[0]
+            cks = await ctx.cookies("https://www.douyin.com")
+            return "; ".join(f"{c['name']}={c['value']}" for c in cks)
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+    except Exception:
+        return ""
+
+
 class LiveMonitor:
     """后台线程快照轮询器。单实例 (app.py 持有), start/stop/status 线程安全。"""
 
@@ -318,31 +421,28 @@ class LiveMonitor:
             time.sleep(slot * 0.4)  # 房间间小间隔, 错峰
 
     def _resolve_room(self, st: dict) -> bool:
-        """账户维度: 直连 profile/other 轻量版解析当前场次 room_id。
+        """账户维度: CDP 登录态打开主播主页读「直播中」入口 → live 页提取 room_id。
 
-        缓存 TTL 内直接用上次结果; 解析失败/未开播返回 False (本轮跳过)。
+        2026-11-15 弃 lab cookie 直连 (2026-10-27 起过期, 用户未登录 → 20 天来
+        账户维度全解析失败, 千雾人数检不出即此因)。新链路纯只读:
+        ① 主页 HTML 找 a[href*='live.douyin.com/<web_rid>'] (直播中入口);
+        ② live.douyin.com/<web_rid> 页内 roomStore.roomInfo.room 取
+           id_str/status/user_count_str (静态数据, 不触发进房)。
+        主页链接只出现一次 → 两条腿各带 10 分钟 TTL, 缓存期零请求。
+        解析不到入口 = 未开播 → 同旧逻辑: 下播自动关闭监控目标。
         """
         now = time.time()
         if st["resolved_rid"] and now - st["resolved_at"] < _ROOM_RESOLVE_TTL_S:
             return True
         st["last_tick"] = now  # 解析也算一次探测, 钳制频率
-        try:
-            prof = _req_direct_lab("GET", "/aweme/v1/user/",
-                                   {"sec_user_id": st["sec_uid"]})
-        except Exception as exc:
-            self._add_event("error", f"{st['label']} profile 解析失败: "
-                            f"{str(exc)[:60]}", st["sec_uid"][:12])
-            return False
-        u = prof.get("user") or {}
-        rid = str(u.get("room_id_str") or u.get("room_id") or "").strip()
-        if not rid or rid == "0" or u.get("live_status") != 1:
-            # 未开播: (2026-11-07 用户定论) 下播后该监控目标直接关闭 — 从轮询表
-            # 摘除并停掉对它的探测, 不再无限轮空; 开播事件由主播库"加入"重新拉起。
-            # was_live=True 说明这轮之前还在播 → 先发下播事件再摘。
+        rid = _resolve_room_via_cdp(st["sec_uid"], st["label"], self._add_event)
+        if not rid:
+            # 未开播/解析失败: 下播后该监控目标直接关闭 (2026-11-07 用户定论)
             if st["was_live"]:
                 self._add_event("offline", f"{st['label']} 已下播 (监控自动结束)", st["sec_uid"][:12])
                 st["was_live"] = False
                 self._remove_locked(st["sec_uid"], f"{st['label']} 下播自动关闭")
+            return False
             return False
         if rid != st["resolved_rid"] and st["resolved_rid"]:
             # 换了场次 (重新开播), 换房不重复报开播 (was_live 仍 True 时)
