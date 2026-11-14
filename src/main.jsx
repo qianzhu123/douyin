@@ -2709,17 +2709,19 @@ function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onTog
   );
 }
 
-// 我的喜欢/收藏面板 (2026-11-14 二轮重做):
+// 我的喜欢/收藏面板 (2026-11-14 五轮重做):
 //   · 数据按槽位落盘 → 切换账户/重开界面秒开, 免重拉
 //   · 全局「拉取」按钮; 进度 "已拉 X / 目标 Y"; 完成提示 3s 自动消失
-//   · 分页: 首屏 16, 继续加载每次 +8 (只动显示条数, 不覆盖已有)
-//   · 筛选: 关键词/作者 本地即时过滤; 无缓存时「定向拉取」边滚边匹配
-//   · 卡片链接一律 /video/<id> 直链 (后端三重过滤已去页脚 SEO)
+//   · 列表固定高度界内滚动, 滚到底自动加载 (缓存不够直接拉), 无「继续加载」按钮
+//   · 卡片点击直接选中/取消 (✓圈), 仅右下角跳转按钮才打开原页
+//   · 筛选: 关键词需点「搜索」按钮(或回车)才生效; 作者下拉即时
+//   · 切换账户: 先读目标槽位落盘数据 (快), 登录态探测放后台, 不再先清空列表
 function LikedVideosPanel() {
   const [kind, setKind] = React.useState('like');
   const [items, setItems] = React.useState([]);      // 当前显示的切片
   const [total, setTotal] = React.useState(0);       // 筛选后总数
   const [grandTotal, setGrandTotal] = React.useState(0); // 未筛选总数
+  const [complete, setComplete] = React.useState(false); // 缓存是否已拉全
   const [busy, setBusy] = React.useState(false);
   const [fs, setFs] = React.useState(null);          // 后端 fetch_state 轮询
   const [error, setError] = React.useState('');
@@ -2728,14 +2730,15 @@ function LikedVideosPanel() {
   const [login, setLogin] = React.useState(null);
   const [showLogin, setShowLogin] = React.useState(false);
   const [notice, setNotice] = React.useState('');
-  const [q, setQ] = React.useState('');              // 关键词筛选
+  const [qInput, setQInput] = React.useState('');    // 搜索框输入 (仅点按钮/回车才生效)
+  const [q, setQ] = React.useState('');              // 生效中的关键词筛选
   const [author, setAuthor] = React.useState('');    // 作者筛选
   const [authors, setAuthors] = React.useState([]);  // 作者去重列表
   const [delArm, setDelArm] = React.useState(null);  // 删除账户二次点击确认
   const [downloading, setDownloading] = React.useState(false); // 一键下载进行中
   const [sel, setSel] = React.useState({});          // 选中集合 {aweme_id: true}
-  const [selMode, setSelMode] = React.useState(false); // 是否处于选择模式
   const noticeTimer = React.useRef(null);
+  const moreLock = React.useRef(false);              // 滚动加载防重入
   const PAGE = 16, STEP = 8;
 
   const flashNotice = (msg) => {
@@ -2778,6 +2781,7 @@ function LikedVideosPanel() {
       if (!alive) return;
       setItems(d.items || []); setTotal(d.total || 0);
       setGrandTotal(d.fetch_state && d.fetch_state.grand_total != null ? d.fetch_state.grand_total : d.total || 0);
+      setComplete(!!d.complete);
       if (d.error) setError(d.error);
       setBusy(false);
       loadAuthors(kind);
@@ -2837,18 +2841,33 @@ function LikedVideosPanel() {
     } catch (e) { flashNotice(String(e.message || e)); }
   };
 
-  // 「继续加载」: 缓存够就纯切片; 不够再拉
-  const doMore = async () => {
-    const wantShown = items.length + STEP;
-    if (wantShown <= total) {
-      setBusy(true);
-      try {
+  // 滚动到底自动加载 (替代旧「继续加载」按钮): 缓存够就纯切片,
+  // 不够且当前无拉取 → 直接发起拉取 (目标=已显示+STEP 的余量)
+  const loadMore = async () => {
+    if (moreLock.current) return;
+    moreLock.current = true;
+    try {
+      const wantShown = items.length + STEP;
+      if (wantShown <= total) {
         const d = await loadSlice(kind, 0, wantShown);
         setItems(d.items || []); setTotal(d.total || 0);
-      } finally { setBusy(false); }
-      return;
-    }
-    await doFetch(Math.max(total + STEP, 40));
+        setGrandTotal(d.fetch_state && d.fetch_state.grand_total != null ? d.fetch_state.grand_total : grandTotal);
+        setComplete(!!d.complete);
+        return;
+      }
+      // 缓存不够: 若已在拉取就等轮询自然补; 否则直接拉
+      const st = await fetch(`${API_BASE}/api/liked/fetch-state`).then((x) => x.json());
+      if (!(st && st.running && st.kind === kind)) {
+        await doFetch(Math.max(total + STEP, 40));
+      }
+    } catch (e) { /* 滚动加载失败静默, 下次滚动重试 */ }
+    finally { moreLock.current = false; }
+  };
+
+  // 列表界内滚动容器 onScroll: 距底 <120px 触发加载
+  const onListScroll = (e) => {
+    const el = e.target;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) loadMore();
   };
 
   const copyLink = (item) => {
@@ -2858,23 +2877,35 @@ function LikedVideosPanel() {
     }, () => {});
   };
 
+  // 切换账户 (五轮重做): switch 端点换完 Chrome 后 **后端已把目标槽位落盘
+  // 数据读回内存**, 所以列表加载是纯本地切片 (毫秒级); 登录态昵称/头像探测
+  // 放后台 (probe=false 先回, 不阻塞列表)。旧版先清空列表再等探测, 造成
+  // "暂无本地数据 → 半分钟后才就绪" 的空窗。
   const doSwitch = async (slot) => {
-    setNotice(`正在切换到账户 ${slot} (约 5-10 秒)…`);
+    setNotice(`正在切换到账户 ${slot}…`);
+    setItems([]); setTotal(0); setAuthors([]); setQ(''); setQInput(''); setAuthor('');
     try {
       const r = await fetch(`${API_BASE}/api/liked/account/switch?slot=${slot}`, { method: 'POST' });
       const d = await r.json();
       if (d.ok) {
-        setNotice(''); setItems([]); setTotal(0); setAuthors([]);
-        await loadAcct(true);
-        const s = await loadSlice(kind, 0, PAGE);
+        setNotice('');
+        const s = await loadSlice(kind, 0, PAGE);   // 后端已回读槽位缓存, 秒回
         setItems(s.items || []); setTotal(s.total || 0);
+        setGrandTotal(s.fetch_state && s.fetch_state.grand_total != null ? s.fetch_state.grand_total : s.total || 0);
+        setComplete(!!s.complete);
         loadAuthors(kind);
+        loadAcct(false);   // 后台探测登录态 (不 await), 完成后自动刷新账户条
+        loadAcctDelayed();
         flashNotice(`已切换到账户 ${slot}${(s.items || []).length ? `, 本地缓存 ${s.total} 个已就绪` : ' (该账户暂无本地数据, 点「拉取」)'}`);
       } else {
         flashNotice(d.error || '切换失败');
+        loadAcct(true);
       }
-    } catch (e) { flashNotice(String(e.message || e)); }
+    } catch (e) { flashNotice(String(e.message || e)); loadAcct(true); }
   };
+
+  // 后台探测完成后再补一次带 profile 的探测 (昵称/头像), 不阻塞交互
+  const loadAcctDelayed = () => { setTimeout(() => loadAcct(true), 4000); };
 
   const doLogin = async (slot) => {
     setLogin({ phase: 'running' });
@@ -2895,10 +2926,11 @@ function LikedVideosPanel() {
       if (d.ok) {
         flashNotice(`账户 ${slot} 已删除 (登录态+本地数据)`);
         setItems([]); setTotal(0); setAuthors([]);
-        await loadAcct(true);
         const s = await loadSlice(kind, 0, PAGE);
         setItems(s.items || []); setTotal(s.total || 0);
+        setComplete(!!s.complete);
         loadAuthors(kind);
+        loadAcct(false);
       } else flashNotice(d.error || '删除失败');
     } catch (e) { flashNotice(String(e.message || e)); }
   };
@@ -2941,12 +2973,12 @@ function LikedVideosPanel() {
     }, () => { flashNotice('复制失败 (浏览器剪贴板权限)'); });
   };
 
+  // 选择: 卡片点击直接切换选中 (五轮定案: 不再有独立选择模式), 仅右下角跳转按钮才打开原页
   const toggleSel = (id) => {
     setSel((s) => ({ ...s, [id]: !s[id] }));
   };
   const selCount = Object.values(sel).filter(Boolean).length;
-  const enterSelMode = () => { setSelMode(true); setSel({}); };
-  const exitSelMode = () => { setSelMode(false); setSel({}); };
+  const clearSel = () => setSel({});
 
   React.useEffect(() => {
     if (!showLogin || !login || login.phase !== 'running') return undefined;
@@ -2971,8 +3003,8 @@ function LikedVideosPanel() {
           <p>当前登录账户的点赞与收藏 · 封面卡片 · 链接为作品直链 (未登录可看)</p>
         </div>
         <div className="panel-actions">
-          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => { setKind('like'); setQ(''); setAuthor(''); }}>喜欢</button>
-          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => { setKind('collect'); setQ(''); setAuthor(''); }}>收藏</button>
+          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => { setKind('like'); setQ(''); setQInput(''); setAuthor(''); clearSel(); }}>喜欢</button>
+          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => { setKind('collect'); setQ(''); setQInput(''); setAuthor(''); clearSel(); }}>收藏</button>
           {running && fs.kind === kind ? (
             <button className="liked-fetch-cancel" onClick={doCancelFetch} title="已扫到的会保留">
               {`终止 (${fs.count}/${fs.target})`}
@@ -2980,12 +3012,8 @@ function LikedVideosPanel() {
           ) : (
             <button onClick={() => doFetch(0)}>拉取</button>
           )}
-          {!selMode ? (
-            <button onClick={enterSelMode} disabled={!items.length}>选择</button>
-          ) : (
-            <>
-              <button onClick={exitSelMode}>退出选择</button>
-            </>
+          {selCount > 0 && (
+            <button className="liked-sel-clear" onClick={clearSel} title="清空全部选中标记">清空选中({selCount})</button>
           )}
         </div>
       </div>
@@ -3024,13 +3052,13 @@ function LikedVideosPanel() {
           <button className="liked-slot-add" onClick={() => doLogin(acct.next_slot)}
                   title="添加新账户 (扫码登录到下一个空槽位)">+ 添加账户</button>
         )}
-        {selMode ? (
+        {selCount > 0 ? (
           <>
-            <button onClick={copySelected} disabled={!selCount}
+            <button onClick={copySelected}
                     title="复制选中视频的直链 (每行一条)">
               复制链接({selCount})
             </button>
-            <button className="liked-dl-sel" onClick={() => doDownload(true)} disabled={!selCount || downloading}>
+            <button className="liked-dl-sel" onClick={() => doDownload(true)} disabled={downloading}>
               {downloading ? '创建中…' : `下载选中(${selCount})`}
             </button>
           </>
@@ -3044,17 +3072,21 @@ function LikedVideosPanel() {
         )}
       </div>
 
-      {/* 筛选条 */}
+      {/* 筛选条 (五轮定案: 关键词点「搜索」才生效; 作者下拉即时) */}
       <div className="liked-filter">
         <input className="liked-filter-input" placeholder="关键词 (标题/作者)…"
-               value={q} onChange={(e) => setQ(e.target.value)} />
+               value={qInput} onChange={(e) => setQInput(e.target.value)}
+               onKeyDown={(e) => { if (e.key === 'Enter') { setQ(qInput.trim()); setAuthor(''); } }} />
+        <button className="liked-filter-search" onClick={() => { setQ(qInput.trim()); setAuthor(''); }}>
+          <Search size={14} /> 搜索
+        </button>
         <select className="liked-filter-input" value={author}
                 onChange={(e) => setAuthor(e.target.value)}>
           <option value="">全部作者 ({authors.length})</option>
           {authors.map(([a, n]) => <option key={a} value={a}>{a} ({n})</option>)}
         </select>
         {(q || author) && (
-          <button className="liked-filter-clear" onClick={() => { setQ(''); setAuthor(''); }}>清除</button>
+          <button className="liked-filter-clear" onClick={() => { setQ(''); setQInput(''); setAuthor(''); }}>清除</button>
         )}
         <span className="liked-filter-hint">本地即时过滤 (缓存 {grandTotal} 条)</span>
       </div>
@@ -3065,45 +3097,39 @@ function LikedVideosPanel() {
         <div className="empty">后台拉取中: 已扫 {fs.count} / 目标 {fs.target}{fs.mode === '定向' ? ` · 已匹配 ${fs.matched}` : ''} (可继续浏览, 完成后自动刷新)</div>
       )}
       {busy && !items.length && <div className="empty">读取本地缓存…</div>}
-      {!busy && !items.length && !running && (
-        <div className="empty">
-          {filtering
-            ? '本地缓存无匹配 — 可点「按条件定向拉取」'
-            : logged ? '暂无本地数据 — 点右上「拉取」' : '请先扫码登录'}
-        </div>
-      )}
-      <div className={`liked-grid${selMode ? ' selecting' : ''}`}>
-        {items.map((it) => (
-          <div key={it.aweme_id}
-               className={`liked-card${selMode ? ' selectable' : ''}${sel[it.aweme_id] ? ' selected' : ''}`}
-               onClick={selMode ? () => toggleSel(it.aweme_id) : undefined}>
-            <a href={selMode ? undefined : it.url} target={selMode ? undefined : '_blank'} rel="noreferrer"
-               className="liked-cover" title={it.title}
-               onClick={selMode ? (e) => e.preventDefault() : undefined}>
-              {it.cover ? <img src={it.cover} alt="" loading="lazy" /> : <span className="liked-noimg">无封面</span>}
-              {selMode && <span className="liked-check">{sel[it.aweme_id] ? '✓' : ''}</span>}
-            </a>
-            <div className="liked-title" title={it.title}>{it.title || '(无标题)'}</div>
-            {it.author && <div className="liked-author">{it.author}</div>}
-            {!selMode && (
+      {/* 界内固定高度滚动列表 (五轮定案): 滚到底自动加载, 无「继续加载」按钮 */}
+      <div className="liked-scroll" onScroll={onListScroll}>
+        <div className="liked-grid">
+          {items.map((it) => (
+            <div key={it.aweme_id}
+                 className={`liked-card selectable${sel[it.aweme_id] ? ' selected' : ''}`}
+                 onClick={() => toggleSel(it.aweme_id)}>
+              <a href={it.url} target="_blank" rel="noreferrer"
+                 className="liked-cover" title={it.title}
+                 onClick={(e) => e.preventDefault()}>
+                {it.cover ? <img src={it.cover} alt="" loading="lazy" /> : <span className="liked-noimg">无封面</span>}
+                <span className="liked-check">{sel[it.aweme_id] ? '✓' : ''}</span>
+              </a>
+              <div className="liked-title" title={it.title}>{it.title || '(无标题)'}</div>
+              {it.author && <div className="liked-author">{it.author}</div>}
               <div className="liked-actions">
-                <button onClick={() => copyLink(it)}>{copied === it.aweme_id ? '已复制' : '复制链接'}</button>
-                <a href={it.url} target="_blank" rel="noreferrer" title="打开原页"><ExternalLink size={14} /></a>
+                <button onClick={(e) => { e.stopPropagation(); copyLink(it); }}>{copied === it.aweme_id ? '已复制' : '复制链接'}</button>
+                <a href={it.url} target="_blank" rel="noreferrer" title="打开原页"
+                   onClick={(e) => e.stopPropagation()}><ExternalLink size={14} /></a>
               </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {(total > items.length || (running && fs.kind === kind)) && (
-        <div className="liked-more">
-          <button onClick={doMore} disabled={busy || (running && fs.kind === kind)}>
-            {busy ? '加载中…'
-              : (running && fs.kind === kind) ? `后台拉取中 (${fs.count}/${fs.target})`
-              : `继续加载 (${items.length}/${total})`}
-          </button>
+            </div>
+          ))}
         </div>
-      )}
+        {(busy && items.length > 0) && <div className="empty">加载中…</div>}
+        {!busy && !items.length && !running && (
+          <div className="empty">
+            {filtering ? '本地缓存无匹配 — 换个关键词或点「拉取」' : logged ? '暂无本地数据 — 点右上「拉取」' : '请先扫码登录'}
+          </div>
+        )}
+        {items.length > 0 && items.length < total && (
+          <div className="empty liked-scroll-hint">下滑继续加载 ({items.length}/{total})</div>
+        )}
+      </div>
 
       {showLogin && (
         <div className="liked-login-modal">

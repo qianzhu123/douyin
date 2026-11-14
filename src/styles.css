@@ -1382,6 +1382,32 @@ button:disabled {
 .liked-more { display: flex; justify-content: center; padding: 14px 0 4px; }
 .liked-more button { min-width: 200px; }
 
+/* ---- 五轮 (2026-11-14): 界内滚动列表 + 搜索按钮 + 直接点选 ---- */
+.liked-scroll {
+  height: 520px;
+  overflow-y: auto;
+  margin-top: 10px;
+  padding-right: 4px;
+  border: 1px solid var(--border, #e3e5e8);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+.liked-scroll .liked-grid { margin-top: 0; padding: 10px; }
+.liked-scroll-hint { padding: 10px 0 14px; font-size: 12px; color: var(--text-dim, #6b7280); }
+.liked-filter-search {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 12px; font-size: 12.5px;
+  cursor: pointer;
+}
+.liked-sel-clear {
+  background: transparent; color: var(--text-dim, #6b7280);
+  border: 1px solid var(--border, #e3e5e8);
+}
+.liked-sel-clear:hover { color: #ef4444; border-color: #ef4444; }
+/* 未选中的卡: ✓圈更淡 (半透明圈), 提示可点选 */
+.liked-card .liked-check { opacity: .55; }
+.liked-card.selected .liked-check { opacity: 1; }
+
 .liked-login-modal {
   position: fixed; inset: 0;
   background: rgba(0,0,0,.45);
