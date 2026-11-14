@@ -2711,7 +2711,7 @@ function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onTog
 
 // 我的喜欢/收藏面板 (2026-11-14 五轮重做):
 //   · 数据按槽位落盘 → 切换账户/重开界面秒开, 免重拉
-//   · 全局「拉取」按钮; 进度 "已拉 X / 目标 Y"; 完成提示 3s 自动消失
+//   · 拉取按钮已删 (六轮): 滚到底缓存尽了自动拉; 「刷新」按钮可手动重滚
 //   · 列表固定高度界内滚动, 滚到底自动加载 (缓存不够直接拉), 无「继续加载」按钮
 //   · 卡片点击直接选中/取消 (✓圈), 仅右下角跳转按钮才打开原页
 //   · 筛选: 关键词需点「搜索」按钮(或回车)才生效; 作者下拉即时
@@ -2816,7 +2816,7 @@ function LikedVideosPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, items.length, loadSlice, loadAuthors]);
 
-  // 「拉取」: 全量按需拉取 (筛选只走本地即时过滤, 不再触发定向拉取)
+  // 拉取内核 (滚动到底自动触发; 「刷新」按钮也走这里)
   const doFetch = async (target) => {
     setError('');
     try {
@@ -2841,8 +2841,9 @@ function LikedVideosPanel() {
     } catch (e) { flashNotice(String(e.message || e)); }
   };
 
-  // 滚动到底自动加载 (替代旧「继续加载」按钮): 缓存够就纯切片,
-  // 不够且当前无拉取 → 直接发起拉取 (目标=已显示+STEP 的余量)
+  // 滚动到底自动加载 (替代旧「继续加载」按钮): 缓存够就纯切片;
+  // 缓存滚完了 (未拉全) → 自动发起拉取接着扫 (六轮定案: 拉取按钮删除,
+  // 滑到底即拉)。已在拉取就等轮询自然补。
   const loadMore = async () => {
     if (moreLock.current) return;
     moreLock.current = true;
@@ -2855,13 +2856,20 @@ function LikedVideosPanel() {
         setComplete(!!d.complete);
         return;
       }
-      // 缓存不够: 若已在拉取就等轮询自然补; 否则直接拉
-      const st = await fetch(`${API_BASE}/api/liked/fetch-state`).then((x) => x.json());
-      if (!(st && st.running && st.kind === kind)) {
-        await doFetch(Math.max(total + STEP, 40));
+      // 缓存已滚完: 未拉全 → 自动接着拉; 已拉全则到底了
+      if (!complete) {
+        const st = await fetch(`${API_BASE}/api/liked/fetch-state`).then((x) => x.json());
+        if (!(st && st.running && st.kind === kind)) {
+          await doFetch(Math.max(total + STEP, 40));
+        }
       }
     } catch (e) { /* 滚动加载失败静默, 下次滚动重试 */ }
     finally { moreLock.current = false; }
+  };
+
+  // 「刷新」(六轮: 原「拉取」更名): 重新滚抖音列表补增量 (合并仍以本轮序优先)
+  const doRefresh = async () => {
+    await doFetch(0);
   };
 
   // 列表界内滚动容器 onScroll: 距底 <120px 触发加载
@@ -2896,7 +2904,7 @@ function LikedVideosPanel() {
         loadAuthors(kind);
         loadAcct(false);   // 后台探测登录态 (不 await), 完成后自动刷新账户条
         loadAcctDelayed();
-        flashNotice(`已切换到账户 ${slot}${(s.items || []).length ? `, 本地缓存 ${s.total} 个已就绪` : ' (该账户暂无本地数据, 点「拉取」)'}`);
+        flashNotice(`已切换到账户 ${slot}${(s.items || []).length ? `, 本地缓存 ${s.total} 个已就绪` : ' (该账户还没有数据, 列表下滑即自动拉取)'}`);
       } else {
         flashNotice(d.error || '切换失败');
         loadAcct(true);
@@ -3010,7 +3018,7 @@ function LikedVideosPanel() {
               {`终止 (${fs.count}/${fs.target})`}
             </button>
           ) : (
-            <button onClick={() => doFetch(0)}>拉取</button>
+            <button onClick={() => doRefresh()} title="重新滚一遍抖音列表 (数据已缓存的滚轮会自动补, 平时不用点)">刷新</button>
           )}
           {selCount > 0 && (
             <button className="liked-sel-clear" onClick={clearSel} title="清空全部选中标记">清空选中({selCount})</button>
@@ -3123,7 +3131,7 @@ function LikedVideosPanel() {
         {(busy && items.length > 0) && <div className="empty">加载中…</div>}
         {!busy && !items.length && !running && (
           <div className="empty">
-            {filtering ? '本地缓存无匹配 — 换个关键词或点「拉取」' : logged ? '暂无本地数据 — 点右上「拉取」' : '请先扫码登录'}
+            {filtering ? '本地缓存无匹配 — 换个关键词或点「刷新」' : logged ? '该账户还没有数据 — 列表下滑即自动拉取' : '请先扫码登录'}
           </div>
         )}
         {items.length > 0 && items.length < total && (
