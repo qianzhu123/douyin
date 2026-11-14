@@ -140,6 +140,16 @@ class LikedQrSession:
                     return
 
                 # ---- ② 落库: profile 目录 + (若活跃) 当前 CDP Chrome ----
+                # 若该槽位正被常驻 CDP Chrome 占用, **跳过 persistent launch**
+                # (profile 目录锁会让 launch_persistent_context 卡死 — 2026-11-14
+                #  实测"扫码确认后一直加载/无法取消"的根因), 直接注入 CDP;
+                # Chrome 自己会把 cookie 落盘到 profile, 下次启动自带登录态。
+                if _lp.cdp_alive() and _lp.active_slot() == int(slot):
+                    injected = self._inject_live(pw, slot, cookies)
+                    if injected:
+                        self._set(phase="success", done_at=time.time(),
+                                  injected_live=True)
+                        return
                 self._persist_profile(pw, slot, cookies)
                 injected = self._inject_live(pw, slot, cookies)
                 self._set(phase="success", done_at=time.time(), injected_live=injected)

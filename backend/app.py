@@ -469,58 +469,80 @@ def comments_list(payload: CommentListRequest) -> dict:
 
 
 # ---- 喜欢/收藏视频 + 多账户登录态 (CDP Chrome, 见 backend/liked_videos.py)
-#      用户 2026-11-14 需求:
-#        · 不再"开一次界面就拉一次" → 只在点全局拉取按钮时拉, 结果长缓存
-#        · 登录态状态显示 + 扫码登录 + 切换账户 (每账户独立 profile 槽位)
-#        · 分页: 首屏 16 (两行), 后台默认补到 40 (三排24余量), 继续加载每次 +8
+#      用户 2026-11-14 需求 (二轮):
+#        · 数据按槽位落盘 data/liked/<slot>_<kind>.json → 切换账户免重拉
+#        · 筛选 (关键词/作者) 走本地缓存即时过滤; 也可"定向拉取" (边滚边匹配)
+#        · 拉取进度显示 "已拉 X / 目标 Y"; 完成后 notice 明确消失
 import time as _time_lv
 import threading as _threading_lv
 from . import liked_videos as _lv
 from . import liked_profiles as _lp
+from . import liked_store as _ls
 
 _liked_lock = _threading_lv.Lock()
-_liked_cache: dict = {"like": {"ts": 0.0, "items": [], "error": "", "slot": None},
-                      "collect": {"ts": 0.0, "items": [], "error": "", "slot": None}}
-_LIKED_CACHE_TTL = 3600.0     # 1 小时: 仅"拉取"时刷新, 切tab/开界面都读缓存
-_LIKED_BG_TARGET = 40         # 用户定案: 首屏 16 之后后台默认补到 40 (三排24 的余量)
+# 内存缓存 {kind: {ts, items, error, slot, complete}} — 镜像磁盘 (改写时同步落盘)
+_liked_cache: dict = {"like": {"ts": 0.0, "items": [], "error": "", "slot": None, "complete": False},
+                      "collect": {"ts": 0.0, "items": [], "error": "", "slot": None, "complete": False}}
+_LIKED_BG_TARGET = 40         # 默认后台补到 40
 _LIKED_PAGE_STEP = 8          # "继续加载"每次 +8
+_LIKED_STORE_CAP = 5000       # 落盘上限
 
 _liked_fetch: dict = {"running": False, "kind": "", "count": 0, "target": 0,
-                      "error": "", "ts": 0.0, "slot": None}
+                      "matched": 0, "error": "", "ts": 0.0, "slot": None,
+                      "mode": "", "query": ""}
+
+
+def _liked_mem_load(kind: str) -> None:
+    """磁盘 → 内存 (进入/切换时调用; 磁盘为准)。"""
+    with _liked_lock:
+        if _liked_fetch["running"]:
+            return          # 拉取中不动
+    slot = _lp.active_slot()
+    d = _ls.load(slot, kind)
+    ent = {"ts": (d or {}).get("ts", 0.0), "items": (d or {}).get("items", []),
+           "error": "", "slot": slot, "complete": (d or {}).get("complete", False)}
+    with _liked_lock:
+        cur = _liked_cache[kind]
+        # 内存已是该槽位同批数据则不覆盖 (保留可能的 error 信息)
+        if not (cur["slot"] == slot and cur["items"] and cur["ts"] >= ent["ts"]):
+            _liked_cache[kind] = ent
 
 
 def _liked_cached_items(kind: str) -> list:
+    _liked_mem_load(kind)
     with _liked_lock:
         return list(_liked_cache[kind]["items"])
 
 
-def _liked_do_fetch(kind: str, target: int) -> None:
-    """后台拉取: 先 16 张落缓存 → 再补到 target (用户点继续加载时 target 递增)。"""
-    global _liked_fetch
+def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "") -> None:
+    """后台拉取到 target; 带 query/author 时为定向模式 (边滚边匹配, 凑够即停)。"""
     slot = _lp.active_slot()
     try:
         with _liked_lock:
             _liked_fetch.update({"running": True, "kind": kind, "count": 0,
-                                 "target": target, "error": "", "slot": slot})
+                                 "target": target, "matched": 0, "error": "",
+                                 "slot": slot, "mode": "定向" if (query or author) else "全量",
+                                 "query": query or author})
+            base = list(_liked_cache[kind]["items"])   # 合并基线
 
-        def prog(n: int) -> None:
+        def prog(n: int, matched: int = -1) -> None:
             with _liked_lock:
                 _liked_fetch["count"] = n
-                # 阶段性可见: 每滚出一批就更新缓存, 前端轮询能逐步看到
-                if n:
-                    pass
+                if matched >= 0:
+                    _liked_fetch["matched"] = matched
 
-        data = _lv.fetch_liked_items(kind=kind, target=target, on_progress=prog)
+        data = _lv.fetch_liked_items(kind=kind, target=target, on_progress=prog,
+                                     query=query, author=author)
+        new_items = data.get("items") or []
+        merged = _ls.merge(base, new_items, cap=_LIKED_STORE_CAP)
+        complete = bool(data.get("ok")) and not (query or author)
+        _ls.save(slot, kind, merged, complete=complete)
         with _liked_lock:
-            if data.get("ok"):
-                _liked_cache[kind] = {"ts": _time_lv.time(),
-                                      "items": data["items"],
-                                      "error": "", "slot": slot}
-            else:
-                _liked_cache[kind] = {"ts": _time_lv.time(),
-                                      "items": [], "error": data.get("error") or "拉取失败",
-                                      "slot": slot}
-            _liked_fetch.update({"running": False, "count": len(data.get("items") or []),
+            _liked_cache[kind] = {"ts": _time_lv.time(), "items": merged,
+                                  "error": "" if data.get("ok") else (data.get("error") or "拉取失败"),
+                                  "slot": slot, "complete": complete}
+            _liked_fetch.update({"running": False, "count": len(new_items),
+                                 "matched": len(merged) if (query or author) else len(merged),
                                  "error": "" if data.get("ok") else (data.get("error") or ""),
                                  "ts": _time_lv.time()})
     except Exception as exc:
@@ -529,14 +551,16 @@ def _liked_do_fetch(kind: str, target: int) -> None:
                                  "ts": _time_lv.time()})
 
 
-def _liked_start(kind: str, target: int) -> bool:
+def _liked_start(kind: str, target: int, query: str = "", author: str = "") -> bool:
     """起一个后台拉取线程 (已在跑则拒绝)。"""
     with _liked_lock:
         if _liked_fetch["running"]:
             return False
         _liked_fetch.update({"running": True, "kind": kind, "count": 0,
-                             "target": target, "error": "", "ts": _time_lv.time()})
-    t = _threading_lv.Thread(target=_liked_do_fetch, args=(kind, target), daemon=True)
+                             "target": target, "matched": 0, "error": "",
+                             "ts": _time_lv.time(), "query": query or author})
+    t = _threading_lv.Thread(target=_liked_do_fetch, args=(kind, target, query, author),
+                             daemon=True)
     t.start()
     return True
 
@@ -546,18 +570,23 @@ def liked_account(probe: bool = True) -> dict:
     """当前登录态: CDP 是否在 / 活跃槽位 / 是否已登录 / 昵称头像。只读。"""
     st = _lp.login_state(with_profile=probe)
     st["slots"] = [{"slot": s, "name": _lp.slot_name(s),
-                    "active": (st.get("slot") == s)} for s in sorted(_lp.SLOTS)]
+                    "active": (st.get("slot") == s),
+                    "has_local": any(_ls.load(s, k) for k in ("like", "collect"))}
+                   for s in sorted(_lp.SLOTS)]
     return st
 
 
 @app.post("/api/liked/account/switch")
 def liked_account_switch(slot: int = 1) -> dict:
-    """切换账户槽位 (停旧 headless Chrome → 用目标 profile 起新)。"""
+    """切换账户槽位 (停旧 headless Chrome → 用目标 profile 起新)。
+
+    缓存不清空 — 数据按槽位落盘, 切换后 _liked_mem_load 会把目标槽位的
+    本地文件读回内存 (秒开, 免重拉)。
+    """
     r = _lp.switch_slot(slot)
-    # 换了账户, 旧缓存作废
-    with _liked_lock:
-        for k in _liked_cache:
-            _liked_cache[k] = {"ts": 0.0, "items": [], "error": "", "slot": None}
+    if r.get("ok"):
+        for k in ("like", "collect"):
+            _liked_mem_load(k)
     return r
 
 
@@ -581,57 +610,81 @@ def liked_login_cancel() -> dict:
     return {"ok": True}
 
 
+@app.get("/api/liked/authors")
+def liked_authors(kind: str = "like") -> dict:
+    """本地缓存中的作者去重列表 (筛选下拉用)。"""
+    kind = "collect" if kind == "collect" else "like"
+    items = _liked_cached_items(kind)
+    seen: dict[str, int] = {}
+    for it in items:
+        a = (it.get("author") or "").strip()
+        if a:
+            seen[a] = seen.get(a, 0) + 1
+    return {"ok": True, "kind": kind,
+            "authors": sorted(seen.items(), key=lambda x: (-x[1], x[0]))}
+
+
 @app.get("/api/liked/videos")
 def liked_videos(kind: str = "like", offset: int = 0, limit: int = 16,
-                 refresh: bool = False) -> dict:
-    """喜欢的/收藏的 分页切片 (只读缓存; 不触发拉取 — 拉取走 /api/liked/fetch)。
+                 q: str = "", author: str = "") -> dict:
+    """喜欢的/收藏的 分页切片 (只读缓存+本地筛选; 不触发拉取)。
 
-    refresh=1 时若无缓存则自动起一轮后台拉取 (方便首次进入自动填首屏)。
-    返回 {ok, items(切片), total(已缓存总数), offset, limit, has_more,
-          cached, running, fetch_state, error}
+    q/author: 本地缓存即时筛选 (标题/作者)。筛选后的 total 是筛选条数。
     """
     kind = "collect" if kind == "collect" else "like"
     offset = max(0, int(offset))
     limit = max(1, min(200, int(limit)))
+    _liked_mem_load(kind)
     with _liked_lock:
         ent = _liked_cache[kind]
-        items = list(ent["items"])
+        all_items = list(ent["items"])
         err = ent["error"]
         fs = dict(_liked_fetch)
-        stale = (not items) or (_time_lv.time() - ent["ts"] > _LIKED_CACHE_TTL)
-    if refresh and not items and not fs["running"]:
-        _liked_start(kind, _LIKED_BG_TARGET)
-        with _liked_lock:
-            fs = dict(_liked_fetch)
+        ts = ent["ts"]
+        complete = ent.get("complete", False)
+    items = _ls.filter_items(all_items, q=q, author=author)
+    fs["grand_total"] = len(all_items)      # 未筛选总数 (前端显示 n/总 用)
     return {
         "ok": bool(items), "kind": kind,
         "items": items[offset:offset + limit],
         "total": len(items), "offset": offset, "limit": limit,
         "has_more": len(items) > offset + limit,
-        "cached": bool(items) and not stale,
+        "cached": bool(items),
+        "complete": complete, "ts": ts,
         "running": fs["running"], "fetch_state": fs,
         "error": err,
     }
 
 
 @app.post("/api/liked/fetch")
-def liked_fetch(kind: str = "like", target: int = 0) -> dict:
-    """全局拉取按钮 / 继续加载: 起后台拉取 (首屏16 → 默认补到40 → 每次+8)。
+def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = "") -> dict:
+    """全局拉取 / 继续加载 / 定向拉取。
 
-    target=0 → 首屏: 已有缓存则拉到 max(已缓存, 40); 无缓存则 40。
-    显式 target → 按 target 拉 (继续加载传 total+8)。
+    - q/author 非空 → 定向模式: 边滚边按关键词/作者匹配, 凑够 target 即停
+      (未拉取全量时按需取数)。
+    - target=0 → 默认补到 max(已缓存, 40)。
     """
     kind = "collect" if kind == "collect" else "like"
     have = len(_liked_cached_items(kind))
+    targeted = bool((q or "").strip() or (author or "").strip())
     if target and target > 0:
         want = max(1, min(5000, int(target)))
     else:
-        want = max(_LIKED_BG_TARGET, have)
-    if have >= want:
+        want = max(_LIKED_BG_TARGET, have) if not targeted else 60
+    if not targeted and have >= want:
         return {"ok": True, "reason": "已缓存足够, 无需再拉", "total": have, "target": want}
-    if not _liked_start(kind, want):
+    if not _liked_start(kind, want, query=q.strip(), author=author.strip()):
         return {"ok": False, "reason": "已有拉取在进行中", "target": want}
+    if targeted:
+        return {"ok": True, "reason": f"定向拉取中 (目标 {want} 个, 含匹配)", "target": want}
     return {"ok": True, "reason": f"已开始拉取 (目标 {want} 个)", "target": want}
+
+
+@app.get("/api/liked/fetch-state")
+def liked_fetch_state() -> dict:
+    """前端轮询: 拉取进度 (已拉 X / 目标 Y / 模式 / 错误)。"""
+    with _liked_lock:
+        return dict(_liked_fetch)
 
 
 # ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----

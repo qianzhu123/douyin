@@ -1378,3 +1378,36 @@ button:disabled {
 .liked-login-actions {
   display: flex; gap: 8px; justify-content: center; margin-top: 14px;
 }
+
+/* ---- 喜欢/收藏: 筛选条 (2026-11-14 二轮) ---- */
+.liked-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.liked-filter-input {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid var(--border, #e3e5e8);
+  border-radius: 6px;
+  background: var(--surface, #fff);
+  color: inherit;
+  min-width: 180px;
+}
+.liked-filter-input:focus { outline: 1px solid var(--accent, #2563eb); }
+select.liked-filter-input { min-width: 200px; }
+.liked-filter-clear, .liked-filter-go {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #e3e5e8);
+  background: transparent;
+  cursor: pointer;
+}
+.liked-filter-go {
+  background: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+  color: #fff;
+}

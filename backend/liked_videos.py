@@ -125,12 +125,15 @@ def _bridge(coro_factory, timeout: float = 300.0):
 
 
 def fetch_liked_items(kind: str = "like", target: int = 16,
-                      on_progress: Callable[[int], None] | None = None) -> dict[str, Any]:
+                      on_progress: Callable[..., None] | None = None,
+                      query: str = "", author: str = "") -> dict[str, Any]:
     """拉当前登录态的喜欢/收藏卡片, 最多 target 张 (滚动到够为止)。
 
     kind:   "like"(喜欢) | "collect"(收藏)
     target: 本次要拉到多少张 (调用方按"首屏16/后台40/继续加载+8"决定)
-    on_progress: 每滚一轮回调当前累计数 (供后端写进度)
+    on_progress: 每滚一轮回调 on_progress(已扫过, 已匹配) (供后端写进度)
+    query/author: 定向模式 — 边滚边匹配 (标题含query 或 作者前缀author),
+                  凑够 target 个**匹配项**即停 (不必拉全量)。
     返回 {ok, via, kind, items, total, error}
     """
     tab_text = _TABS.get(kind)
@@ -150,6 +153,20 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
             context = browser.contexts[0]
             page = await context.new_page()
 
+            q_l = (query or "").strip().lower()
+            a_l = (author or "").strip().lower()
+
+            def matches(it: dict) -> bool:
+                if not q_l and not a_l:
+                    return True
+                t = (it.get("title") or "").lower()
+                au = (it.get("author") or "").lower()
+                if a_l and not au.startswith(a_l):
+                    return False
+                if q_l and q_l not in t and q_l not in au:
+                    return False
+                return True
+
             async def collect() -> int:
                 cards = await page.evaluate(_COLLECT_JS)
                 for c in cards:
@@ -157,15 +174,18 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
                     m = re.search(r"/(?:video|note)/(\d+)", url)
                     if not m or url in seen:
                         continue
-                    author, title = _split_alt(c["alt"])
+                    author_, title = _split_alt(c["alt"])
                     seen[url] = {
                         "aweme_id": m.group(1),
                         "url": url,
                         "cover": c["cover"] or "",
-                        "author": author,
+                        "author": author_,
                         "title": title,
                     }
                 return len(seen)
+
+            def matched_n() -> int:
+                return sum(1 for v in seen.values() if matches(v))
 
             try:
                 await page.goto("https://www.douyin.com/user/self",
@@ -185,12 +205,13 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
                 await page.wait_for_timeout(5000)
                 await collect()
                 if on_progress:
-                    on_progress(len(seen))
+                    on_progress(len(seen), matched_n())
 
                 # 反复滚真实容器直到够数或不再增长 (2026-11-14: window 不可滚, 必须滚容器)
                 stalls = 0
-                for i in range(80):
-                    if len(seen) >= target:
+                for i in range(120):
+                    goal = matched_n() if (q_l or a_l) else len(seen)
+                    if goal >= target:
                         break
                     await page.evaluate(_SCROLLER_JS)
                     await page.evaluate(_SCROLL_JS)
@@ -202,7 +223,7 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
                     before = len(seen)
                     await collect()
                     if on_progress:
-                        on_progress(len(seen))
+                        on_progress(len(seen), matched_n())
                     if len(seen) == before:
                         stalls += 1
                         if stalls >= 3:
@@ -210,16 +231,23 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
                     else:
                         stalls = 0
 
-                out["ok"] = bool(seen)
+                # 定向模式只回传匹配项
+                items = [v for v in seen.values() if matches(v)] if (q_l or a_l) \
+                    else list(seen.values())
+                out["items"] = items
+                out["total"] = len(items)
+                out["ok"] = bool(items)
                 if not seen:
                     out["error"] = f"“{tab_text}”tab 无卡片 (可能列表为空或被风控)"
+                elif (q_l or a_l) and not items:
+                    out["error"] = f"滚动范围内无匹配 (扫过 {len(seen)} 个)"
+                return
             finally:
                 try:
                     await page.close()
                 except Exception:
                     pass
 
-    _bridge(_run, timeout=300)
-    out["items"] = list(seen.values())
+    _bridge(_run, timeout=420)
     out["total"] = len(out["items"])
     return out

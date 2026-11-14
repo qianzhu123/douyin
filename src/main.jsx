@@ -2709,91 +2709,122 @@ function DownloadPreview({ preview, selectedUrls, selectedMedia, onToggle, onTog
   );
 }
 
-// 我的喜欢/收藏面板 (2026-11-14 重做):
-//   · 不再"开一次界面就拉一次" → 只在点「拉取」按钮时拉, 结果长缓存(1h)
-//   · 登录态状态显示 (CDP/槽位/昵称头像) + 扫码登录 + 切换账户 (每账户独立 profile)
-//   · 分页: 首屏 16 (两行), 后台默认补到 40, 「继续加载」每次 +8
-//   · 卡片三重过滤 (后端已滤页脚 SEO 链接), 链接一律 /video/<id> 直链
+// 我的喜欢/收藏面板 (2026-11-14 二轮重做):
+//   · 数据按槽位落盘 → 切换账户/重开界面秒开, 免重拉
+//   · 全局「拉取」按钮; 进度 "已拉 X / 目标 Y"; 完成提示 3s 自动消失
+//   · 分页: 首屏 16, 继续加载每次 +8 (只动显示条数, 不覆盖已有)
+//   · 筛选: 关键词/作者 本地即时过滤; 无缓存时「定向拉取」边滚边匹配
+//   · 卡片链接一律 /video/<id> 直链 (后端三重过滤已去页脚 SEO)
 function LikedVideosPanel() {
   const [kind, setKind] = React.useState('like');
-  const [items, setItems] = React.useState([]);
-  const [total, setTotal] = React.useState(0);
-  const [busy, setBusy] = React.useState(false);          // 切片读取中
-  const [fetching, setFetching] = React.useState(false);  // 后台拉取中
-  const [progress, setProgress] = React.useState(0);
+  const [items, setItems] = React.useState([]);      // 当前显示的切片
+  const [total, setTotal] = React.useState(0);       // 筛选后总数
+  const [grandTotal, setGrandTotal] = React.useState(0); // 未筛选总数
+  const [busy, setBusy] = React.useState(false);
+  const [fs, setFs] = React.useState(null);          // 后端 fetch_state 轮询
   const [error, setError] = React.useState('');
   const [copied, setCopied] = React.useState('');
   const [acct, setAcct] = React.useState(null);
-  const [acctBusy, setAcctBusy] = React.useState(false);
   const [login, setLogin] = React.useState(null);
   const [showLogin, setShowLogin] = React.useState(false);
   const [notice, setNotice] = React.useState('');
+  const [q, setQ] = React.useState('');              // 关键词筛选
+  const [author, setAuthor] = React.useState('');    // 作者筛选
+  const [authors, setAuthors] = React.useState([]);  // 作者去重列表
+  const noticeTimer = React.useRef(null);
   const PAGE = 16, STEP = 8;
 
-  // 账户状态 (不触发拉取; probe=1 会读一次昵称头像)
+  const flashNotice = (msg) => {
+    setNotice(msg);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(''), 3000);
+  };
+
   const loadAcct = React.useCallback(async (probe) => {
     try {
       const r = await fetch(`${API_BASE}/api/liked/account?probe=${probe ? 1 : 0}`);
       setAcct(await r.json());
-    } catch (e) { /* 状态读不到不阻塞面板 */ }
+    } catch (e) { /* 不阻塞面板 */ }
   }, []);
 
-  // 只读缓存切片 (不触发任何拉取)
-  const loadSlice = React.useCallback(async (k, offset, limit) => {
-    const r = await fetch(`${API_BASE}/api/liked/videos?kind=${k}&offset=${offset}&limit=${limit}`);
+  // 切片读取 (带筛选参数; 只读, 不触发拉取)
+  const loadSlice = React.useCallback(async (k, offset, limit, qq = q, aa = author) => {
+    const p = new URLSearchParams({ kind: k, offset, limit });
+    if (qq) p.set('q', qq);
+    if (aa) p.set('author', aa);
+    const r = await fetch(`${API_BASE}/api/liked/videos?${p}`);
     return r.json();
+  }, [q, author]);
+
+  const loadAuthors = React.useCallback(async (k) => {
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/authors?kind=${k}`);
+      const d = await r.json();
+      setAuthors(d.authors || []);
+    } catch (e) { /* 下拉为空即可 */ }
   }, []);
 
   React.useEffect(() => { loadAcct(true); }, [loadAcct]);
 
-  // 切 tab / 首次进入: 只读缓存, 不触发拉取 (用户要求)
+  // 切 tab / 首次进入 / 筛选词变化: 只读缓存切片
   React.useEffect(() => {
     let alive = true;
     setBusy(true); setError('');
     loadSlice(kind, 0, PAGE).then((d) => {
       if (!alive) return;
       setItems(d.items || []); setTotal(d.total || 0);
+      setGrandTotal(d.fetch_state && d.fetch_state.grand_total != null ? d.fetch_state.grand_total : d.total || 0);
       if (d.error) setError(d.error);
-      setFetching(!!d.running);
-      if (d.running) setProgress((d.fetch_state || {}).count || 0);
       setBusy(false);
+      loadAuthors(kind);
     }).catch((e) => { if (alive) { setError(String(e.message || e)); setBusy(false); } });
     return () => { alive = false; };
-  }, [kind, loadSlice]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, q, author]);
 
-  // 后台拉取中: 轮询进度 + 增量刷新已显示部分
+  // 后台拉取轮询 (fs.running 由 fetch 启动; 完成后刷新列表+作者)
   React.useEffect(() => {
-    if (!fetching) return undefined;
     const t = setInterval(async () => {
-      const d = await loadSlice(kind, 0, Math.max(PAGE, items.length));
-      setProgress((d.fetch_state || {}).count || 0);
-      if (!d.running) {
-        setFetching(false);
-        setItems(d.items || []); setTotal(d.total || 0);
-        if (d.error) setError(d.error);
-        loadAcct(true);
-      } else if ((d.items || []).length > items.length) {
-        setItems(d.items || []); setTotal(d.total || 0);
-      }
-    }, 3000);
+      try {
+        const s = await fetch(`${API_BASE}/api/liked/fetch-state`).then((x) => x.json());
+        setFs(s);
+        if (s.running && s.kind === kind) {
+          // 增量刷新已显示部分
+          const d = await loadSlice(kind, 0, Math.max(PAGE, items.length));
+          if ((d.items || []).length > items.length) {
+            setItems(d.items || []); setTotal(d.total || 0);
+          }
+        } else if (s.kind === kind && s.ts && Date.now() / 1000 - s.ts < 2) {
+          // 刚完成 → 刷新
+          const d = await loadSlice(kind, 0, Math.max(PAGE, items.length));
+          setItems(d.items || []); setTotal(d.total || 0);
+          loadAuthors(kind);
+          if (s.error) setError(s.error);
+          else flashNotice(`拉取完成, 共 ${s.count} 个${s.mode === '定向' ? ` (匹配 ${s.matched})` : ''}`);
+        }
+      } catch (e) { /* 轮询失败忽略 */ }
+    }, 2500);
     return () => clearInterval(t);
-  }, [fetching, kind, items.length, loadSlice, loadAcct]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, items.length, loadSlice, loadAuthors]);
 
-  // 「拉取」按钮: 起后台拉取 (先 16 → 默认补到 40)
+  // 「拉取」: 带 q/author 时是定向拉取
   const doFetch = async (target) => {
-    setError(''); setNotice('');
+    setError('');
     try {
-      const r = await fetch(`${API_BASE}/api/liked/fetch?kind=${kind}&target=${target || 0}`, { method: 'POST' });
+      const p = new URLSearchParams({ kind, target: target || 0 });
+      if (q) p.set('q', q);
+      if (author) p.set('author', author);
+      const r = await fetch(`${API_BASE}/api/liked/fetch?${p}`, { method: 'POST' });
       const d = await r.json();
-      if (!d.ok) { setNotice(d.reason || '无法开始'); return; }
-      setNotice(d.reason || '已开始');
-      setFetching(true); setProgress(0);
+      if (!d.ok) { flashNotice(d.reason || '无法开始'); return; }
+      flashNotice(d.reason);
       const s = await loadSlice(kind, 0, PAGE);
       setItems(s.items || []); setTotal(s.total || 0);
     } catch (e) { setError(String(e.message || e)); }
   };
 
-  // 「继续加载」: 缓存够就只多显示, 不够才拉 (每次 +STEP)
+  // 「继续加载」: 缓存够就纯切片; 不够再拉
   const doMore = async () => {
     const wantShown = items.length + STEP;
     if (wantShown <= total) {
@@ -2815,14 +2846,21 @@ function LikedVideosPanel() {
   };
 
   const doSwitch = async (slot) => {
-    setAcctBusy(true); setNotice('');
+    setNotice(`正在切换到账户 ${slot} (约 5-10 秒)…`);
     try {
       const r = await fetch(`${API_BASE}/api/liked/account/switch?slot=${slot}`, { method: 'POST' });
       const d = await r.json();
-      setNotice(d.ok ? `已切换到账户 ${slot}` : (d.error || '切换失败'));
-      setItems([]); setTotal(0);
-      await loadAcct(true);
-    } finally { setAcctBusy(false); }
+      if (d.ok) {
+        setNotice(''); setItems([]); setTotal(0); setAuthors([]);
+        await loadAcct(true);
+        const s = await loadSlice(kind, 0, PAGE);
+        setItems(s.items || []); setTotal(s.total || 0);
+        loadAuthors(kind);
+        flashNotice(`已切换到账户 ${slot}${(s.items || []).length ? `, 本地缓存 ${s.total} 个已就绪` : ' (该账户暂无本地数据, 点「拉取」)'}`);
+      } else {
+        flashNotice(d.error || '切换失败');
+      }
+    } catch (e) { flashNotice(String(e.message || e)); }
   };
 
   const doLogin = async (slot) => {
@@ -2834,7 +2872,6 @@ function LikedVideosPanel() {
     } catch (e) { setLogin({ phase: 'error', error: String(e.message || e) }); }
   };
 
-  // 扫码轮询
   React.useEffect(() => {
     if (!showLogin || !login || login.phase !== 'running') return undefined;
     const t = setInterval(async () => {
@@ -2847,6 +2884,8 @@ function LikedVideosPanel() {
 
   const logged = acct && acct.logged_in;
   const curSlot = acct && acct.slot;
+  const running = fs && fs.running;
+  const filtering = q || author;
 
   return (
     <section className="panel liked-panel" id="sec-liked">
@@ -2856,10 +2895,10 @@ function LikedVideosPanel() {
           <p>当前登录账户的点赞与收藏 · 封面卡片 · 链接为作品直链 (未登录可看)</p>
         </div>
         <div className="panel-actions">
-          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => setKind('like')}>喜欢</button>
-          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => setKind('collect')}>收藏</button>
-          <button onClick={() => doFetch(0)} disabled={fetching}>
-            {fetching ? `拉取中… ${progress}` : '拉取'}
+          <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => { setKind('like'); setQ(''); setAuthor(''); }}>喜欢</button>
+          <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => { setKind('collect'); setQ(''); setAuthor(''); }}>收藏</button>
+          <button onClick={() => doFetch(0)} disabled={running}>
+            {running && fs.kind === kind ? `拉取中 ${fs.count}/${fs.target}` : filtering ? '定向拉取' : '拉取'}
           </button>
         </div>
       </div>
@@ -2870,7 +2909,7 @@ function LikedVideosPanel() {
         {acct && !acct.cdp && (
           <>
             <span className="liked-dot off" />
-            <span>调试 Chrome 未运行 —— 无法读取登录态</span>
+            <span>调试 Chrome 未运行</span>
             <button onClick={() => doLogin(curSlot || 1)}>扫码登录</button>
           </>
         )}
@@ -2892,23 +2931,47 @@ function LikedVideosPanel() {
         <span className="liked-acct-spacer" />
         {(acct?.slots || []).map((s) => (
           <button key={s.slot} className={`liked-slot${s.active ? ' active' : ''}`}
-                  onClick={() => doSwitch(s.slot)} disabled={acctBusy || s.active}
-                  title={`切换到${s.name}`}>
-            {s.name}
+                  onClick={() => doSwitch(s.slot)} disabled={s.active || (acct && acct.cdp && !logged && !s.has_local && false)}
+                  title={s.has_local ? `本地已有${s.name}数据` : `${s.name} (本地无数据)`}>
+            {s.name}{s.has_local ? ' ●' : ''}
           </button>
         ))}
         {acct && acct.cdp && logged && (
-          <button onClick={() => doLogin(curSlot || 1)} disabled={acctBusy}>重新登录</button>
+          <button onClick={() => doLogin(curSlot || 1)}>重新登录</button>
+        )}
+      </div>
+
+      {/* 筛选条 */}
+      <div className="liked-filter">
+        <input className="liked-filter-input" placeholder="关键词 (标题/作者)…"
+               value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className="liked-filter-input" value={author}
+                onChange={(e) => setAuthor(e.target.value)}>
+          <option value="">全部作者 ({authors.length})</option>
+          {authors.map(([a, n]) => <option key={a} value={a}>{a} ({n})</option>)}
+        </select>
+        {(q || author) && (
+          <button className="liked-filter-clear" onClick={() => { setQ(''); setAuthor(''); }}>清除</button>
+        )}
+        {filtering && (
+          <button className="liked-filter-go" onClick={() => doFetch(60)}
+                  title="本地缓存中匹配不足时, 边滚动边按条件匹配拉取">
+            按条件定向拉取
+          </button>
         )}
       </div>
 
       {notice && <div className="empty">{notice}</div>}
       {error && <div className="notice">{error}</div>}
-      {fetching && <div className="empty">后台拉取中… 已载入 {progress} 个 (可继续浏览, 完成后自动刷新)</div>}
-      {busy && !items.length && !fetching && <div className="empty">读取缓存…</div>}
-      {!busy && !fetching && !items.length && (
+      {running && fs.kind === kind && (
+        <div className="empty">后台拉取中: 已扫 {fs.count} / 目标 {fs.target}{fs.mode === '定向' ? ` · 已匹配 ${fs.matched}` : ''} (可继续浏览, 完成后自动刷新)</div>
+      )}
+      {busy && !items.length && <div className="empty">读取本地缓存…</div>}
+      {!busy && !items.length && !running && (
         <div className="empty">
-          {logged ? '尚未拉取 —— 点右上「拉取」加载当前账户的列表' : '请先扫码登录'}
+          {filtering
+            ? '本地缓存无匹配 — 可点「按条件定向拉取」'
+            : logged ? '暂无本地数据 — 点右上「拉取」' : '请先扫码登录'}
         </div>
       )}
 
@@ -2928,10 +2991,12 @@ function LikedVideosPanel() {
         ))}
       </div>
 
-      {(total > items.length || fetching) && (
+      {(total > items.length || (running && fs.kind === kind)) && (
         <div className="liked-more">
-          <button onClick={doMore} disabled={busy || fetching}>
-            {busy ? '加载中…' : fetching ? `后台拉取中… (${progress})` : `继续加载 (${items.length}/${total})`}
+          <button onClick={doMore} disabled={busy || (running && fs.kind === kind)}>
+            {busy ? '加载中…'
+              : (running && fs.kind === kind) ? `后台拉取中 (${fs.count}/${fs.target})`
+              : `继续加载 (${items.length}/${total})`}
           </button>
         </div>
       )}
@@ -2953,7 +3018,7 @@ function LikedVideosPanel() {
             <div className="liked-login-actions">
               <button onClick={() => setShowLogin(false)}>关闭</button>
               {login && login.phase === 'running' && (
-                <button onClick={() => { fetch(`${API_BASE}/api/liked/login/cancel`, { method: 'POST' }); }}>取消</button>
+                <button onClick={() => { fetch(`${API_BASE}/api/liked/login/cancel`, { method: 'POST' }); setLogin((s) => ({ ...s, phase: 'cancelled' })); }}>取消</button>
               )}
             </div>
           </div>
