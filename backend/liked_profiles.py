@@ -178,8 +178,32 @@ def switch_slot(slot: int) -> dict:
     if not stopped:
         return {"ok": False, "slot": slot, "error": "旧 Chrome 未能停止 (端口仍占用)"}
     ok = start_cdp_chrome(slot)
+    _invalidate_state_cache()
     return {"ok": ok, "slot": slot, "restarted": True,
             "error": "" if ok else "Chrome 启动后 CDP 未就绪"}
+
+
+def delete_slot(slot: int) -> dict:
+    """删除槽位: 清 profile 目录 + 本地喜欢/收藏数据 (退出该账户登录态)。
+
+    被删槽位若是活跃槽位, 先停掉对应 Chrome。profile 目录删除后, 下次用
+    该槽位时重新 mkdir (全新未登录)。不会碰其它槽位的任何数据。
+    """
+    import shutil
+    slot = int(slot)
+    if slot not in SLOTS:
+        return {"ok": False, "error": f"未知槽位 {slot}"}
+    if slot == DEFAULT_SLOT:
+        return {"ok": False, "error": "槽位 1 与搜索链路共用 profile, 不允许删除"}
+    if active_slot() == slot:
+        stop_cdp_chrome()
+    d = slot_dir(slot)
+    removed_profile = False
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+        removed_profile = True
+    _invalidate_state_cache()
+    return {"ok": True, "slot": slot, "removed_profile": removed_profile}
 
 
 # ---------------- 登录态探测 ----------------
@@ -196,16 +220,45 @@ def _bridge(coro_factory, timeout: float = 120.0):
         return ex.submit(lambda: asyncio.run(coro_factory())).result(timeout=timeout)
 
 
+# ---------------- 登录态探测 ----------------
+
+# 登录态 TTL 缓存 (2026-11-14 三轮): probe 每次开页烧 4.5-8s 是面板卡顿元凶,
+# 60s 内直接回缓存; 切换/删除槽位后由调用方 _invalidate_state_cache() 清掉。
+_STATE_TTL = 60.0
+_state_cache: dict = {"ts": 0.0, "data": None}
+
+
+def _invalidate_state_cache() -> None:
+    _state_cache["ts"] = 0.0
+    _state_cache["data"] = None
+
+
+def _bridge(coro_factory, timeout: float = 120.0):
+    """在无事件循环的线程里跑 async playwright (后端是同步 FastAPI 端点)。"""
+    import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro_factory())
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(1) as ex:
+        return ex.submit(lambda: asyncio.run(coro_factory())).result(timeout=timeout)
+
+
 def login_state(with_profile: bool = True) -> dict:
-    """当前 CDP Chrome 的登录态。
+    """当前 CDP Chrome 的登录态 (60s TTL 缓存, 切换/登录/删除时清)。
 
     返回 {cdp, slot, logged_in, nickname, avatar, uid, error}
     logged_in 以 CDP cookie 里的 sessionid 为准 (不猜 profile 文件)。
     """
+    now = time.time()
+    if _state_cache["data"] is not None and now - _state_cache["ts"] < _STATE_TTL:
+        return dict(_state_cache["data"])
     out = {"cdp": cdp_alive(), "slot": None, "logged_in": False,
            "nickname": "", "avatar": "", "uid": "", "error": ""}
     if not out["cdp"]:
         out["slot"] = None
+        _state_cache.update({"ts": now, "data": dict(out)})
         return out
     out["slot"] = active_slot()
 
@@ -247,5 +300,19 @@ def login_state(with_profile: bool = True) -> dict:
         r = _bridge(_run, timeout=90)
         out.update({k: r.get(k) for k in ("logged_in", "nickname", "avatar")})
     except Exception as exc:
-        out["error"] = str(exc)[:120]
+        # 切槽位瞬间旧 Chrome 被杀, 轮询中的 probe 页会被腰斩 → "page has been
+        # closed" 瞬态误报 (2026-11-14 用户实测)。不再把这种写进 error 展示,
+        # 只标注 probe 失败; 登录态以 cookie 探测单独重试一次为准。
+        msg = str(exc)
+        if "has been closed" in msg or "Target closed" in msg:
+            try:
+                b2_probe = cdp_alive()
+                out["error"] = ""
+                if not b2_probe:
+                    out["cdp"] = False
+            except Exception:
+                pass
+        else:
+            out["error"] = msg[:120]
+    _state_cache.update({"ts": time.time(), "data": dict(out)})
     return out

@@ -2731,6 +2731,8 @@ function LikedVideosPanel() {
   const [q, setQ] = React.useState('');              // 关键词筛选
   const [author, setAuthor] = React.useState('');    // 作者筛选
   const [authors, setAuthors] = React.useState([]);  // 作者去重列表
+  const [delArm, setDelArm] = React.useState(null);  // 删除账户二次点击确认
+  const [downloading, setDownloading] = React.useState(false); // 一键下载进行中
   const noticeTimer = React.useRef(null);
   const PAGE = 16, STEP = 8;
 
@@ -2819,6 +2821,8 @@ function LikedVideosPanel() {
       const d = await r.json();
       if (!d.ok) { flashNotice(d.reason || '无法开始'); return; }
       flashNotice(d.reason);
+      // 立即把空态文案换成拉取态 (不等 2.5s 轮询 — 三轮实测"点了拉取还显示暂无数据"根因)
+      setFs((s) => ({ ...(s || {}), running: true, kind, count: 0, target: d.target || 0 }));
       const s = await loadSlice(kind, 0, PAGE);
       setItems(s.items || []); setTotal(s.total || 0);
     } catch (e) { setError(String(e.message || e)); }
@@ -2872,6 +2876,45 @@ function LikedVideosPanel() {
     } catch (e) { setLogin({ phase: 'error', error: String(e.message || e) }); }
   };
 
+  // 删除账户 (槽位 2/3): 二次点击确认 (禁原生 confirm)
+  const doDelete = async (slot) => {
+    if (delArm !== slot) { setDelArm(slot); setTimeout(() => setDelArm((s) => (s === slot ? null : s)), 3000); return; }
+    setDelArm(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/account/delete?slot=${slot}`, { method: 'POST' });
+      const d = await r.json();
+      if (d.ok) {
+        flashNotice(`账户 ${slot} 已删除 (登录态+本地数据)`);
+        setItems([]); setTotal(0); setAuthors([]);
+        await loadAcct(true);
+        const s = await loadSlice(kind, 0, PAGE);
+        setItems(s.items || []); setTotal(s.total || 0);
+        loadAuthors(kind);
+      } else flashNotice(d.error || '删除失败');
+    } catch (e) { flashNotice(String(e.message || e)); }
+  };
+
+  // 一键下载: 当前筛选下全部 (或后续可勾选) → 按作者分组投给下载器
+  const doDownload = async () => {
+    if (!items.length) { flashNotice('没有可下载的项'); return; }
+    setDownloading(true);
+    try {
+      // 只传当前显示的? — 传"筛选下全部": 先拉完整切片
+      const d = await loadSlice(kind, 0, 2000);
+      const all = d.items || [];
+      if (!all.length) { flashNotice('没有可下载的项'); return; }
+      const r = await fetch(`${API_BASE}/api/liked/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, items: all.map((it) => ({ url: it.url, title: it.title, author: it.author })), mode: 3, comments: true }),
+      });
+      const dd = await r.json();
+      if (dd.ok) flashNotice(`已创建下载任务: ${dd.total} 个视频 / ${dd.authors} 位作者 → data/liked_downloads/ (在"下载"面板看进度)`);
+      else flashNotice(dd.detail || '创建下载任务失败');
+    } catch (e) { flashNotice(String(e.message || e)); }
+    finally { setDownloading(false); }
+  };
+
   React.useEffect(() => {
     if (!showLogin || !login || login.phase !== 'running') return undefined;
     const t = setInterval(async () => {
@@ -2903,41 +2946,45 @@ function LikedVideosPanel() {
         </div>
       </div>
 
-      {/* 登录态状态条 */}
+      {/* 登录态状态条 (三轮重做: 账户块醒目化 + 添加/删除 + 下载) */}
       <div className="liked-acct">
         {!acct && <span className="liked-acct-hint">正在读取登录态…</span>}
-        {acct && !acct.cdp && (
-          <>
-            <span className="liked-dot off" />
-            <span>调试 Chrome 未运行</span>
-            <button onClick={() => doLogin(curSlot || 1)}>扫码登录</button>
-          </>
-        )}
-        {acct && acct.cdp && !logged && (
-          <>
-            <span className="liked-dot off" />
-            <span>未登录 (槽位 {curSlot || 1})</span>
-            <button onClick={() => doLogin(curSlot || 1)}>扫码登录</button>
-          </>
-        )}
-        {acct && acct.cdp && logged && (
-          <>
-            <span className="liked-dot on" />
-            {acct.avatar && <img className="liked-avatar" src={acct.avatar} alt="" />}
-            <strong>{acct.nickname || '已登录'}</strong>
-            <span className="liked-acct-hint">· 槽位 {curSlot}</span>
-          </>
+        {acct && (
+          <div className={`liked-acct-current${logged ? ' ok' : ' bad'}`}>
+            <span className={`liked-dot ${logged ? 'on' : 'off'}`} />
+            {logged && acct.avatar && (
+              <img className="liked-avatar" src={acct.avatar} alt="" referrerPolicy="no-referrer"
+                   onError={(e) => { e.target.style.display = 'none'; }} />
+            )}
+            <strong>{acct.cdp ? (logged ? (acct.nickname || '已登录') : '未登录') : '调试 Chrome 未运行'}</strong>
+            {!logged && <button className="liked-acct-login" onClick={() => doLogin(curSlot || 1)}>扫码登录</button>}
+            {logged && <span className="liked-acct-hint">· {acct.nickname ? '' : '槽位 '}{curSlot}</span>}
+          </div>
         )}
         <span className="liked-acct-spacer" />
+        <span className="liked-acct-hint">账户切换:</span>
         {(acct?.slots || []).map((s) => (
-          <button key={s.slot} className={`liked-slot${s.active ? ' active' : ''}`}
-                  onClick={() => doSwitch(s.slot)} disabled={s.active || (acct && acct.cdp && !logged && !s.has_local && false)}
-                  title={s.has_local ? `本地已有${s.name}数据` : `${s.name} (本地无数据)`}>
+          <span key={s.slot} className={`liked-slot${s.active ? ' active' : ''}${delArm === s.slot ? ' armed' : ''}`}
+                onClick={() => { if (delArm === s.slot) return; doSwitch(s.slot); }}>
+            {s.active && <span className="liked-slot-cur">当前</span>}
             {s.name}{s.has_local ? ' ●' : ''}
-          </button>
+            {!s.active && s.slot !== 1 && (
+              <button className="liked-slot-del" title="删除该账户 (登录态+本地数据)"
+                      onClick={(e) => { e.stopPropagation(); doDelete(s.slot); }}>
+                {delArm === s.slot ? '确认删除?' : '×'}
+              </button>
+            )}
+          </span>
         ))}
-        {acct && acct.cdp && logged && (
-          <button onClick={() => doLogin(curSlot || 1)}>重新登录</button>
+        {(acct?.slots || []).length < 3 && (
+          <button className="liked-slot-add" onClick={() => doLogin((acct?.slots || []).length + 1)}
+                  title="添加新账户 (扫码登录到下一个空槽位)">+ 添加账户</button>
+        )}
+        {logged && (
+          <button onClick={() => doDownload()} disabled={downloading || !items.length}
+                  title="下载当前筛选下的视频到 data/liked_downloads/<作者>/<喜欢|收藏>/<标题>/">
+            {downloading ? '创建下载任务…' : `下载${filtering ? '筛选结果' : '全部'}(${total})`}
+          </button>
         )}
       </div>
 
@@ -2974,7 +3021,6 @@ function LikedVideosPanel() {
             : logged ? '暂无本地数据 — 点右上「拉取」' : '请先扫码登录'}
         </div>
       )}
-
       <div className="liked-grid">
         {items.map((it) => (
           <div key={it.aweme_id} className="liked-card">

@@ -147,11 +147,13 @@ class LikedQrSession:
                 if _lp.cdp_alive() and _lp.active_slot() == int(slot):
                     injected = self._inject_live(pw, slot, cookies)
                     if injected:
+                        _lp._invalidate_state_cache()
                         self._set(phase="success", done_at=time.time(),
                                   injected_live=True)
                         return
                 self._persist_profile(pw, slot, cookies)
                 injected = self._inject_live(pw, slot, cookies)
+                _lp._invalidate_state_cache()
                 self._set(phase="success", done_at=time.time(), injected_live=injected)
         except Exception as exc:
             self._set(phase="error", error=str(exc)[:200], done_at=time.time())

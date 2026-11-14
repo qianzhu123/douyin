@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, LiveRoomRequest, LiveViewersRequest, MonitorToggleRequest, PaygradeRequest, ProgressLog, ProgressStep, QueryRequest, ReorderUsersRequest, SearchUsersRequest
+from .schemas import AddUserRequest, AppSettingsRequest, DownloadPreviewRequest, DownloadRequest, LikedDownloadRequest, LiveRoomRequest, LiveViewersRequest, MonitorToggleRequest, PaygradeRequest, ProgressLog, ProgressStep, QueryRequest, ReorderUsersRequest, SearchUsersRequest
 from .services import DownloadService, MonitorService, load_app_settings, save_app_settings
 
 
@@ -484,6 +484,9 @@ _liked_lock = _threading_lv.Lock()
 _liked_cache: dict = {"like": {"ts": 0.0, "items": [], "error": "", "slot": None, "complete": False},
                       "collect": {"ts": 0.0, "items": [], "error": "", "slot": None, "complete": False}}
 _LIKED_BG_TARGET = 40         # 默认后台补到 40
+# 一键下载根目录 (项目 data/liked_downloads/<作者昵称>/<喜欢|收藏>/<标题>/)
+from .config import DATA_DIR as _DATA_DIR_L
+_LIKED_DL_ROOT = _DATA_DIR_L / "liked_downloads"
 _LIKED_PAGE_STEP = 8          # "继续加载"每次 +8
 _LIKED_STORE_CAP = 5000       # 落盘上限
 
@@ -590,6 +593,34 @@ def liked_account_switch(slot: int = 1) -> dict:
     return r
 
 
+@app.post("/api/liked/account/delete")
+def liked_account_delete(slot: int = 2) -> dict:
+    """删除槽位账户: 清 profile (退出登录态) + 该槽位本地喜欢/收藏数据。
+
+    槽位 1 与搜索链路共用 profile, 拒绝删除。槽位 2/3 的 profile 数据可以删。
+    """
+    r = _lp.delete_slot(slot)
+    if r.get("ok"):
+        # 该槽位的落盘数据一并清 (账户没了, 数据没有保留意义; 用户诉求"删除账户")
+        store_root = _DATA_DIR_L / "liked"
+        for k in ("like", "collect"):
+            p = store_root / f"{int(slot)}_{k}.json"
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+        # 若删的是当前内存缓存槽位, 回读活跃槽位
+        for k in ("like", "collect"):
+            with _liked_lock:
+                if _liked_cache[k]["slot"] == int(slot):
+                    _liked_cache[k] = {"ts": 0.0, "items": [], "error": "",
+                                       "slot": None, "complete": False}
+        _liked_mem_load("like")
+        _liked_mem_load("collect")
+    return r
+
+
 @app.post("/api/liked/login/start")
 def liked_login_start(slot: int = 1) -> dict:
     """扫码登录到指定槽位: 起 headless Chrome 开登录页, 旁听二维码。"""
@@ -685,6 +716,55 @@ def liked_fetch_state() -> dict:
     """前端轮询: 拉取进度 (已拉 X / 目标 Y / 模式 / 错误)。"""
     with _liked_lock:
         return dict(_liked_fetch)
+
+
+# ---- 喜欢/收藏 一键下载 (2026-11-14 三轮, 用户定案四级结构) ----
+#   data/liked_downloads/<作者昵称>/<喜欢|收藏>/<视频标题>/{媒体 + json(数据+评论)}
+#   说明: 喜欢 DOM 卡片只有作者昵称没有抖音号 (probe 实测), 二级目录用昵称;
+#         json (downloader _save_json) 里有完整互动数据 + 关键评论。
+#   实现: 按作者分组各建一个下载 job (wrap_folder=True 产出第三级标题目录),
+#         复用现有 download_service 线程池/子进程隔离/取消链路。
+def _liked_dl_safe(name: str) -> str:
+    """目录名清洗: 去文件系统非法字符 (与 downloader._sanitize_filename 同思路)。"""
+    import re as _re_dl
+    s = _re_dl.sub(r'[\\/:*?"<>|\r\n\t]', "_", (name or "").strip())
+    s = s.strip(" .")
+    return s[:60] or "未知作者"
+
+
+@app.post("/api/liked/download")
+def liked_download(payload: LikedDownloadRequest) -> dict:
+    kind_label = "收藏" if payload.kind == "collect" else "喜欢"
+    items = payload.items or _liked_cached_items(payload.kind)
+    if not items:
+        raise HTTPException(status_code=400, detail="没有可下载的项 (先拉取)")
+
+    # 按作者分组 → 每作者一个 job (output_dir= 根/作者/喜欢, wrap 出标题层)
+    groups: dict[str, list[str]] = {}
+    for it in items:
+        u = (it.get("url") or "").strip()
+        if not u:
+            continue
+        author = _liked_dl_safe(it.get("author") or "未知作者")
+        groups.setdefault(author, []).append(u)
+    if not groups:
+        raise HTTPException(status_code=400, detail="无有效链接")
+
+    jobs = []
+    for author, urls in groups.items():
+        out_dir = _LIKED_DL_ROOT / author / kind_label
+        try:
+            job = download_service.create_job_from_post_list(
+                urls, f"[喜欢面板/{kind_label}] {author}",
+                payload.mode, str(out_dir), payload.comments,
+                wrap_folder=True,
+            )
+            jobs.append({"job_id": job.id, "author": author, "count": len(urls),
+                         "output_dir": str(out_dir)})
+        except ValueError as exc:
+            jobs.append({"author": author, "error": str(exc)})
+    return {"ok": True, "kind": payload.kind, "total": sum(len(v) for v in groups.values()),
+            "authors": len(groups), "jobs": jobs}
 
 
 # ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----

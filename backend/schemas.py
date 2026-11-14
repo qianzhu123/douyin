@@ -99,6 +99,18 @@ class PostBatchDownloadRequest(BaseModel):
     video_format: str = Field(default="auto", pattern="^(auto|mp4|webm|audio)$")
 
 
+class LikedDownloadRequest(BaseModel):
+    """喜欢/收藏面板 一键下载请求 (2026-11-14 三轮)。
+
+    items: 前端勾选的卡片 (url+title+author); 缺省 = 当前筛选下全部。
+    目录结构: data/liked_downloads/<作者>/<喜欢|收藏>/<标题>/{媒体+json}
+    """
+    kind: str = Field(default="like", pattern="^(like|collect)$")
+    items: list[dict[str, str]] = Field(default_factory=list)
+    mode: int = Field(default=3, ge=1, le=3)
+    comments: bool = True
+
+
 class LiveViewersRequest(BaseModel):
     sec_uid: str
 
