@@ -32,6 +32,9 @@ HISTORY_MAX = 360          # 每房间快照环 (默认 120s 间隔 = 12h)
 EVENTS_MAX = 200
 # sec_uid -> room_id 解析缓存时长 (主播重新开播频率低, 10 分钟够)
 _ROOM_RESOLVE_TTL_S = 600
+# stale 事件限频 (2026-11-14 用户反馈: 每 30s 一条"未在广场流"刷屏) —
+# 同房间首条立即报, 之后每 STALE_EVENT_GAP_S 补一条提醒, 中间静默
+STALE_EVENT_GAP_S = 600
 
 
 class LiveMonitor:
@@ -84,7 +87,8 @@ class LiveMonitor:
                                     "last": None,
                                     "history": deque(maxlen=HISTORY_MAX),
                                     "last_tick": 0.0, "was_live": False,
-                                    "title": "", "viewers": None}
+                                    "title": "", "viewers": None,
+                                    "last_stale_event": 0.0}
             self._events.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True,
                                             name="live-monitor")
@@ -117,6 +121,7 @@ class LiveMonitor:
                     "history": deque(maxlen=HISTORY_MAX),
                     "last_tick": 0.0, "was_live": False,
                     "title": "", "viewers": None,
+                    "last_stale_event": 0.0,
                 }
                 self._state["rooms"] = [
                     {"sec_uid": st["sec_uid"], "room_id": st["room_id"], "label": st["label"]}
@@ -369,9 +374,13 @@ class LiveMonitor:
             time.sleep(0.5)
         st["last_tick"] = time.time()
         if feed_room is None:
-            # 不在广场流: 可能未开播或无推荐权重。用 profile 的 live_status 区分 —
-            # 仍在播 (resolved_rid 有效) 却不在流里 → 只能本轮缺数, 不发下播事件
-            self._add_event("stale", f"{st['label']} 未在广场流 (人数本轮缺)", rid)
+            # 不在广场流: 可能未开播或无推荐权重 → 只能本轮缺数, 不发下播事件。
+            # 2026-11-14: 事件限频 — 广场流本就时有时无, 每轮都报会刷屏
+            # (用户实测 ~30s 一条连刷 4 分钟)。首条立即报, 之后每 10 分钟一条。
+            now_ts = time.time()
+            if now_ts - st.get("last_stale_event", 0.0) >= STALE_EVENT_GAP_S:
+                st["last_stale_event"] = now_ts
+                self._add_event("stale", f"{st['label']} 未在广场流 (人数本轮缺, 之后10分钟内静默重试)", rid)
             return
         brief = _room_brief(feed_room)
         viewers = brief.get("viewers")
