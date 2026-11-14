@@ -484,15 +484,19 @@ _liked_lock = _threading_lv.Lock()
 _liked_cache: dict = {"like": {"ts": 0.0, "items": [], "error": "", "slot": None, "complete": False},
                       "collect": {"ts": 0.0, "items": [], "error": "", "slot": None, "complete": False}}
 _LIKED_BG_TARGET = 40         # 默认后台补到 40
-# 一键下载根目录 (项目 data/liked_downloads/<作者昵称>/<喜欢|收藏>/<标题>/)
-from .config import DATA_DIR as _DATA_DIR_L
-_LIKED_DL_ROOT = _DATA_DIR_L / "liked_downloads"
+# 一键下载根目录 (2026-11-14 四轮定案: 不分账户/喜欢层级, 直接按标题)
+#   D:\code\myweb\douyin\liked_downloads\<视频标题>\{媒体 + json}
+from .config import PROJECT_ROOT as _PROJECT_ROOT_L
+_LIKED_DL_ROOT = _PROJECT_ROOT_L / "liked_downloads"
 _LIKED_PAGE_STEP = 8          # "继续加载"每次 +8
 _LIKED_STORE_CAP = 5000       # 落盘上限
 
 _liked_fetch: dict = {"running": False, "kind": "", "count": 0, "target": 0,
                       "matched": 0, "error": "", "ts": 0.0, "slot": None,
-                      "mode": "", "query": ""}
+                      "mode": "", "query": "", "cancel_requested": False,
+                      "generation": 0}
+# cancel_requested: 用户点终止 → on_progress 回调里检测到即让采集循环 break
+# generation: 每次 start 递增; 终止只对当前代生效 (防误杀下一轮)
 
 
 def _liked_mem_load(kind: str) -> None:
@@ -517,15 +521,20 @@ def _liked_cached_items(kind: str) -> list:
         return list(_liked_cache[kind]["items"])
 
 
-def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "") -> None:
-    """后台拉取到 target; 带 query/author 时为定向模式 (边滚边匹配, 凑够即停)。"""
+def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "",
+                    gen: int = 0) -> None:
+    """后台拉取到 target; 带 query/author 时为定向模式 (边滚边匹配, 凑够即停)。
+
+    gen: 本次拉取的代数 — 终止请求只对当前代生效。
+    """
     slot = _lp.active_slot()
     try:
         with _liked_lock:
             _liked_fetch.update({"running": True, "kind": kind, "count": 0,
                                  "target": target, "matched": 0, "error": "",
                                  "slot": slot, "mode": "定向" if (query or author) else "全量",
-                                 "query": query or author})
+                                 "query": query or author, "cancel_requested": False,
+                                 "generation": gen})
             base = list(_liked_cache[kind]["items"])   # 合并基线
 
         def prog(n: int, matched: int = -1) -> None:
@@ -534,20 +543,29 @@ def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "") -
                 if matched >= 0:
                     _liked_fetch["matched"] = matched
 
+        def should_stop() -> bool:
+            """采集循环的终止探针: 当前代被请求终止 → True。"""
+            with _liked_lock:
+                return bool(_liked_fetch.get("cancel_requested")
+                            and _liked_fetch.get("generation") == gen)
+
         data = _lv.fetch_liked_items(kind=kind, target=target, on_progress=prog,
-                                     query=query, author=author)
+                                     query=query, author=author,
+                                     should_stop=should_stop)
         new_items = data.get("items") or []
+        cancelled = bool(data.get("cancelled"))
         merged = _ls.merge(base, new_items, cap=_LIKED_STORE_CAP)
-        complete = bool(data.get("ok")) and not (query or author)
+        complete = bool(data.get("ok")) and not (query or author) and not cancelled
         _ls.save(slot, kind, merged, complete=complete)
         with _liked_lock:
             _liked_cache[kind] = {"ts": _time_lv.time(), "items": merged,
-                                  "error": "" if data.get("ok") else (data.get("error") or "拉取失败"),
+                                  "error": "" if (data.get("ok") or cancelled) else (data.get("error") or "拉取失败"),
                                   "slot": slot, "complete": complete}
             _liked_fetch.update({"running": False, "count": len(new_items),
                                  "matched": len(merged) if (query or author) else len(merged),
-                                 "error": "" if data.get("ok") else (data.get("error") or ""),
-                                 "ts": _time_lv.time()})
+                                 "error": "已终止 (已扫到的保留)" if cancelled else ("" if data.get("ok") else (data.get("error") or "")),
+                                 "ts": _time_lv.time(),
+                                 "cancel_requested": False})
     except Exception as exc:
         with _liked_lock:
             _liked_fetch.update({"running": False, "error": str(exc)[:160],
@@ -559,23 +577,41 @@ def _liked_start(kind: str, target: int, query: str = "", author: str = "") -> b
     with _liked_lock:
         if _liked_fetch["running"]:
             return False
+        gen = int(_liked_fetch.get("generation", 0)) + 1
         _liked_fetch.update({"running": True, "kind": kind, "count": 0,
                              "target": target, "matched": 0, "error": "",
-                             "ts": _time_lv.time(), "query": query or author})
-    t = _threading_lv.Thread(target=_liked_do_fetch, args=(kind, target, query, author),
+                             "ts": _time_lv.time(), "query": query or author,
+                             "cancel_requested": False, "generation": gen})
+    t = _threading_lv.Thread(target=_liked_do_fetch,
+                             args=(kind, target, query, author, gen),
                              daemon=True)
     t.start()
     return True
+
+
+@app.post("/api/liked/fetch-cancel")
+def liked_fetch_cancel() -> dict:
+    """终止当前拉取 (已扫到的保留并落盘; 采集循环在下一轮滚动前退出)。"""
+    with _liked_lock:
+        if not _liked_fetch["running"]:
+            return {"ok": False, "reason": "没有进行中的拉取"}
+        _liked_fetch["cancel_requested"] = True
+        gen = _liked_fetch.get("generation", 0)
+    return {"ok": True, "reason": "正在终止 (最多几秒, 已扫到的保留)"}
 
 
 @app.get("/api/liked/account")
 def liked_account(probe: bool = True) -> dict:
     """当前登录态: CDP 是否在 / 活跃槽位 / 是否已登录 / 昵称头像。只读。"""
     st = _lp.login_state(with_profile=probe)
+    existing = set(_lp.discover_slots())
+    next_s = _lp.next_slot()
     st["slots"] = [{"slot": s, "name": _lp.slot_name(s),
                     "active": (st.get("slot") == s),
                     "has_local": any(_ls.load(s, k) for k in ("like", "collect"))}
-                   for s in sorted(_lp.SLOTS)]
+                   for s in sorted(existing)]
+    st["next_slot"] = next_s
+    st["can_add"] = next_s is not None
     return st
 
 
@@ -602,6 +638,7 @@ def liked_account_delete(slot: int = 2) -> dict:
     r = _lp.delete_slot(slot)
     if r.get("ok"):
         # 该槽位的落盘数据一并清 (账户没了, 数据没有保留意义; 用户诉求"删除账户")
+        from .config import DATA_DIR as _DATA_DIR_L
         store_root = _DATA_DIR_L / "liked"
         for k in ("like", "collect"):
             p = store_root / f"{int(slot)}_{k}.json"
@@ -718,20 +755,32 @@ def liked_fetch_state() -> dict:
         return dict(_liked_fetch)
 
 
-# ---- 喜欢/收藏 一键下载 (2026-11-14 三轮, 用户定案四级结构) ----
-#   data/liked_downloads/<作者昵称>/<喜欢|收藏>/<视频标题>/{媒体 + json(数据+评论)}
-#   说明: 喜欢 DOM 卡片只有作者昵称没有抖音号 (probe 实测), 二级目录用昵称;
-#         json (downloader _save_json) 里有完整互动数据 + 关键评论。
-#   实现: 按作者分组各建一个下载 job (wrap_folder=True 产出第三级标题目录),
-#         复用现有 download_service 线程池/子进程隔离/取消链路。
 def _liked_dl_safe(name: str) -> str:
-    """目录名清洗: 去文件系统非法字符 (与 downloader._sanitize_filename 同思路)。"""
+    """目录名清洗: 去文件系统非法字符 (downloader 内部对标题有同款处理)。"""
     import re as _re_dl
     s = _re_dl.sub(r'[\\/:*?"<>|\r\n\t]', "_", (name or "").strip())
     s = s.strip(" .")
-    return s[:60] or "未知作者"
+    return s[:60] or "未知标题"
 
 
+# ---- 喜欢/收藏 一键下载 (2026-11-14 四轮定案: 扁平结构) ----
+#   liked_downloads/<视频标题>/{媒体 + json(数据+评论)} — 不分账户/喜欢层级
+#   json (downloader _save_json) 里有作者/互动数据 + 关键评论。
+#   实现: 一个下载 job 全量投递 (wrap_folder=True 产出标题目录),
+#         复用现有 download_service 线程池/子进程隔离/取消链路。
+def _liked_dl_safe(name: str) -> str:
+    """目录名清洗: 去文件系统非法字符 (downloader 内部对标题有同款处理)。"""
+    import re as _re_dl
+    s = _re_dl.sub(r'[\\/:*?"<>|\r\n\t]', "_", (name or "").strip())
+    s = s.strip(" .")
+    return s[:60] or "未知标题"
+
+
+# ---- 喜欢/收藏 一键下载 (2026-11-14 四轮定案: 扁平结构) ----
+#   liked_downloads/<视频标题>/{媒体 + json(数据+评论)} — 不分账户/喜欢层级
+#   json (downloader _save_json) 里有作者/互动数据 + 关键评论。
+#   实现: 一个下载 job 全量投递 (wrap_folder=True 产出标题目录),
+#         复用现有 download_service 线程池/子进程隔离/取消链路。
 @app.post("/api/liked/download")
 def liked_download(payload: LikedDownloadRequest) -> dict:
     kind_label = "收藏" if payload.kind == "collect" else "喜欢"
@@ -739,32 +788,19 @@ def liked_download(payload: LikedDownloadRequest) -> dict:
     if not items:
         raise HTTPException(status_code=400, detail="没有可下载的项 (先拉取)")
 
-    # 按作者分组 → 每作者一个 job (output_dir= 根/作者/喜欢, wrap 出标题层)
-    groups: dict[str, list[str]] = {}
-    for it in items:
-        u = (it.get("url") or "").strip()
-        if not u:
-            continue
-        author = _liked_dl_safe(it.get("author") or "未知作者")
-        groups.setdefault(author, []).append(u)
-    if not groups:
+    urls = [u.strip() for u in ((it.get("url") or "").strip() for it in items) if u]
+    if not urls:
         raise HTTPException(status_code=400, detail="无有效链接")
-
-    jobs = []
-    for author, urls in groups.items():
-        out_dir = _LIKED_DL_ROOT / author / kind_label
-        try:
-            job = download_service.create_job_from_post_list(
-                urls, f"[喜欢面板/{kind_label}] {author}",
-                payload.mode, str(out_dir), payload.comments,
-                wrap_folder=True,
-            )
-            jobs.append({"job_id": job.id, "author": author, "count": len(urls),
-                         "output_dir": str(out_dir)})
-        except ValueError as exc:
-            jobs.append({"author": author, "error": str(exc)})
-    return {"ok": True, "kind": payload.kind, "total": sum(len(v) for v in groups.values()),
-            "authors": len(groups), "jobs": jobs}
+    try:
+        job = download_service.create_job_from_post_list(
+            urls, f"[喜欢面板/{kind_label}] {len(urls)} 个",
+            payload.mode, str(_LIKED_DL_ROOT), payload.comments,
+            wrap_folder=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "kind": payload.kind, "total": len(urls),
+            "output_dir": str(_LIKED_DL_ROOT), "job_id": job.id}
 
 
 # ---- 作品列表一键批量下载 (作品列表 → 下载器直投) ----

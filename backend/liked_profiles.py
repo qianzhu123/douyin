@@ -36,22 +36,67 @@ CDP = f"http://127.0.0.1:{CDP_PORT}"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0")
 
-# 槽位定义: id → profile 目录名 + 展示名。槽位 1 复用既有 profile (9222 现用)。
+# 槽位定义 (2026-11-14 四轮改动态): 不再写死 1-3 — 用户要能添加任意多个账户。
+# 槽位 N → douyin_profile (N=1) / douyin_profile_N; 上限 MAX_SLOT 防滥用。
+# 现存槽位由 discover_slots() 扫描 profile 目录 + 本地数据文件得出。
 SLOTS = {
     1: {"dir": "douyin_profile", "name": "账户 1"},
     2: {"dir": "douyin_profile_2", "name": "账户 2"},
     3: {"dir": "douyin_profile_3", "name": "账户 3"},
 }
 DEFAULT_SLOT = 1
+MAX_SLOT = 8
 
 
 def slot_dir(slot: int) -> Path:
-    s = SLOTS.get(int(slot)) or SLOTS[DEFAULT_SLOT]
-    return PROFILE_ROOT / s["dir"]
+    n = int(slot)
+    if n < 1 or n > MAX_SLOT:
+        n = DEFAULT_SLOT
+    return PROFILE_ROOT / ("douyin_profile" if n == 1 else f"douyin_profile_{n}")
 
 
 def slot_name(slot: int) -> str:
-    return (SLOTS.get(int(slot)) or SLOTS[DEFAULT_SLOT])["name"]
+    return f"账户 {int(slot)}"
+
+
+def discover_slots() -> list[int]:
+    """现存槽位 = 有 profile 目录的 + 有本地喜欢/收藏数据的 + 当前活跃的。"""
+    import re as _re
+    found = {DEFAULT_SLOT}
+    if PROFILE_ROOT.exists():
+        for p in PROFILE_ROOT.iterdir():
+            if not p.is_dir():
+                continue
+            if p.name == "douyin_profile":
+                found.add(1)
+            else:
+                m = _re.fullmatch(r"douyin_profile_(\d+)", p.name)
+                if m and 2 <= int(m.group(1)) <= MAX_SLOT:
+                    found.add(int(m.group(1)))
+    # 本地数据文件 (data/liked/<slot>_<kind>.json)
+    try:
+        from .config import DATA_DIR
+        sd = DATA_DIR / "liked"
+        if sd.exists():
+            for f in sd.iterdir():
+                m = _re.fullmatch(r"(\d+)_(like|collect)\.json", f.name)
+                if m and 1 <= int(m.group(1)) <= MAX_SLOT:
+                    found.add(int(m.group(1)))
+    except Exception:
+        pass
+    act = active_slot()
+    if act:
+        found.add(act)
+    return sorted(found)
+
+
+def next_slot() -> int | None:
+    """下一个可添加的空槽位 (无则 None)。"""
+    used = set(discover_slots())
+    for n in range(1, MAX_SLOT + 1):
+        if n not in used:
+            return n
+    return None
 
 
 # ---------------- CDP 基础 ----------------
@@ -169,8 +214,8 @@ def start_cdp_chrome(slot: int, wait: float = 20.0) -> bool:
 def switch_slot(slot: int) -> dict:
     """切换到指定槽位 (停旧 → 起新)。返回 {ok, slot, restarted, error}。"""
     slot = int(slot)
-    if slot not in SLOTS:
-        return {"ok": False, "slot": slot, "error": f"未知槽位 {slot}"}
+    if slot < 1 or slot > MAX_SLOT:
+        return {"ok": False, "slot": slot, "error": f"槽位号超出 1-{MAX_SLOT}: {slot}"}
     cur = active_slot()
     if cur == slot and cdp_alive():
         return {"ok": True, "slot": slot, "restarted": False}
@@ -186,15 +231,13 @@ def switch_slot(slot: int) -> dict:
 def delete_slot(slot: int) -> dict:
     """删除槽位: 清 profile 目录 + 本地喜欢/收藏数据 (退出该账户登录态)。
 
-    被删槽位若是活跃槽位, 先停掉对应 Chrome。profile 目录删除后, 下次用
-    该槽位时重新 mkdir (全新未登录)。不会碰其它槽位的任何数据。
+    被删槽位若是活跃槽位, 先停掉对应 Chrome。profile 目录删除后, 槽位从
+    discover_slots 中消失 (动态槽位, 四轮) — 前端按钮列表随之缩短。
     """
     import shutil
     slot = int(slot)
-    if slot not in SLOTS:
-        return {"ok": False, "error": f"未知槽位 {slot}"}
-    if slot == DEFAULT_SLOT:
-        return {"ok": False, "error": "槽位 1 与搜索链路共用 profile, 不允许删除"}
+    if slot < 2 or slot > MAX_SLOT:
+        return {"ok": False, "error": f"槽位 {slot} 不允许删除 (槽位 1 共用, 上限 {MAX_SLOT})"}
     if active_slot() == slot:
         stop_cdp_chrome()
     d = slot_dir(slot)

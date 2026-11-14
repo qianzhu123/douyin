@@ -43,8 +43,8 @@ class LikedQrSession:
 
     def start(self, slot: int) -> dict:
         slot = int(slot)
-        if slot not in _lp.SLOTS:
-            return {**self.status(), "phase": "error", "error": f"未知槽位 {slot}"}
+        if int(slot) < 1 or int(slot) > _lp.MAX_SLOT:
+            return {**self.status(), "phase": "error", "error": f"槽位号超出 1-{_lp.MAX_SLOT}: {slot}"}
         with self._lock:
             if self._state["phase"] == "running":
                 return dict(self._state)

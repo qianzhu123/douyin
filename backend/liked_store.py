@@ -6,9 +6,10 @@
 形状: data/liked/<slot>_<kind>.json
   {"ts": 拉取时间, "slot": 1, "kind": "like", "items": [...], "complete": bool}
 
-合并规则: 按 aweme_id 去重, 新数据在前 (抖音列表是最新在前, 滚动顺序即时间倒序);
-两批拼接时旧批里与新版重复的丢弃, 顺序保持 "新批在前, 旧批剩余在后" —
-近似时间倒序, 对展示足够。
+合并规则 (2026-11-14 四轮修正): 按 aweme_id 去重, **本轮扫描序为准** —
+抖音喜欢列表是最新在前, 滚动顺序即真实时间倒序, 所以本轮拉到的序列就是
+用户在抖音上看到的顺序。合并时新批按原序在前, 旧批里新批没有的项 (更早
+拉到的、本轮没滚到的) 按旧序补尾 — 展示顺序与抖音一致。
 """
 from __future__ import annotations
 
@@ -51,10 +52,22 @@ def save(slot: int, kind: str, items: list, complete: bool = True) -> None:
 
 
 def merge(old_items: list, new_items: list, cap: int = 5000) -> list:
-    """新批在前合并去重 (按 aweme_id)。"""
+    """本轮扫描序优先合并 (按 aweme_id)。
+
+    新批的相对顺序 = 抖音页面顺序, 原序保留在前; 旧批中本轮没有的项按旧序
+    补尾 — 整体仍近似抖音时间倒序, 用户看到的顺序与抖音一致。
+    """
     seen: set[str] = set()
     out: list = []
-    for it in list(new_items) + list(old_items):
+    for it in list(new_items):
+        k = it.get("aweme_id") or it.get("url")
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+        if len(out) >= cap:
+            return out
+    for it in list(old_items):
         k = it.get("aweme_id") or it.get("url")
         if not k or k in seen:
             continue

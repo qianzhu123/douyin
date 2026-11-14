@@ -126,7 +126,8 @@ def _bridge(coro_factory, timeout: float = 300.0):
 
 def fetch_liked_items(kind: str = "like", target: int = 16,
                       on_progress: Callable[..., None] | None = None,
-                      query: str = "", author: str = "") -> dict[str, Any]:
+                      query: str = "", author: str = "",
+                      should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
     """拉当前登录态的喜欢/收藏卡片, 最多 target 张 (滚动到够为止)。
 
     kind:   "like"(喜欢) | "collect"(收藏)
@@ -134,7 +135,8 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
     on_progress: 每滚一轮回调 on_progress(已扫过, 已匹配) (供后端写进度)
     query/author: 定向模式 — 边滚边匹配 (标题含query 或 作者前缀author),
                   凑够 target 个**匹配项**即停 (不必拉全量)。
-    返回 {ok, via, kind, items, total, error}
+    should_stop: 每轮滚动前探针, True 即提前退出 (用户点终止, 已扫到的保留)。
+    返回 {ok, via, kind, items, total, error, cancelled}
     """
     tab_text = _TABS.get(kind)
     if not tab_text:
@@ -142,7 +144,7 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
     target = max(1, int(target))
 
     out: dict[str, Any] = {"ok": False, "via": "cdp-dom", "kind": kind,
-                           "items": [], "total": 0, "error": ""}
+                           "items": [], "total": 0, "error": "", "cancelled": False}
     seen: dict[str, dict] = {}   # 闭包共享: _run 内 collect() 写入, 外层读取 (勿放 _run 内)
 
     async def _run():
@@ -210,6 +212,9 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
                 # 反复滚真实容器直到够数或不再增长 (2026-11-14: window 不可滚, 必须滚容器)
                 stalls = 0
                 for i in range(120):
+                    if should_stop is not None and should_stop():
+                        out["cancelled"] = True
+                        break
                     goal = matched_n() if (q_l or a_l) else len(seen)
                     if goal >= target:
                         break
@@ -231,12 +236,12 @@ def fetch_liked_items(kind: str = "like", target: int = 16,
                     else:
                         stalls = 0
 
-                # 定向模式只回传匹配项
+                # 定向模式只回传匹配项; 顺序 = 抖音页面扫描序 (dict 保序, 新滚到的在后)
                 items = [v for v in seen.values() if matches(v)] if (q_l or a_l) \
                     else list(seen.values())
                 out["items"] = items
                 out["total"] = len(items)
-                out["ok"] = bool(items)
+                out["ok"] = bool(items) or bool(out.get("cancelled"))
                 if not seen:
                     out["error"] = f"“{tab_text}”tab 无卡片 (可能列表为空或被风控)"
                 elif (q_l or a_l) and not items:

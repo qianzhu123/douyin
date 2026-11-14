@@ -2733,6 +2733,8 @@ function LikedVideosPanel() {
   const [authors, setAuthors] = React.useState([]);  // 作者去重列表
   const [delArm, setDelArm] = React.useState(null);  // 删除账户二次点击确认
   const [downloading, setDownloading] = React.useState(false); // 一键下载进行中
+  const [sel, setSel] = React.useState({});          // 选中集合 {aweme_id: true}
+  const [selMode, setSelMode] = React.useState(false); // 是否处于选择模式
   const noticeTimer = React.useRef(null);
   const PAGE = 16, STEP = 8;
 
@@ -2810,13 +2812,11 @@ function LikedVideosPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, items.length, loadSlice, loadAuthors]);
 
-  // 「拉取」: 带 q/author 时是定向拉取
+  // 「拉取」: 全量按需拉取 (筛选只走本地即时过滤, 不再触发定向拉取)
   const doFetch = async (target) => {
     setError('');
     try {
       const p = new URLSearchParams({ kind, target: target || 0 });
-      if (q) p.set('q', q);
-      if (author) p.set('author', author);
       const r = await fetch(`${API_BASE}/api/liked/fetch?${p}`, { method: 'POST' });
       const d = await r.json();
       if (!d.ok) { flashNotice(d.reason || '无法开始'); return; }
@@ -2826,6 +2826,15 @@ function LikedVideosPanel() {
       const s = await loadSlice(kind, 0, PAGE);
       setItems(s.items || []); setTotal(s.total || 0);
     } catch (e) { setError(String(e.message || e)); }
+  };
+
+  // 终止拉取 (已扫到的保留)
+  const doCancelFetch = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/liked/fetch-cancel`, { method: 'POST' });
+      const d = await r.json();
+      flashNotice(d.reason || (d.ok ? '正在终止…' : '无法终止'));
+    } catch (e) { flashNotice(String(e.message || e)); }
   };
 
   // 「继续加载」: 缓存够就纯切片; 不够再拉
@@ -2895,25 +2904,49 @@ function LikedVideosPanel() {
   };
 
   // 一键下载: 当前筛选下全部 (或后续可勾选) → 按作者分组投给下载器
-  const doDownload = async () => {
-    if (!items.length) { flashNotice('没有可下载的项'); return; }
+  // 一键下载: 选择模式下只下选中的; 否则下当前筛选下全部
+  const doDownload = async (selectedOnly) => {
     setDownloading(true);
     try {
-      // 只传当前显示的? — 传"筛选下全部": 先拉完整切片
-      const d = await loadSlice(kind, 0, 2000);
-      const all = d.items || [];
-      if (!all.length) { flashNotice('没有可下载的项'); return; }
+      let targets;
+      if (selectedOnly) {
+        const ids = new Set(Object.keys(sel).filter((k) => sel[k]));
+        targets = items.filter((it) => ids.has(it.aweme_id));
+        if (!targets.length) { flashNotice('没有选中的视频'); return; }
+      } else {
+        const d = await loadSlice(kind, 0, 2000);
+        targets = d.items || [];
+      }
+      if (!targets.length) { flashNotice('没有可下载的项'); return; }
       const r = await fetch(`${API_BASE}/api/liked/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind, items: all.map((it) => ({ url: it.url, title: it.title, author: it.author })), mode: 3, comments: true }),
+        body: JSON.stringify({ kind, items: targets.map((it) => ({ url: it.url, title: it.title, author: it.author })), mode: 3, comments: true }),
       });
       const dd = await r.json();
-      if (dd.ok) flashNotice(`已创建下载任务: ${dd.total} 个视频 / ${dd.authors} 位作者 → data/liked_downloads/ (在"下载"面板看进度)`);
+      if (dd.ok) flashNotice(`已创建下载任务: ${dd.total} 个视频 → liked_downloads/ (在"下载"面板看进度)`);
       else flashNotice(dd.detail || '创建下载任务失败');
     } catch (e) { flashNotice(String(e.message || e)); }
     finally { setDownloading(false); }
   };
+
+  // 批量复制选中项链接
+  const copySelected = async () => {
+    const ids = new Set(Object.keys(sel).filter((k) => sel[k]));
+    const targets = items.filter((it) => ids.has(it.aweme_id));
+    if (!targets.length) { flashNotice('没有选中的视频'); return; }
+    const text = targets.map((it) => it.url).join('\n');
+    navigator.clipboard.writeText(text).then(() => {
+      flashNotice(`已复制 ${targets.length} 条链接`);
+    }, () => { flashNotice('复制失败 (浏览器剪贴板权限)'); });
+  };
+
+  const toggleSel = (id) => {
+    setSel((s) => ({ ...s, [id]: !s[id] }));
+  };
+  const selCount = Object.values(sel).filter(Boolean).length;
+  const enterSelMode = () => { setSelMode(true); setSel({}); };
+  const exitSelMode = () => { setSelMode(false); setSel({}); };
 
   React.useEffect(() => {
     if (!showLogin || !login || login.phase !== 'running') return undefined;
@@ -2940,9 +2973,20 @@ function LikedVideosPanel() {
         <div className="panel-actions">
           <button className={`fansclub-tab${kind === 'like' ? ' active' : ''}`} onClick={() => { setKind('like'); setQ(''); setAuthor(''); }}>喜欢</button>
           <button className={`fansclub-tab${kind === 'collect' ? ' active' : ''}`} onClick={() => { setKind('collect'); setQ(''); setAuthor(''); }}>收藏</button>
-          <button onClick={() => doFetch(0)} disabled={running}>
-            {running && fs.kind === kind ? `拉取中 ${fs.count}/${fs.target}` : filtering ? '定向拉取' : '拉取'}
-          </button>
+          {running && fs.kind === kind ? (
+            <button className="liked-fetch-cancel" onClick={doCancelFetch} title="已扫到的会保留">
+              {`终止 (${fs.count}/${fs.target})`}
+            </button>
+          ) : (
+            <button onClick={() => doFetch(0)}>拉取</button>
+          )}
+          {!selMode ? (
+            <button onClick={enterSelMode} disabled={!items.length}>选择</button>
+          ) : (
+            <>
+              <button onClick={exitSelMode}>退出选择</button>
+            </>
+          )}
         </div>
       </div>
 
@@ -2976,15 +3020,27 @@ function LikedVideosPanel() {
             )}
           </span>
         ))}
-        {(acct?.slots || []).length < 3 && (
-          <button className="liked-slot-add" onClick={() => doLogin((acct?.slots || []).length + 1)}
+        {acct?.can_add && (
+          <button className="liked-slot-add" onClick={() => doLogin(acct.next_slot)}
                   title="添加新账户 (扫码登录到下一个空槽位)">+ 添加账户</button>
         )}
-        {logged && (
-          <button onClick={() => doDownload()} disabled={downloading || !items.length}
-                  title="下载当前筛选下的视频到 data/liked_downloads/<作者>/<喜欢|收藏>/<标题>/">
-            {downloading ? '创建下载任务…' : `下载${filtering ? '筛选结果' : '全部'}(${total})`}
-          </button>
+        {selMode ? (
+          <>
+            <button onClick={copySelected} disabled={!selCount}
+                    title="复制选中视频的直链 (每行一条)">
+              复制链接({selCount})
+            </button>
+            <button className="liked-dl-sel" onClick={() => doDownload(true)} disabled={!selCount || downloading}>
+              {downloading ? '创建中…' : `下载选中(${selCount})`}
+            </button>
+          </>
+        ) : (
+          logged && (
+            <button onClick={() => doDownload(false)} disabled={downloading || !items.length}
+                    title="下载到项目 liked_downloads/<视频标题>/ (含数据json+评论)">
+              {downloading ? '创建下载任务…' : `下载${filtering ? '筛选结果' : '全部'}(${total})`}
+            </button>
+          )
         )}
       </div>
 
@@ -3000,12 +3056,7 @@ function LikedVideosPanel() {
         {(q || author) && (
           <button className="liked-filter-clear" onClick={() => { setQ(''); setAuthor(''); }}>清除</button>
         )}
-        {filtering && (
-          <button className="liked-filter-go" onClick={() => doFetch(60)}
-                  title="本地缓存中匹配不足时, 边滚动边按条件匹配拉取">
-            按条件定向拉取
-          </button>
-        )}
+        <span className="liked-filter-hint">本地即时过滤 (缓存 {grandTotal} 条)</span>
       </div>
 
       {notice && <div className="empty">{notice}</div>}
@@ -3021,18 +3072,25 @@ function LikedVideosPanel() {
             : logged ? '暂无本地数据 — 点右上「拉取」' : '请先扫码登录'}
         </div>
       )}
-      <div className="liked-grid">
+      <div className={`liked-grid${selMode ? ' selecting' : ''}`}>
         {items.map((it) => (
-          <div key={it.aweme_id} className="liked-card">
-            <a href={it.url} target="_blank" rel="noreferrer" className="liked-cover" title={it.title}>
+          <div key={it.aweme_id}
+               className={`liked-card${selMode ? ' selectable' : ''}${sel[it.aweme_id] ? ' selected' : ''}`}
+               onClick={selMode ? () => toggleSel(it.aweme_id) : undefined}>
+            <a href={selMode ? undefined : it.url} target={selMode ? undefined : '_blank'} rel="noreferrer"
+               className="liked-cover" title={it.title}
+               onClick={selMode ? (e) => e.preventDefault() : undefined}>
               {it.cover ? <img src={it.cover} alt="" loading="lazy" /> : <span className="liked-noimg">无封面</span>}
+              {selMode && <span className="liked-check">{sel[it.aweme_id] ? '✓' : ''}</span>}
             </a>
             <div className="liked-title" title={it.title}>{it.title || '(无标题)'}</div>
             {it.author && <div className="liked-author">{it.author}</div>}
-            <div className="liked-actions">
-              <button onClick={() => copyLink(it)}>{copied === it.aweme_id ? '已复制' : '复制链接'}</button>
-              <a href={it.url} target="_blank" rel="noreferrer" title="打开原页"><ExternalLink size={14} /></a>
-            </div>
+            {!selMode && (
+              <div className="liked-actions">
+                <button onClick={() => copyLink(it)}>{copied === it.aweme_id ? '已复制' : '复制链接'}</button>
+                <a href={it.url} target="_blank" rel="noreferrer" title="打开原页"><ExternalLink size={14} /></a>
+              </div>
+            )}
           </div>
         ))}
       </div>
