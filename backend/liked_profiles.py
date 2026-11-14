@@ -142,14 +142,31 @@ def _active_profile_dir() -> str:
 
 
 def active_slot() -> int | None:
-    """当前活跃槽位号 (CDP Chrome 的 profile 落在哪个槽位)。"""
+    """当前活跃槽位号 (CDP Chrome 的 profile 落在哪个槽位)。
+
+    2026-11-14: 判定走 Get-CimInstance 查命令行 (~3s), /api/liked/videos 每次请求
+    都会经 _liked_mem_load 调到 → 加 10s TTL 缓存 (切换/删除时由调用方失效)。
+    """
+    now = time.time()
+    if _active_slot_cache["slot"] is not None or now - _active_slot_cache["ts"] < 10.0:
+        return _active_slot_cache["slot"]
     cur = _active_profile_dir().rstrip("\\/").lower()
-    if not cur:
-        return None
-    for sid in SLOTS:
-        if str(slot_dir(sid)).rstrip("\\/").lower() == cur:
-            return sid
-    return None
+    out = None
+    if cur:
+        for sid in SLOTS:
+            if str(slot_dir(sid)).rstrip("\\/").lower() == cur:
+                out = sid
+                break
+    _active_slot_cache.update({"ts": now, "slot": out})
+    return out
+
+
+def invalidate_active_slot_cache() -> None:
+    """切换/删除槽位后调用 (下次 active_slot 重新探测)。"""
+    _active_slot_cache.update({"ts": 0.0, "slot": None})
+
+
+_active_slot_cache: dict = {"ts": 0.0, "slot": None}
 
 
 def _clear_profile_lock(profile: Path) -> None:
@@ -224,6 +241,7 @@ def switch_slot(slot: int) -> dict:
         return {"ok": False, "slot": slot, "error": "旧 Chrome 未能停止 (端口仍占用)"}
     ok = start_cdp_chrome(slot)
     _invalidate_state_cache()
+    invalidate_active_slot_cache()
     return {"ok": ok, "slot": slot, "restarted": True,
             "error": "" if ok else "Chrome 启动后 CDP 未就绪"}
 
@@ -246,6 +264,7 @@ def delete_slot(slot: int) -> dict:
         shutil.rmtree(d, ignore_errors=True)
         removed_profile = True
     _invalidate_state_cache()
+    invalidate_active_slot_cache()
     return {"ok": True, "slot": slot, "removed_profile": removed_profile}
 
 
