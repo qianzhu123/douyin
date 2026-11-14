@@ -1,0 +1,55 @@
+{
+ "date": "2026-11-15",
+ "round": 8,
+ "boards": {
+  "抖音热榜": {
+   "status": "web可拉",
+   "api": "/aweme/v1/hot/search/list/ (www.douyin.com + iesdouyin 均200, 51条, word/hot_value/label/aweme_infos)"
+  },
+  "直播小时榜/全站百强(t=1)/人气榜(t=3)/赛事(t=6)": {
+   "status": "web可拉",
+   "api": "live.douyin.com /webcast/ranklist/hour_detail/?t=N + hour_entrance, 逐字重放捕获URL, 自造参数10011"
+  },
+  "在线观众榜": {
+   "status": "web可拉",
+   "api": "/webcast/ranklist/audience/ (200条, 已在live_room.py用)"
+  },
+  "人气票": {
+   "status": "web可拉(面板出现)",
+   "note": "人气票按钮在直播间面板DOM; 榜单接口待捕获(直播间无人气票时无请求)"
+  },
+  "地区榜": {
+   "status": "web不存在",
+   "evidence": "city/nearby/local/samecity路由404; local_board参数被忽略返回通用热榜; app端有 /aweme/v1/nearby/feed/ 家族(需要设备GPS+LBS签名)"
+  },
+  "音乐榜": {
+   "status": "web不可用",
+   "evidence": "app真身=/aweme/v1/chart/music/list/v3/ + /aweme/v1/music/rank/ (dex扫描确认); www.douyin.com路由404; iesdouyin旧billboard/music sc=4; music.douyin.com=汽水音乐平台不同体系"
+  },
+  "游戏榜(王者荣耀等)": {
+   "status": "web不渲染",
+   "evidence": "APK dex: 游戏榜走lynx组件(/webcast/mono/lynx/game_priority_high_lynx_douyin等)+gamecp; web直播间DOM仅小时榜/人气榜/人气票; 未发现独立游戏榜HTTP接口"
+  },
+  "挑战榜": {
+   "status": "web不渲染",
+   "evidence": "APK: /webcast/room/update_room_challenge/ + anchor/fans_opr/get_selected_challenge_list(主播端); 观众端挑战榜=进房ws推送(同T4定论)"
+  },
+  "全站百强榜": {
+   "status": "web可拉",
+   "api": "hour_detail t=1 (labels含'百强')"
+  },
+  "虚拟榜": {
+   "status": "web不渲染",
+   "evidence": "APK: virtuallive家族是虚拟直播开播工具非榜单; 虚拟主播榜数据未发现独立接口"
+  }
+ },
+ "constraints": [
+  "直播榜接口必须逐字重放捕获URL(含msToken/a_bogus), 自造参数10011 — T2铁律",
+  "进房类榜单(挑战榜/贡献榜)=room enter预取+ws推送, 无点开拉取HTTP — e112v定论",
+  "app-only榜单(音乐榜/地区榜)需要真机oracle签名 — 待用户批准真机"
+ ],
+ "plan_if_approved": {
+  "phase1_纯web": "榜单面板: 热榜(直连) + 直播小时榜/百强/人气榜(live面板捕获URL重放) + 在线观众榜",
+  "phase2_真机": "音乐榜/地区榜(oracle签名) + 挑战榜/游戏榜(进房ws抓包) — 需真机抓包, 待批准"
+ }
+}
