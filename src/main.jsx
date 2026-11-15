@@ -1602,16 +1602,14 @@ function T6RankBoardPanel() {
   );
 }
 
-// ---- 榜单面板 (阶段一 + 2026-11-15 修正) ----
-// 热榜直连; 直播榜走 /api/boards/live (CDP 进房拦响应 + 页内 rt 重放):
-// 小时榜/人气榜/新人榜是全抖音榜 — 默认不输任何地址, 切到直播榜自动拉取;
-// 房间只是签名载体, 界面不展示房间号。输入链接是可选项, 唯一作用是额外
-// 多看一个"在线观众榜" (房间私有榜)。留空时后端返回的 audience 属于随机
-// 房间, 不展示。
+// ---- 榜单面板 (阶段一 + 2026-11-15/16 修正) ----
+// 顶栏五类: 抖音热榜 (直连) / 直播榜 (CDP 进房拦响应+rt 重放, 全抖音无需地址) /
+// 粉丝团人气榜 (/api/boards/fans-club, app 域 unidbg 离线签名) /
+// 地区直播榜 (/api/boards/city?city_code, 城市在播房间按在看人数降序)。
 // 2026-11-15 实测定论: 榜行名次在 index 字段; 小时榜 score_str 服务端不下发
 // (页面 Lynx 浮层内部渲染), 该榜按名次展示、数值列显示 "—"; 人气榜 "100万+" 有值。
 function BoardsPanel() {
-  const [tab, setTab] = React.useState('hot'); // hot | live
+  const [tab, setTab] = React.useState('hot'); // hot | live | fansclub | city
   // 热榜
   const [hot, setHot] = React.useState(null);
   const [hotBusy, setHotBusy] = React.useState(false);
@@ -1622,6 +1620,14 @@ function BoardsPanel() {
   const [liveErr, setLiveErr] = React.useState('');
   const [liveTab, setLiveTab] = React.useState('hour'); // hour | pop | new | audience
   const [liveLoaded, setLiveLoaded] = React.useState(false); // 直播榜是否已拉过 (自动拉一次)
+  // 粉丝团人气榜
+  const [fc, setFc] = React.useState(null);
+  const [fcBusy, setFcBusy] = React.useState(false);
+  // 地区直播榜
+  const [cities, setCities] = React.useState([]);
+  const [cityCode, setCityCode] = React.useState('410100'); // 默认郑州 (用户所在)
+  const [city, setCity] = React.useState(null);
+  const [cityBusy, setCityBusy] = React.useState(false);
 
   const loadHot = React.useCallback(async () => {
     setHotBusy(true);
@@ -1662,12 +1668,53 @@ function BoardsPanel() {
     }
   }, [ridInput]);
 
+  const loadFansClub = React.useCallback(async () => {
+    setFcBusy(true);
+    try {
+      const d = await fetch(`${API_BASE}/api/boards/fans-club`).then((r) => r.json());
+      setFc(d.ok ? d : { ok: false, reason: d.reason || '失败' });
+    } catch (e) {
+      setFc({ ok: false, reason: String(e.message || e) });
+    } finally {
+      setFcBusy(false);
+    }
+  }, []);
+
+  const loadCityList = React.useCallback(async () => {
+    try {
+      const d = await fetch(`${API_BASE}/api/boards/cities`).then((r) => r.json());
+      if (d.ok) setCities(d.cities || []);
+    } catch { /* 城市列表失败不阻塞面板, 下拉空 */ }
+  }, []);
+
+  const loadCity = React.useCallback(async (code) => {
+    if (!code) return;
+    setCityBusy(true);
+    setCity(null);
+    try {
+      const d = await fetch(`${API_BASE}/api/boards/city?city_code=${encodeURIComponent(code)}`).then((r) => r.json());
+      setCity(d.ok ? d : { ok: false, reason: d.reason || '失败' });
+    } catch (e) {
+      setCity({ ok: false, reason: String(e.message || e) });
+    } finally {
+      setCityBusy(false);
+    }
+  }, []);
+
   React.useEffect(() => { if (tab === 'hot' && !hot && !hotBusy) loadHot(); }, [tab]); // eslint-disable-line
   // 切到直播榜自动拉一次全抖音榜 (无需输链接、无需点按钮)
   React.useEffect(() => {
     if (tab === 'live' && !liveLoaded && !liveBusy) {
       setLiveLoaded(true);
       loadLive('');
+    }
+  }, [tab]); // eslint-disable-line
+  // 切到粉丝团榜/地区榜自动拉一次; 地区榜顺带加载城市列表
+  React.useEffect(() => {
+    if (tab === 'fansclub' && !fc && !fcBusy) loadFansClub();
+    if (tab === 'city') {
+      if (!cities.length) loadCityList();
+      if (!city && !cityBusy && cityCode) loadCity(cityCode);
     }
   }, [tab]); // eslint-disable-line
 
@@ -1688,17 +1735,23 @@ function BoardsPanel() {
       <div className="panel-head">
         <div>
           <h2>榜单</h2>
-          <p>抖音热榜 / 全抖音直播小时榜·人气榜·新人榜（只读）</p>
+          <p>抖音热榜 / 直播榜 / 粉丝团人气榜 / 地区直播榜（只读）</p>
         </div>
         <div className="panel-actions">
           {tab === 'hot'
             ? <button onClick={loadHot} disabled={hotBusy}>{hotBusy ? '刷新中…' : '刷新'}</button>
             : null}
+          {tab === 'fansclub'
+            ? <button onClick={loadFansClub} disabled={fcBusy}>{fcBusy ? '拉取中… (约15s)' : '刷新'}</button>
+            : null}
+          {tab === 'city'
+            ? <button onClick={() => loadCity(cityCode)} disabled={cityBusy}>{cityBusy ? '拉取中… (约15s)' : '刷新'}</button>
+            : null}
         </div>
       </div>
 
       <div className="fansclub-toolbar">
-        {[['hot', '抖音热榜'], ['live', '直播榜']].map(([k, label]) => (
+        {[['hot', '抖音热榜'], ['live', '直播榜'], ['fansclub', '粉丝团人气榜'], ['city', '地区直播榜']].map(([k, label]) => (
           <button key={k} className={`fansclub-tab${tab === k ? ' active' : ''}`} onClick={() => setTab(k)}>
             {label}
           </button>
@@ -1797,6 +1850,79 @@ function BoardsPanel() {
           )}
           {!live && !liveErr && !liveBusy && (
             <div className="empty">正在拉取全抖音小时榜 / 人气榜 / 新人榜…</div>
+          )}
+        </>
+      )}
+
+      {tab === 'fansclub' && (
+        fc?.ok ? (
+          <div className="board-scroll">
+            <div className="t6-boards">
+              <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
+                <div className="t6-board-title">
+                  <span>全抖音 · 粉丝团人气榜{fc.period ? ` · ${fc.period}` : ''}{fc.currency ? ` (计${fc.currency})` : ''}</span>
+                </div>
+                <div className="t6-board-rows">
+                  {fc.rows.map((row, i) => (
+                    <div key={`${row.sec_uid || row.rank}-${i}`} className="t6-row">
+                      <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{row.rank ?? i + 1}</span>
+                      <span className="t6-name">{row.nickname}</span>
+                      <span className="t6-value">{formatNumber(row.score)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="empty">{fc ? `粉丝团人气榜拉取失败: ${fc.reason}` : '加载中…'}</div>
+        )
+      )}
+
+      {tab === 'city' && (
+        <>
+          <div className="live-analysis-form">
+            <select
+              value={cityCode}
+              onChange={(e) => { setCityCode(e.target.value); loadCity(e.target.value); }}
+              disabled={cityBusy}
+            >
+              {cities.length
+                ? cities.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)
+                : <option value={cityCode}>城市列表加载中…</option>}
+            </select>
+            <button onClick={() => loadCity(cityCode)} disabled={cityBusy || !cityCode}>
+              {cityBusy ? '拉取中… (约15s)' : '刷新'}
+            </button>
+          </div>
+          {city?.ok ? (
+            city.rows.length ? (
+              <div className="board-scroll">
+                <div className="t6-boards">
+                  <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
+                    <div className="t6-board-title">
+                      <span>
+                        地区直播榜 · {(cities.find((c) => c.code === cityCode) || {}).name || cityCode}
+                        {' '}(在播 {city.rows.length} 房, 按在看人数)
+                      </span>
+                    </div>
+                    <div className="t6-board-rows">
+                      {city.rows.map((row, i) => (
+                        <div key={row.room_id || i} className="t6-row">
+                          <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{i + 1}</span>
+                          <span className="t6-name" title={row.title}>{row.nickname}<span style={{ color: 'var(--text-dim, #6b7280)', marginLeft: 6, fontSize: 12 }}>{row.title}</span></span>
+                          <span className="t6-value">{formatNumber(row.viewers)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="empty">该城市当前无在播房间</div>
+            )
+          ) : (
+            <div className="empty">{city ? `地区榜拉取失败: ${city.reason}` : '加载中…'}</div>
           )}
         </>
       )}

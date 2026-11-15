@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -28,6 +29,16 @@ try:
 except ImportError:  # pragma: no cover
     async_playwright = None  # type: ignore
 
+try:
+    # app 域签名链 (unidbg 离线签头, aweme_search_protocol 与 lab 仓解耦);
+    # 兼容两种加载语境: 脚本直跑 (backend 目录进 path) / backend 包内 (相对导入)
+    try:
+        import aweme_search_protocol as _asp  # type: ignore
+    except ImportError:
+        from . import aweme_search_protocol as _asp  # type: ignore
+except ImportError:  # pragma: no cover
+    _asp = None  # type: ignore
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -35,6 +46,10 @@ UA = (
 )
 
 SSL_CTX = ssl.create_default_context()
+# app 域 (aweme.snssdk.com / webcast.amemv.com) 证书链与 web 域不同, 关校验 (T 系列配方)
+SSL_CTX_INSECURE = ssl.create_default_context()
+SSL_CTX_INSECURE.check_hostname = False
+SSL_CTX_INSECURE.verify_mode = ssl.CERT_NONE
 
 # 面板每榜保留条数
 BOARD_LIMIT = 50
@@ -370,3 +385,132 @@ def _summarize_live(captured: dict[str, Any], replayed: dict[str, list],
         "popularity_board": _board_rows(replayed.get("pop") or []),
         "newbie_board": _board_rows(replayed.get("new") or []),
     }
+
+
+# ---- 全抖音榜 (app 域 unidbg 离线签名, 2026-11-15 实测通) ----
+# unidbg 签名单次 ~12s, 每个请求都要单独签 (a_bogus 绑 URL, 不能复用)。
+
+def _min_jar() -> str:
+    """最小双键罐 (install_id + sessionid, e112 定论)。"""
+    files = _asp._read_lab_files(_asp._lab_root())
+    ck_pairs = [p.strip() for p in files["cookie"].strip().split(";") if "=" in p]
+    ck_map = {p.split("=", 1)[0]: p.split("=", 1)[1] for p in ck_pairs}
+    return f"install_id={ck_map['install_id']}\r\nsessionid={ck_map['sessionid']}"
+
+
+def _app_request(url: str, min_jar: str) -> dict[str, Any]:
+    """unidbg 签头 + GET app 域 URL, 返回 JSON。"""
+    heads = _asp._sign_unidbg(_asp._lab_root(), url, min_jar)
+    files = _asp._read_lab_files(_asp._lab_root())
+    headers = dict(json.loads(files["headers"]))
+    headers["Cookie"] = files["cookie"].strip().replace("\r\n", "; ")
+    headers["User-Agent"] = ("com.ss.android.ugc.aweme/400601 (Linux; U; Android 11; "
+                             "zh_CN; Pixel 2 XL; Build/RP1A.201005.004.A1)")
+    headers.update(heads)
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=25, context=SSL_CTX_INSECURE) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def fetch_fans_club_board(count: int = 50) -> dict[str, Any]:
+    """全抖音粉丝团人气榜: GET webcast.amemv.com/webcast/ranklist/fans_club/
+    (unidbg 签名, 2026-11-15 实测 sc=0)。
+    ranks[]{rank, user{nickname}, score} + currency(人气) + period_description。"""
+    if _asp is None:
+        return {"ok": False, "reason": "app 签名链不可用"}
+    try:
+        q = _asp._common_q(offset=0, count=count)
+        url = ("https://webcast.amemv.com/webcast/ranklist/fans_club/?"
+               + urllib.parse.urlencode(q))
+        body = _app_request(url, _min_jar())
+        if body.get("status_code") != 0:
+            return {"ok": False, "reason": f"sc={body.get('status_code')}"}
+        data = body.get("data") or {}
+        rows = []
+        for r in (data.get("ranks") or [])[:count]:
+            u = r.get("user") or {}
+            rows.append({
+                "rank": r.get("rank"),
+                "nickname": u.get("nickname") or "",
+                "sec_uid": u.get("sec_uid") or "",
+                "score": r.get("score") or 0,
+                "score_str": "",
+            })
+        return {
+            "ok": True,
+            "rows": rows,
+            "period": data.get("period_description") or "",
+            "currency": data.get("currency") or "",
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def fetch_city_rooms(city_code: str, count: int = 20) -> dict[str, Any]:
+    """地区直播榜: GET webcast.amemv.com/webcast/feed/ 带 city_code
+    (城市级, 如郑州 410100 / 广州 440100; 2026-11-15 实测两城列表完全不同,
+    确认 city_code 真过滤)。房间按 total_user (在看人数) 降序即地区人气榜。"""
+    if _asp is None:
+        return {"ok": False, "reason": "app 签名链不可用"}
+    try:
+        q = _asp._common_q(city_code=str(city_code), count=count)
+        url = ("https://webcast.amemv.com/webcast/feed/?" + urllib.parse.urlencode(q))
+        body = _app_request(url, _min_jar())
+        if body.get("status_code") != 0:
+            return {"ok": False, "reason": f"sc={body.get('status_code')}"}
+        rooms = []
+        for item in (body.get("data") or []):
+            if not isinstance(item, dict):
+                continue
+            d = item.get("data") or {}
+            owner = d.get("owner") or {}
+            stats = d.get("stats") or {}
+            rooms.append({
+                "room_id": d.get("id_str") or "",
+                "title": d.get("title") or "",
+                "nickname": owner.get("nickname") or "",
+                "sec_uid": owner.get("sec_uid") or "",
+                "user_count": d.get("user_count") or 0,
+                "viewers": stats.get("total_user") or d.get("user_count") or 0,
+            })
+        rooms.sort(key=lambda r: r["viewers"], reverse=True)
+        return {"ok": True, "rows": rooms[:count]}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+# 地级市列表缓存 (city/list 响应 ~百 KB, 24h 内复用)
+_CITY_LIST_CACHE: dict[str, Any] = {"ts": 0.0, "cities": []}
+_CITY_LIST_TTL_S = 86400
+
+
+def fetch_city_list() -> dict[str, Any]:
+    """地级市 code+name 映射 (地区榜城市下拉): GET aweme.snssdk.com/aweme/v1/city/list/
+    2026-11-15 实测 sc=0, all[]{code,name,districts[]}; 只留地级市 (去重 code)。"""
+    import time as _time
+    now = _time.time()
+    if _CITY_LIST_CACHE["cities"] and now - _CITY_LIST_CACHE["ts"] < _CITY_LIST_TTL_S:
+        return {"ok": True, "cities": _CITY_LIST_CACHE["cities"]}
+    if _asp is None:
+        return {"ok": False, "reason": "app 签名链不可用"}
+    try:
+        q = _asp._common_q()
+        url = ("https://aweme.snssdk.com/aweme/v1/city/list/?" + urllib.parse.urlencode(q))
+        body = _app_request(url, _min_jar())
+        if body.get("status_code") != 0:
+            return {"ok": False, "reason": f"sc={body.get('status_code')}"}
+        # 实测层级: all[] 即地级市列表 (code=地级市, name=市名),
+        # districts[] 是区县 (code 重复市的 code, district_code 才是区县) — 只取 all 顶层。
+        seen: set[str] = set()
+        cities = []
+        for city in (body.get("all") or []):
+            code = str(city.get("code") or "")
+            name = city.get("name") or ""
+            if code and name and code not in seen:
+                seen.add(code)
+                cities.append({"code": code, "name": name})
+        _CITY_LIST_CACHE["ts"] = now
+        _CITY_LIST_CACHE["cities"] = cities
+        return {"ok": True, "cities": cities}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}

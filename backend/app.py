@@ -1063,6 +1063,35 @@ def boards_live(web_rid: str = "") -> dict:
     return _boards.fetch_live_boards(web_rid, timeout_ms=40000)
 
 
+@app.get("/api/boards/fans-club")
+def boards_fans_club() -> dict:
+    """全抖音粉丝团人气榜 (app 域 unidbg 离线签名, 只读)。"""
+    try:
+        return _boards.fetch_fans_club_board(50)
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+@app.get("/api/boards/cities")
+def boards_cities() -> dict:
+    """地级市 code+name 列表 (地区榜城市下拉, 24h 缓存)。"""
+    try:
+        return _boards.fetch_city_list()
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+@app.get("/api/boards/city")
+def boards_city(city_code: str = "") -> dict:
+    """地区直播榜: 指定城市在播房间按在看人数降序 (app 域 unidbg 签名)。"""
+    if not city_code.strip():
+        return {"ok": False, "reason": "缺少 city_code"}
+    try:
+        return _boards.fetch_city_rooms(city_code, 20)
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
 @app.get("/api/fansclub/recapture-status")
 def fansclub_recapture_status() -> dict:
     return {**_recapture_state}
