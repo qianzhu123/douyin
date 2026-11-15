@@ -69,25 +69,46 @@ def fetch_hot_board() -> dict[str, Any]:
 
 # ---- 直播间榜单 (CDP 拦响应) ----
 
-# 榜 tab: (tab 文本, 中文名) — 点 tab 触发 hour_detail; 归属看响应 tab_info
+# 榜 tab: (tab 文本, 中文名) — 备用 trusted click 触发 hour_detail (重放失败时降级)
 _LIVE_TABS: tuple[tuple[str, str], ...] = (
     ("小时榜", "小时榜"),
     ("人气榜", "人气榜"),
 )
 
+# ranklist_type 重放表 (2026-11-15 实测定论: 换 captured URL 里的 ranklist_type
+# 在页内 fetch 重放有效 — 服务端只校验 a_bogus 与其余参数, rt 可换):
+#   0=小时榜(tab_info.Y), 3=人气榜(tab_info.N, score "100万+"), 6=新人榜(tab_info.Y)
+_RT_BOARDS: tuple[tuple[str, str], ...] = (
+    ("hour", "0"),
+    ("pop", "3"),
+    ("new", "6"),
+)
+
 
 def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # 2026-11-15 实测定论: 榜行名次在 `index` (响应无 `rank` 字段, 恒取成 null →
+    # 前端显示 0 的根因之一); score_str 小时榜恒空串 (服务端不下发, 页面 Lynx
+    # 浮层自己算), 人气榜有 "100万+" 类文本。小时榜行前端按名次展示。
     out = []
     for r in ranks[:BOARD_LIMIT]:
         u = r.get("user") or {}
         out.append({
-            "rank": r.get("rank"),
+            "rank": r.get("index"),
             "nickname": u.get("nickname") or "",
             "sec_uid": u.get("sec_uid") or "",
             "score": r.get("score") or 0,
             "score_str": r.get("score_str") or "",
         })
     return out
+
+
+async def _tab_cap(response, sink: list) -> None:
+    """降级点 tab 路径的 hour_detail 捕获器 (sink 为外层 list)。"""
+    try:
+        if "/webcast/ranklist/hour_detail/" in response.url:
+            sink.append(await response.json())
+    except Exception:
+        pass
 
 
 def _entrance_tabs(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -134,8 +155,6 @@ async def _fetch_live_boards_async(web_rid: str, timeout_ms: int) -> dict[str, A
                 captured["audience"] = await response.json()
             elif "/webcast/ranklist/hour_entrance/" in rurl and "entrance" not in captured:
                 captured["entrance"] = await response.json()
-            elif "/webcast/ranklist/hour_detail/" in rurl:
-                captured.setdefault("hour_detail", []).append(await response.json())
         except Exception:
             pass
 
@@ -148,13 +167,12 @@ async def _fetch_live_boards_async(web_rid: str, timeout_ms: int) -> dict[str, A
                                 wait_until="domcontentloaded", timeout=timeout_ms)
             except Exception:
                 pass  # domcontentloaded 超时也继续等响应
-            # 等进房自动请求 (audience + hour_entrance) + 页面渲染出"小时榜"入口
+            # 等进房自动请求 (audience + hour_entrance, 携完整签名参数)
             for _ in range(max(1, timeout_ms // 300)):
                 if "audience" in captured and "entrance" in captured:
                     break
                 await asyncio.sleep(0.3)
-            # 页面渲染可能很慢 (实测 6s 时常卡"直播加载中", 10s+ 才出榜入口);
-            # 没等到 entrance 也会继续, 点得到 tab 就有 hour_detail。
+            # 页面渲染可能很慢 (实测 6s 时常卡"直播加载中", 10s+ 才出榜入口)
             for _ in range(10):
                 if await page.evaluate(
                     '() => (document.body.innerText||"").includes("小时榜")'
@@ -162,25 +180,78 @@ async def _fetch_live_boards_async(web_rid: str, timeout_ms: int) -> dict[str, A
                     break
                 await asyncio.sleep(1)
 
-            # 点各榜 tab 触发 hour_detail。必须用 playwright trusted click (JS .click()
-            # 不触发 React 合成事件); force=True 绕遮挡。tab 归属看响应 tab_info:
-            # 有 exist_tabs = 小时榜; tab_info 为 null = 人气榜 (实测定论)。
-            for _name, _label in _LIVE_TABS[:2]:  # 新人榜(rt=6)多数房间无此 tab, 点不到就跳过
-                try:
-                    await page.locator(f"text={_name}").last.click(timeout=4000, force=True)
-                except Exception:
-                    continue  # 房间无该榜 tab
-                before = len(captured.get("hour_detail") or [])
-                for _ in range(20):  # 最多 ~6s 等响应
-                    if len(captured.get("hour_detail") or []) > before:
-                        break
-                    await asyncio.sleep(0.3)
+            # ---- 榜单获取主链路: 点入口一次 + 页内 rt 重放 (2026-11-15 实测定论) ----
+            # hour_detail 不进房自动发, 需点 [data-e2e="hour-rank-entrance"] 一次拿到
+            # 带签名 URL; 之后换 ranklist_type 页内 fetch 重放有效 (服务端只验
+            # a_bogus 与其余参数, rt 可换): 0=小时榜 3=人气榜 6=新人。比反复点 tab
+            # 可靠 (榜浮层是 Lynx canvas, tab text 定位常点不中, 也点不出子榜 rt=6)。
+            detail_req_urls: list = []
+            page.on(
+                "request",
+                lambda req: detail_req_urls.append(req.url)
+                if "/webcast/ranklist/hour_detail/" in req.url else None,
+            )
+            try:
+                await page.locator('[data-e2e="hour-rank-entrance"]').first.click(
+                    timeout=5000, force=True)
+            except Exception:
+                pass  # 无榜入口 (未开播/风控)
+            for _ in range(20):
+                if detail_req_urls:
+                    break
+                await asyncio.sleep(0.3)
+            base_detail_url = detail_req_urls[0] if detail_req_urls else ""
+            replayed: dict[str, list] = {}
+            if base_detail_url:
+                for key, rt in _RT_BOARDS:
+                    u = base_detail_url
+                    # rt=0 用原 URL (参数原样, 签名天然有效); 其余换 ranklist_type
+                    if rt != "0":
+                        import re as _re
+                        u = _re.sub(r"ranklist_type=\d+", f"ranklist_type={rt}",
+                                    base_detail_url)
+                        if u == base_detail_url:  # URL 无该参数则追加
+                            u = base_detail_url + f"&ranklist_type={rt}"
+                    try:
+                        body = await page.evaluate(
+                            """async (u) => {
+                              const r = await fetch(u, {credentials: 'include'});
+                              return await r.json();
+                            }""", u)
+                        d = body.get("data") or {}
+                        rows = d.get("ranks") or []
+                        if rows:
+                            replayed[key] = rows
+                    except Exception:
+                        continue
+
+            # ---- 降级: 重放全失败才点 tab (Lynx 浮层 trusted click) ----
+            if not replayed:
+                hd: list = []
+                page.on("response",
+                        lambda r: asyncio.create_task(_tab_cap(r, hd)))
+                for _name, _label in _LIVE_TABS:
+                    try:
+                        await page.locator(f"text={_name}").last.click(timeout=4000, force=True)
+                    except Exception:
+                        continue  # 房间无该榜 tab
+                    before = len(hd)
+                    for _ in range(20):  # 最多 ~6s 等响应
+                        if len(hd) > before:
+                            break
+                        await asyncio.sleep(0.3)
+                for h in hd:
+                    d = h.get("data") or {}
+                    rows = d.get("ranks") or []
+                    if rows:
+                        # tab_info 有 exist_tabs = 小时榜; null = 人气榜
+                        replayed["hour" if d.get("tab_info") is not None else "pop"] = rows
 
             try:
                 await page.close()
             except Exception:
                 pass
-            return _summarize_live(captured, web_rid)
+            return _summarize_live(captured, replayed, web_rid)
         finally:
             try:
                 await page.close()
@@ -195,6 +266,57 @@ async def _fetch_live_boards_async(web_rid: str, timeout_ms: int) -> dict[str, A
                     await browser.close()
                 except Exception:
                     pass
+
+
+def find_live_room() -> dict[str, Any]:
+    """自动找一个在播房间 web_rid (小时榜/人气榜是全站榜, 无需用户输地址):
+    广场页 HTML 抓 live.douyin.com/<数字> 链接。
+    返回 {"ok", "web_rid", "source"} 或 {"ok": False, "reason"}。"""
+    try:
+        return asyncio.run(_find_live_room_async())
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+async def _find_live_room_async() -> dict[str, Any]:
+    async with async_playwright() as p:
+        browser, context, page, owns = await _acquire_page(p, 20000)
+        try:
+            try:
+                await page.goto("https://live.douyin.com", wait_until="domcontentloaded",
+                                timeout=20000)
+            except Exception:
+                pass
+            for _ in range(8):
+                html = await page.content()
+                rid = _plaza_rid(html)
+                if rid:
+                    return {"ok": True, "web_rid": rid, "source": "plaza"}
+                await asyncio.sleep(1.5)
+            return {"ok": False, "reason": "广场未抓到在播房间"}
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+            if owns:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+
+def _plaza_rid(html: str) -> str:
+    import re
+    m = re.search(r"live\.douyin\.com[\"'/=]+(\d{6,})", html)
+    if m:
+        return m.group(1)
+    m = re.search(r'"web_rid":"(\d{6,})"', html)
+    return m.group(1) if m else ""
 
 
 async def _acquire_page(p, timeout_ms: int):
@@ -225,24 +347,13 @@ async def _acquire_page(p, timeout_ms: int):
     return browser, context, page, True
 
 
-def _summarize_live(captured: dict[str, Any], web_rid: str) -> dict[str, Any]:
-    if "audience" not in captured and "entrance" not in captured and not captured.get("hour_detail"):
+def _summarize_live(captured: dict[str, Any], replayed: dict[str, list],
+                    web_rid: str) -> dict[str, Any]:
+    if "audience" not in captured and "entrance" not in captured and not replayed:
         return {"ok": False, "reason": "未拦到榜单请求 (房间不存在/未开播/风控)"}
 
     aud_data = (captured.get("audience") or {}).get("data") or {}
     ent_data = (captured.get("entrance") or {}).get("data") or {}
-
-    boards: dict[str, list] = {"hour": [], "popularity": []}
-    for resp in captured.get("hour_detail") or []:
-        d = resp.get("data") or {}
-        rows = _board_rows(d.get("ranks") or [])
-        if not rows:
-            continue
-        # tab_info 有 exist_tabs = 小时榜; tab_info 为 null = 人气榜 (实测定论)
-        if d.get("tab_info") is not None:
-            boards["hour"] = rows
-        else:
-            boards["popularity"] = rows
 
     return {
         "ok": True,
@@ -255,6 +366,7 @@ def _summarize_live(captured: dict[str, Any], web_rid: str) -> dict[str, Any]:
             "has_more": aud_data.get("has_more"),
         },
         "period_remain_seconds": ent_data.get("period_remain_seconds"),
-        "hour_board": boards["hour"],
-        "popularity_board": boards["popularity"],
+        "hour_board": _board_rows(replayed.get("hour") or []),
+        "popularity_board": _board_rows(replayed.get("pop") or []),
+        "newbie_board": _board_rows(replayed.get("new") or []),
     }

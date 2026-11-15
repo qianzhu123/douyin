@@ -1523,3 +1523,15 @@ select.liked-filter-input { min-width: 200px; }
 .board-tag.hot { background: #ff4554; }
 .board-tag.boom { background: #ff2c55; }
 .board-tag.new { background: #ff8f1f; }
+
+/* 榜单面板界面内滑动 (用户指定 2026-11-15: 不撑长页面, 与 .liked-scroll 同款) */
+.board-scroll {
+  height: 520px;
+  overflow-y: auto;
+  margin-top: 10px;
+  padding-right: 4px;
+  border: 1px solid var(--border, #e3e5e8);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+.board-scroll .t6-boards { margin-top: 0; }

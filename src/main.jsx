@@ -955,7 +955,13 @@ function LiveMonitorPanel({ embedded }) {
           {rooms.map((r) => (
             <div key={r.key} className="lm-room">
               <span>{r.label}</span>
-              <span className={r.was_live ? 'lm-on' : 'lm-off'}>{r.was_live ? '直播中' : '未开播'}</span>
+              <span className={r.was_live ? 'lm-on' : 'lm-off'}>
+                {r.was_live
+                  ? (r.web_rid
+                    ? <a href={`https://live.douyin.com/${r.web_rid}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>直播中 ↗</a>
+                    : '直播中')
+                  : '未开播'}
+              </span>
               <span>{r.viewers != null ? r.viewers.toLocaleString() : '—'}</span>
               <span className="lm-title" title={r.title}>{r.title || '—'}</span>
               <span>{fmtT(r.last_tick)}</span>
@@ -1596,9 +1602,12 @@ function T6RankBoardPanel() {
   );
 }
 
-// ---- 榜单面板 (阶段一: 抖音热榜 + 直播间三榜, 2026-11-15) ----
-// 热榜直连; 直播间榜单走 /api/boards/live?web_rid= (CDP 进房拦响应, ~30-60s)。
-// 直播间号支持: 纯数字 web_rid / 完整 live.douyin.com 链接。
+// ---- 榜单面板 (阶段一 + 2026-11-15 修正) ----
+// 热榜直连; 直播间榜走 /api/boards/live (CDP 进房拦响应 + 页内 rt 重放):
+// 小时榜/人气榜/新人榜是全站榜 — 不需要输地址, 房间只是签名载体 (可留空自动抓)。
+// 在线观众榜是房间私有榜 — 输地址才看 (留空时后端返回的 audience 属于随机房间, 不展示)。
+// 2026-11-15 实测定论: 榜行名次在 index 字段; 小时榜 score_str 服务端不下发
+// (页面 Lynx 浮层内部渲染), 该榜按名次展示、数值列显示 "—"; 人气榜 "100万+" 有值。
 function BoardsPanel() {
   const [tab, setTab] = React.useState('hot'); // hot | live
   // 热榜
@@ -1609,7 +1618,7 @@ function BoardsPanel() {
   const [live, setLive] = React.useState(null);
   const [liveBusy, setLiveBusy] = React.useState(false);
   const [liveErr, setLiveErr] = React.useState('');
-  const [liveTab, setLiveTab] = React.useState('hour'); // hour | pop | audience
+  const [liveTab, setLiveTab] = React.useState('hour'); // hour | pop | new | audience
 
   const loadHot = React.useCallback(async () => {
     setHotBusy(true);
@@ -1630,20 +1639,19 @@ function BoardsPanel() {
     return m ? m[1] : (/^\d+$/.test(t) ? t : '');
   };
 
-  const loadLive = React.useCallback(async () => {
-    const rid = parseRid(ridInput);
-    if (!rid) {
-      setLiveErr('请输入直播间链接或纯数字房间号');
-      return;
-    }
+  const loadLive = React.useCallback(async (ridOverride) => {
+    const rid = ridOverride !== undefined ? ridOverride : parseRid(ridInput);
     setLiveBusy(true);
     setLiveErr('');
     setLive(null);
     try {
-      const d = await fetch(`${API_BASE}/api/boards/live?web_rid=${encodeURIComponent(rid)}`)
-        .then((r) => r.json());
-      if (d.ok) setLive(d);
-      else setLiveErr(d.reason || '拉取失败');
+      const qs = rid ? `?web_rid=${encodeURIComponent(rid)}` : '';
+      const d = await fetch(`${API_BASE}/api/boards/live${qs}`).then((r) => r.json());
+      if (d.ok) {
+        setLive(d);
+        // 房间私有榜 (在线观众榜) 只在显式输地址时有意义; 全站榜默认展示小时榜
+        setLiveTab(rid ? 'hour' : 'hour');
+      } else setLiveErr(d.reason || '拉取失败');
     } catch (e) {
       setLiveErr(String(e.message || e));
     } finally {
@@ -1654,22 +1662,20 @@ function BoardsPanel() {
   React.useEffect(() => { if (tab === 'hot' && !hot && !hotBusy) loadHot(); }, [tab]); // eslint-disable-line
 
   const liveBoards = live ? [
-    { key: 'hour', title: '小时榜', rows: live.hour_board },
+    { key: 'hour', title: '小时榜', rows: live.hour_board, noScore: true },
     { key: 'pop', title: '人气榜', rows: live.popularity_board },
-    { key: 'audience', title: '在线观众榜', rows: live.audience_top },
-  ] : [];
-  const currentBoard = liveBoards.find((b) => b.key === liveTab);
-  const boardValue = (row) => {
-    if (liveTab === 'audience') return row.score_str || (row.score != null ? row.score.toLocaleString() : '');
-    return row.score_str || (row.score != null ? row.score.toLocaleString() : '');
-  };
+    { key: 'new', title: '新人榜', rows: live.newbie_board, noScore: true },
+    ...(parseRid(ridInput) ? [{ key: 'audience', title: '在线观众榜', rows: live.audience_top, noScore: false }] : []),
+  ].filter((b) => b.rows?.length) : [];
+  const currentBoard = liveBoards.find((b) => b.key === liveTab) || liveBoards[0];
+  const boardValue = (row, noScore) => (noScore ? '—' : (row.score_str || (row.score ? row.score.toLocaleString() : '—')));
 
   return (
     <section className="panel boards-panel" id="sec-boards">
       <div className="panel-head">
         <div>
           <h2>榜单</h2>
-          <p>抖音热榜 / 直播间小时榜·人气榜·在线观众榜（只读）</p>
+          <p>抖音热榜 / 直播小时榜·人气榜·新人榜（只读）</p>
         </div>
         <div className="panel-actions">
           {tab === 'hot'
@@ -1679,7 +1685,7 @@ function BoardsPanel() {
       </div>
 
       <div className="fansclub-toolbar">
-        {[['hot', '抖音热榜'], ['live', '直播间榜单']].map(([k, label]) => (
+        {[['hot', '抖音热榜'], ['live', '直播榜']].map(([k, label]) => (
           <button key={k} className={`fansclub-tab${tab === k ? ' active' : ''}`} onClick={() => setTab(k)}>
             {label}
           </button>
@@ -1688,22 +1694,24 @@ function BoardsPanel() {
 
       {tab === 'hot' && (
         hot?.ok ? (
-          <div className="t6-boards">
-            <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
-              <div className="t6-board-title"><span>抖音热榜{hot.active_time ? ` · ${hot.active_time.slice(5, 16)}` : ''}</span></div>
-              <div className="t6-board-rows">
-                {hot.items.map((it, i) => (
-                  <div key={`${it.word}-${i}`} className="t6-row">
-                    <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{i + 1}</span>
-                    <span className="t6-name" title={it.top_aweme_desc || it.word}>
-                      {it.label === 1 && <span className="board-tag hot">热</span>}
-                      {it.label === 4 && <span className="board-tag boom">爆</span>}
-                      {it.label === 3 && <span className="board-tag new">新</span>}
-                      {it.word}
-                    </span>
-                    <span className="t6-value">{(it.hot_value / 10000).toFixed(0)}万</span>
-                  </div>
-                ))}
+          <div className="board-scroll">
+            <div className="t6-boards">
+              <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
+                <div className="t6-board-title"><span>抖音热榜{hot.active_time ? ` · ${hot.active_time.slice(5, 16)}` : ''}</span></div>
+                <div className="t6-board-rows">
+                  {hot.items.map((it, i) => (
+                    <div key={`${it.word}-${i}`} className="t6-row">
+                      <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{i + 1}</span>
+                      <span className="t6-name" title={it.top_aweme_desc || it.word}>
+                        {it.label === 1 && <span className="board-tag hot">热</span>}
+                        {it.label === 4 && <span className="board-tag boom">爆</span>}
+                        {it.label === 3 && <span className="board-tag new">新</span>}
+                        {it.word}
+                      </span>
+                      <span className="t6-value">{(it.hot_value / 10000).toFixed(0)}万</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -1719,10 +1727,10 @@ function BoardsPanel() {
               value={ridInput}
               onChange={(e) => setRidInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') loadLive(); }}
-              placeholder="直播间链接 (live.douyin.com/…) 或房间号"
+              placeholder="可选：直播间链接/房间号（看该房间在线观众榜）；留空直接拉全站榜"
               disabled={liveBusy}
             />
-            <button onClick={loadLive} disabled={liveBusy || !ridInput.trim()}>
+            <button onClick={() => loadLive()} disabled={liveBusy}>
               {liveBusy ? '拉取中… (约30-60s)' : '拉取榜单'}
             </button>
           </div>
@@ -1733,28 +1741,40 @@ function BoardsPanel() {
                 {liveBoards.map(({ key, title, rows }) => (
                   <button
                     key={key}
-                    className={`fansclub-tab${liveTab === key ? ' active' : ''}`}
+                    className={`fansclub-tab${(currentBoard?.key) === key ? ' active' : ''}`}
                     onClick={() => setLiveTab(key)}
-                    disabled={!rows?.length}
                   >
-                    {title}{rows?.length ? ` (${rows.length})` : ' (无)'}
+                    {title} ({rows.length})
                   </button>
                 ))}
               </div>
-              {currentBoard?.rows?.length ? (
-                <div className="t6-boards">
-                  <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
-                    <div className="t6-board-title">
-                      <span>{currentBoard.title}{live.period_remain_seconds != null && liveTab !== 'audience' ? ` · 本期剩余 ${Math.floor(live.period_remain_seconds / 60)} 分钟` : ''}</span>
-                    </div>
-                    <div className="t6-board-rows">
-                      {currentBoard.rows.map((row, i) => (
-                        <div key={`${row.sec_uid || row.rank}-${i}`} className="t6-row">
-                          <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{row.rank ?? i + 1}</span>
-                          <span className="t6-name">{row.nickname}</span>
-                          <span className="t6-value">{boardValue(row)}</span>
-                        </div>
-                      ))}
+              {currentBoard ? (
+                <div className="board-scroll">
+                  <div className="t6-boards">
+                    <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
+                      <div className="t6-board-title">
+                        <span>
+                          {currentBoard.title}
+                          {live.period_remain_seconds != null && currentBoard.key !== 'audience'
+                            ? ` · 本期剩余 ${Math.floor(live.period_remain_seconds / 60)} 分钟`
+                            : ''}
+                          {currentBoard.key === 'audience' && live.web_rid
+                            ? <a href={`https://live.douyin.com/${live.web_rid}`} target="_blank" rel="noreferrer" style={{ marginLeft: 8 }}>直播间 ↗</a>
+                            : ''}
+                        </span>
+                        <span style={{ fontSize: 12, color: 'var(--text-dim, #6b7280)', marginLeft: 10 }}>
+                          {live.web_rid ? `房间 ${live.web_rid}` : ''}
+                        </span>
+                      </div>
+                      <div className="t6-board-rows">
+                        {currentBoard.rows.map((row, i) => (
+                          <div key={`${row.sec_uid || row.rank}-${i}`} className="t6-row">
+                            <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{row.rank ?? i + 1}</span>
+                            <span className="t6-name">{row.nickname}</span>
+                            <span className="t6-value">{boardValue(row, currentBoard.noScore)}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1764,7 +1784,7 @@ function BoardsPanel() {
             </>
           )}
           {!live && !liveErr && !liveBusy && (
-            <div className="empty">输入直播间链接拉取：小时榜 / 人气榜 / 在线观众榜</div>
+            <div className="empty">点击「拉取榜单」直接看全站小时榜 / 人气榜 / 新人榜 — 无需输地址</div>
           )}
         </>
       )}

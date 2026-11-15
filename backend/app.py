@@ -1052,8 +1052,14 @@ def boards_hot() -> dict:
 
 
 @app.get("/api/boards/live")
-def boards_live(web_rid: str) -> dict:
-    """直播间榜单: 在线观众榜 + 小时榜 + 人气榜 (CDP 进房拦响应)。"""
+def boards_live(web_rid: str = "") -> dict:
+    """直播间榜单: 在线观众榜 + 小时榜/人气榜/新人榜 (CDP 进房拦响应+页内重放)。
+    web_rid 空则自动抓一个在播房间 (小时榜/人气榜是全站榜, 房间只是签名载体)。"""
+    if not web_rid.strip():
+        found = _boards.find_live_room()
+        if not found.get("ok"):
+            return {"ok": False, "reason": f"自动找房间失败: {found.get('reason', '')}"}
+        web_rid = found["web_rid"]
     return _boards.fetch_live_boards(web_rid, timeout_ms=40000)
 
 

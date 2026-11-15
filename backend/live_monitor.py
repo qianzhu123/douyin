@@ -37,9 +37,18 @@ _ROOM_RESOLVE_TTL_S = 600
 STALE_EVENT_GAP_S = 600
 
 
-# CDP live 页提取缓存: web_rid -> (room_id, ts); 10 分钟
+# CDP live 页提取缓存: sec_uid -> (room_id, web_rid, ts); 10 分钟
+# web_rid 2026-11-15: 界面要展示直播间地址 (live.douyin.com/<web_rid>), 解析时顺手存
 _CDP_RESOLVE_TTL_S = 600
 _cdp_live_cache: dict = {}
+
+
+def cached_web_rid(sec_uid: str) -> str:
+    """最近一次 CDP 解析得到的 web_rid (无则空串; 供监控界面拼直播间链接)。"""
+    cached = _cdp_live_cache.get(sec_uid)
+    if cached and time.time() - cached[2] < _CDP_RESOLVE_TTL_S:
+        return cached[1]
+    return ""
 
 
 def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
@@ -55,7 +64,7 @@ def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
 
     now = time.time()
     cached = _cdp_live_cache.get(sec_uid)
-    if cached and now - cached[1] < _CDP_RESOLVE_TTL_S:
+    if cached and now - cached[2] < _CDP_RESOLVE_TTL_S:
         return cached[0]
 
     async def _run():
@@ -95,7 +104,7 @@ def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
     m = re.search(r"live\.douyin\.com/(\d+)", live_url or "")
     if not m:
         # 主页没有直播中入口 = 未开播 (这是真下播信号)
-        _cdp_live_cache[sec_uid] = ("", now)
+        _cdp_live_cache[sec_uid] = ("", "", now)
         return ""
     web_rid = m.group(1)
     # live 页静态 HTML 提取 roomStore.roomInfo.room.id_str (带登录 cookie)
@@ -114,7 +123,7 @@ def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
     except Exception:
         rid = ""
     if rid:
-        _cdp_live_cache[sec_uid] = (rid, now)
+        _cdp_live_cache[sec_uid] = (rid, web_rid, now)
     return rid
 
 
@@ -268,6 +277,8 @@ class LiveMonitor:
                     "key": key,
                     "sec_uid": st["sec_uid"],
                     "room_id": st["resolved_rid"] or st["room_id"],
+                    # 直播间地址 (2026-11-15): CDP 解析时顺带记录的 web_rid
+                    "web_rid": cached_web_rid(st["sec_uid"]) if st["sec_uid"] else "",
                     "label": st["label"],
                     "last": st["last"],
                     "viewers": st["viewers"],
