@@ -1038,6 +1038,25 @@ _recapture_lock = _threading.Lock()
 _recapture_state: dict = {"running": False, "current": "", "log": []}  # log: 已完成账户结果
 
 
+# ---- 榜单面板 (阶段一: 纯 web 可达榜单, 2026-11-15) ----
+from . import boards_fetch as _boards
+
+
+@app.get("/api/boards/hot")
+def boards_hot() -> dict:
+    """抖音热榜 (直连, 无浏览器)。"""
+    try:
+        return _boards.fetch_hot_board()
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+@app.get("/api/boards/live")
+def boards_live(web_rid: str) -> dict:
+    """直播间榜单: 在线观众榜 + 小时榜 + 人气榜 (CDP 进房拦响应)。"""
+    return _boards.fetch_live_boards(web_rid, timeout_ms=40000)
+
+
 @app.get("/api/fansclub/recapture-status")
 def fansclub_recapture_status() -> dict:
     return {**_recapture_state}

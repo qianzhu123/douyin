@@ -1508,3 +1508,18 @@ select.liked-filter-input { min-width: 200px; }
 .liked-dl-sel {
   background: var(--accent, #2563eb); border-color: var(--accent, #2563eb); color: #fff;
 }
+
+/* ---- 榜单面板 (阶段一, 2026-11-15) ---- */
+.board-tag {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  margin-right: 5px;
+  color: #fff;
+  font-weight: 700;
+}
+.board-tag.hot { background: #ff4554; }
+.board-tag.boom { background: #ff2c55; }
+.board-tag.new { background: #ff8f1f; }
