@@ -119,6 +119,8 @@ def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "sec_uid": u.get("sec_uid") or "",
             "score": r.get("score") or 0,
             "score_str": r.get("score_str") or "",
+            # 2026-11-16 晚: 行新增 tags (人气榜 "粉丝团：xxx"/"N人助力", 小时榜 "省份")
+            "tags": [str(t) for t in (r.get("tags") or []) if t],
         })
     return out
 

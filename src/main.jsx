@@ -1603,13 +1603,13 @@ function T6RankBoardPanel() {
 }
 
 // ---- 榜单面板 (阶段一 + 2026-11-15/16 修正) ----
-// 顶栏四类: 抖音热榜 (直连) / 直播榜 (CDP 进房拦响应+rt 重放, 全站无需任何地址,
-// 链接输入 2026-11-16 用户指定移除) / 粉丝团人气榜 (app 域 unidbg 离线签名) /
-// 地区直播榜 (城市在播房间按在看人数降序)。
-// 2026-11-15 实测定论: 榜行名次在 index 字段; 小时/新人榜服务端不下发分数
-// (页面 Lynx 浮层内部渲染), 数值列 "-"; 人气榜 "100万+" 即服务端全部形态。
+// 顶栏三类: 抖音热榜 (直连) / 直播榜 (CDP 进房拦响应+rt 重放, 全站无需任何地址,
+// 链接输入 2026-11-16 用户指定移除) / 地区直播榜 (城市在播房间按在看人数降序)。
+// 粉丝团人气榜 2026-11-16 用户指定舍弃 (后端 fetch_fans_club_board 保留但前端无入口)。
+// 2026-11-15 实测定论: 榜行名次在 index 字段; 三榜 score_str 服务端对 web 端不下发
+// (页面 Lynx 浮层内部渲染), 数值列显示 "-"。
 function BoardsPanel() {
-  const [tab, setTab] = React.useState('hot'); // hot | live | fansclub | city
+  const [tab, setTab] = React.useState('hot'); // hot | live | city (fansclub 2026-11-16 用户指定移除)
   // 热榜
   const [hot, setHot] = React.useState(null);
   const [hotBusy, setHotBusy] = React.useState(false);
@@ -1619,9 +1619,7 @@ function BoardsPanel() {
   const [liveErr, setLiveErr] = React.useState('');
   const [liveTab, setLiveTab] = React.useState('hour'); // hour | pop | new | audience
   const [liveLoaded, setLiveLoaded] = React.useState(false); // 直播榜是否已拉过 (自动拉一次)
-  // 粉丝团人气榜
-  const [fc, setFc] = React.useState(null);
-  const [fcBusy, setFcBusy] = React.useState(false);
+  // 粉丝团人气榜已移除 (2026-11-16 用户指定: 榜单无使用价值, 整块舍弃)
   // 地区直播榜
   const [cities, setCities] = React.useState([]);
   const [cityCode, setCityCode] = React.useState('410100'); // 默认郑州 (用户所在)
@@ -1658,18 +1656,6 @@ function BoardsPanel() {
     }
   }, []);
 
-  const loadFansClub = React.useCallback(async () => {
-    setFcBusy(true);
-    try {
-      const d = await fetch(`${API_BASE}/api/boards/fans-club`).then((r) => r.json());
-      setFc(d.ok ? d : { ok: false, reason: d.reason || '失败' });
-    } catch (e) {
-      setFc({ ok: false, reason: String(e.message || e) });
-    } finally {
-      setFcBusy(false);
-    }
-  }, []);
-
   const loadCityList = React.useCallback(async () => {
     try {
       const d = await fetch(`${API_BASE}/api/boards/cities`).then((r) => r.json());
@@ -1699,9 +1685,8 @@ function BoardsPanel() {
       loadLive();
     }
   }, [tab]); // eslint-disable-line
-  // 切到粉丝团榜/地区榜自动拉一次; 地区榜顺带加载城市列表
+  // 切到地区榜自动拉一次 + 顺带加载城市列表
   React.useEffect(() => {
-    if (tab === 'fansclub' && !fc && !fcBusy) loadFansClub();
     if (tab === 'city') {
       if (!cities.length) loadCityList();
       if (!city && !cityBusy && cityCode) loadCity(cityCode);
@@ -1709,21 +1694,28 @@ function BoardsPanel() {
   }, [tab]); // eslint-disable-line
 
   // 全站三榜 (audience 是房间私有榜, 链接入口移除后不再展示)
+  // 2026-11-16 晚: 行新增 tags (人气榜 "粉丝团：xxx"/"N人助力", 小时榜 "省份") —
+  // 服务端对 web 端不下发分数, 数值列用 tags 兜底, 避免整列 "-"
   const liveBoards = live ? [
     { key: 'hour', title: '小时榜', rows: live.hour_board },
     { key: 'pop', title: '人气榜', rows: live.popularity_board },
     { key: 'new', title: '新人榜', rows: live.newbie_board },
   ].filter((b) => b.rows?.length) : [];
   const currentBoard = liveBoards.find((b) => b.key === liveTab) || liveBoards[0];
-  // 数值列: score_str 优先 (人气榜 "100万+"); 小时/新人榜服务端无分数 → 显示 "-" 而非 "—"
-  const boardValue = (row) => (row.score_str || (row.score ? formatNumber(row.score) : '-'));
+  const boardValue = (row) => {
+    if (row.score_str) return row.score_str;
+    if (row.score) return formatNumber(row.score);
+    const tags = row.tags || [];
+    if (tags.length) return tags.join(' · ');
+    return '-';
+  };
 
   return (
     <section className="panel boards-panel" id="sec-boards">
       <div className="panel-head">
         <div>
           <h2>榜单</h2>
-          <p>抖音热榜 / 直播榜 / 粉丝团人气榜 / 地区直播榜（只读）</p>
+          <p>抖音热榜 / 直播榜 / 地区直播榜（只读）</p>
         </div>
         <div className="panel-actions">
           {tab === 'hot'
@@ -1732,9 +1724,6 @@ function BoardsPanel() {
           {tab === 'live'
             ? <button onClick={loadLive} disabled={liveBusy}>{liveBusy ? '拉取中… (约30-60s)' : '刷新'}</button>
             : null}
-          {tab === 'fansclub'
-            ? <button onClick={loadFansClub} disabled={fcBusy}>{fcBusy ? '拉取中… (约15s)' : '刷新'}</button>
-            : null}
           {tab === 'city'
             ? <button onClick={() => loadCity(cityCode)} disabled={cityBusy}>{cityBusy ? '拉取中… (约15s)' : '刷新'}</button>
             : null}
@@ -1742,7 +1731,7 @@ function BoardsPanel() {
       </div>
 
       <div className="fansclub-toolbar">
-        {[['hot', '抖音热榜'], ['live', '直播榜'], ['fansclub', '粉丝团人气榜'], ['city', '地区直播榜']].map(([k, label]) => (
+        {[['hot', '抖音热榜'], ['live', '直播榜'], ['city', '地区直播榜']].map(([k, label]) => (
           <button key={k} className={`fansclub-tab${tab === k ? ' active' : ''}`} onClick={() => setTab(k)}>
             {label}
           </button>
@@ -1826,31 +1815,6 @@ function BoardsPanel() {
             <div className="empty">正在拉取全抖音小时榜 / 人气榜 / 新人榜…</div>
           )}
         </>
-      )}
-
-      {tab === 'fansclub' && (
-        fc?.ok ? (
-          <div className="board-scroll">
-            <div className="t6-boards">
-              <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
-                <div className="t6-board-title">
-                  <span>全抖音 · 粉丝团人气榜{fc.period ? ` · ${fc.period}` : ''}{fc.currency ? ` (计${fc.currency})` : ''}</span>
-                </div>
-                <div className="t6-board-rows">
-                  {fc.rows.map((row, i) => (
-                    <div key={`${row.sec_uid || row.rank}-${i}`} className="t6-row">
-                      <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{row.rank ?? i + 1}</span>
-                      <span className="t6-name">{row.nickname}</span>
-                      <span className="t6-value">{formatNumber(row.score)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="empty">{fc ? `粉丝团人气榜拉取失败: ${fc.reason}` : '加载中…'}</div>
-        )
       )}
 
       {tab === 'city' && (
