@@ -3023,6 +3023,7 @@ function LikedVideosPanel() {
   const [fs, setFs] = React.useState(null);          // 后端 fetch_state 轮询
   const [error, setError] = React.useState('');
   const [copied, setCopied] = React.useState('');
+  const [copiedText, setCopiedText] = React.useState('');
   const [acct, setAcct] = React.useState(null);
   const [login, setLogin] = React.useState(null);
   const [showLogin, setShowLogin] = React.useState(false);
@@ -3183,6 +3184,17 @@ function LikedVideosPanel() {
       setCopied(item.aweme_id);
       setTimeout(() => setCopied(''), 1500);
     }, () => {});
+  };
+
+  // 复制文案: 标题 (+作者) — 抖音分享文案的标准形状, 粘到评论区/群聊即用
+  const copyText = (item) => {
+    const t = (item.title || '').trim();
+    if (!t) { flashNotice('该视频没有文案'); return; }
+    const text = item.author ? `${t}\n—— ${item.author}` : t;
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedText(item.aweme_id);
+      setTimeout(() => setCopiedText(''), 1500);
+    }, () => { flashNotice('复制失败 (浏览器剪贴板权限)'); });
   };
 
   // 切换账户 (五轮重做): switch 端点换完 Chrome 后 **后端已把目标槽位落盘
@@ -3434,6 +3446,7 @@ function LikedVideosPanel() {
               {it.author && <div className="liked-author">{it.author}</div>}
               <div className="liked-actions">
                 <button onClick={(e) => { e.stopPropagation(); copyLink(it); }}>{copied === it.aweme_id ? '已复制' : '复制链接'}</button>
+                <button onClick={(e) => { e.stopPropagation(); copyText(it); }}>{copiedText === it.aweme_id ? '已复制' : '复制文案'}</button>
                 <a href={it.url} target="_blank" rel="noreferrer" title="打开原页"
                    onClick={(e) => e.stopPropagation()}><ExternalLink size={14} /></a>
               </div>
