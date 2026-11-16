@@ -725,12 +725,14 @@ def liked_videos(kind: str = "like", offset: int = 0, limit: int = 16,
 
 
 @app.post("/api/liked/fetch")
-def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = "") -> dict:
+def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = "", force: int = 0) -> dict:
     """全局拉取 / 继续加载 / 定向拉取。
 
     - q/author 非空 → 定向模式: 边滚边按关键词/作者匹配, 凑够 target 即停
       (未拉取全量时按需取数)。
     - target=0 → 默认补到 max(已缓存, 40)。
+    - force=1 → 跳过"已缓存足够"短路 (刷新按钮用: 用户新点了赞, 必须
+      重新滚列表补增量, 缓存条数达标不代表没有新内容)。
     """
     kind = "collect" if kind == "collect" else "like"
     have = len(_liked_cached_items(kind))
@@ -739,7 +741,7 @@ def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = 
         want = max(1, min(5000, int(target)))
     else:
         want = max(_LIKED_BG_TARGET, have) if not targeted else 60
-    if not targeted and have >= want:
+    if not targeted and have >= want and not force:
         return {"ok": True, "reason": "已缓存足够, 无需再拉", "total": have, "target": want}
     if not _liked_start(kind, want, query=q.strip(), author=author.strip()):
         return {"ok": False, "reason": "已有拉取在进行中", "target": want}

@@ -3115,10 +3115,11 @@ function LikedVideosPanel() {
   }, [kind, items.length, loadSlice, loadAuthors]);
 
   // 拉取内核 (滚动到底自动触发; 「刷新」按钮也走这里)
-  const doFetch = async (target) => {
+  // force=1: 刷新按钮专用 — 跳过后端"已缓存足够"短路 (否则新点的赞永远补不进来)
+  const doFetch = async (target, force) => {
     setError('');
     try {
-      const p = new URLSearchParams({ kind, target: target || 0 });
+      const p = new URLSearchParams({ kind, target: target || 0, force: force ? 1 : 0 });
       const r = await fetch(`${API_BASE}/api/liked/fetch?${p}`, { method: 'POST' });
       const d = await r.json();
       if (!d.ok) { flashNotice(d.reason || '无法开始'); return; }
@@ -3166,8 +3167,9 @@ function LikedVideosPanel() {
   };
 
   // 「刷新」(六轮: 原「拉取」更名): 重新滚抖音列表补增量 (合并仍以本轮序优先)
+  // force: 即使本地缓存达标也真拉取 — 用户新点的赞只有重新滚列表才能扫到
   const doRefresh = async () => {
-    await doFetch(0);
+    await doFetch(0, true);
   };
 
   // 列表界内滚动容器 onScroll: 距底 <120px 触发加载
