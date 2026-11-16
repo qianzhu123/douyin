@@ -1656,6 +1656,15 @@ function BoardsPanel() {
     }
   }, []);
 
+  // 自动拉取失败不清空重试提示 — 但用户切子榜 tab 或点刷新即重试;
+  // 失败态停留 60s 后自动重试一次 (CDP 进房偶发风控, 单次失败≠榜没了)
+  React.useEffect(() => {
+    if (tab !== 'live' || live || liveBusy) return undefined;
+    if (!liveErr) return undefined;
+    const t = setTimeout(() => loadLive(), 60000);
+    return () => clearTimeout(t);
+  }, [tab, live, liveBusy, liveErr, loadLive]);
+
   const loadCityList = React.useCallback(async () => {
     try {
       const d = await fetch(`${API_BASE}/api/boards/cities`).then((r) => r.json());
