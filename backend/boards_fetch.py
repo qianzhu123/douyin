@@ -101,14 +101,20 @@ _RT_BOARDS: tuple[tuple[str, str], ...] = (
 
 
 def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # 2026-11-15 实测定论: 榜行名次在 `index` (响应无 `rank` 字段, 恒取成 null →
-    # 前端显示 0 的根因之一); score_str 小时榜恒空串 (服务端不下发, 页面 Lynx
-    # 浮层自己算), 人气榜有 "100万+" 类文本。小时榜行前端按名次展示。
+    # 2026-11-16 复测: hour_detail 行结构已变 — 单数 `user` → 复数 `users`
+    # (list, 疑似主播+搭档多占位), 名次仍在 `index`。防御性双取: users[0] 优先,
+    # 回退 user。score_str 三榜实测均空 (服务端对 web 端不下发, 页面 Lynx 渲染);
+    # audience 榜行仍带 score/rank (但当前实测也 0)。
     out = []
     for r in ranks[:BOARD_LIMIT]:
-        u = r.get("user") or {}
+        u = None
+        users = r.get("users")
+        if isinstance(users, list) and users:
+            u = users[0] or {}
+        if not u:
+            u = r.get("user") or {}
         out.append({
-            "rank": r.get("index"),
+            "rank": r.get("index") if r.get("index") is not None else r.get("rank"),
             "nickname": u.get("nickname") or "",
             "sec_uid": u.get("sec_uid") or "",
             "score": r.get("score") or 0,

@@ -1603,18 +1603,17 @@ function T6RankBoardPanel() {
 }
 
 // ---- 榜单面板 (阶段一 + 2026-11-15/16 修正) ----
-// 顶栏五类: 抖音热榜 (直连) / 直播榜 (CDP 进房拦响应+rt 重放, 全抖音无需地址) /
-// 粉丝团人气榜 (/api/boards/fans-club, app 域 unidbg 离线签名) /
-// 地区直播榜 (/api/boards/city?city_code, 城市在播房间按在看人数降序)。
-// 2026-11-15 实测定论: 榜行名次在 index 字段; 小时榜 score_str 服务端不下发
-// (页面 Lynx 浮层内部渲染), 该榜按名次展示、数值列显示 "—"; 人气榜 "100万+" 有值。
+// 顶栏四类: 抖音热榜 (直连) / 直播榜 (CDP 进房拦响应+rt 重放, 全站无需任何地址,
+// 链接输入 2026-11-16 用户指定移除) / 粉丝团人气榜 (app 域 unidbg 离线签名) /
+// 地区直播榜 (城市在播房间按在看人数降序)。
+// 2026-11-15 实测定论: 榜行名次在 index 字段; 小时/新人榜服务端不下发分数
+// (页面 Lynx 浮层内部渲染), 数值列 "-"; 人气榜 "100万+" 即服务端全部形态。
 function BoardsPanel() {
   const [tab, setTab] = React.useState('hot'); // hot | live | fansclub | city
   // 热榜
   const [hot, setHot] = React.useState(null);
   const [hotBusy, setHotBusy] = React.useState(false);
-  // 直播榜 (默认全站, 链接可选)
-  const [ridInput, setRidInput] = React.useState('');
+  // 直播榜 (全站, 无需任何地址 — 用户指定 2026-11-16 链接输入彻底移除)
   const [live, setLive] = React.useState(null);
   const [liveBusy, setLiveBusy] = React.useState(false);
   const [liveErr, setLiveErr] = React.useState('');
@@ -1626,6 +1625,7 @@ function BoardsPanel() {
   // 地区直播榜
   const [cities, setCities] = React.useState([]);
   const [cityCode, setCityCode] = React.useState('410100'); // 默认郑州 (用户所在)
+  const [cityQuery, setCityQuery] = React.useState(''); // 城市搜索 (下拉 370 项, 输入过滤)
   const [city, setCity] = React.useState(null);
   const [cityBusy, setCityBusy] = React.useState(false);
 
@@ -1641,24 +1641,14 @@ function BoardsPanel() {
     }
   }, []);
 
-  const parseRid = (s) => {
-    const t = s.trim();
-    if (!t) return '';
-    const m = t.match(/live\.douyin\.com\/(\d+)/);
-    return m ? m[1] : (/^\d+$/.test(t) ? t : '');
-  };
-
-  const loadLive = React.useCallback(async (ridOverride) => {
-    const rid = ridOverride !== undefined ? ridOverride : parseRid(ridInput);
+  const loadLive = React.useCallback(async () => {
     setLiveBusy(true);
     setLiveErr('');
     setLive(null);
     try {
-      const qs = rid ? `?web_rid=${encodeURIComponent(rid)}` : '';
-      const d = await fetch(`${API_BASE}/api/boards/live${qs}`).then((r) => r.json());
+      const d = await fetch(`${API_BASE}/api/boards/live`).then((r) => r.json());
       if (d.ok) {
         setLive(d);
-        setLiveRid(rid); // 记录本次是否有指定房间 (决定 audience 榜是否展示)
         setLiveTab('hour');
       } else setLiveErr(d.reason || '拉取失败');
     } catch (e) {
@@ -1666,7 +1656,7 @@ function BoardsPanel() {
     } finally {
       setLiveBusy(false);
     }
-  }, [ridInput]);
+  }, []);
 
   const loadFansClub = React.useCallback(async () => {
     setFcBusy(true);
@@ -1706,7 +1696,7 @@ function BoardsPanel() {
   React.useEffect(() => {
     if (tab === 'live' && !liveLoaded && !liveBusy) {
       setLiveLoaded(true);
-      loadLive('');
+      loadLive();
     }
   }, [tab]); // eslint-disable-line
   // 切到粉丝团榜/地区榜自动拉一次; 地区榜顺带加载城市列表
@@ -1718,17 +1708,15 @@ function BoardsPanel() {
     }
   }, [tab]); // eslint-disable-line
 
-  // 本次结果对应的是"全站"还是"指定房间" — 拉取时把 rid 存进结果, 避免
-  // 之后用户清空输入框导致 audience 榜误展示随机房间的数据。
-  const [liveRid, setLiveRid] = React.useState('');
+  // 全站三榜 (audience 是房间私有榜, 链接入口移除后不再展示)
   const liveBoards = live ? [
-    { key: 'hour', title: '小时榜', rows: live.hour_board, noScore: true },
+    { key: 'hour', title: '小时榜', rows: live.hour_board },
     { key: 'pop', title: '人气榜', rows: live.popularity_board },
-    { key: 'new', title: '新人榜', rows: live.newbie_board, noScore: true },
-    ...(liveRid ? [{ key: 'audience', title: '在线观众榜', rows: live.audience_top, noScore: false }] : []),
+    { key: 'new', title: '新人榜', rows: live.newbie_board },
   ].filter((b) => b.rows?.length) : [];
   const currentBoard = liveBoards.find((b) => b.key === liveTab) || liveBoards[0];
-  const boardValue = (row, noScore) => (noScore ? '—' : (row.score_str || (row.score ? row.score.toLocaleString() : '—')));
+  // 数值列: score_str 优先 (人气榜 "100万+"); 小时/新人榜服务端无分数 → 显示 "-" 而非 "—"
+  const boardValue = (row) => (row.score_str || (row.score ? formatNumber(row.score) : '-'));
 
   return (
     <section className="panel boards-panel" id="sec-boards">
@@ -1740,6 +1728,9 @@ function BoardsPanel() {
         <div className="panel-actions">
           {tab === 'hot'
             ? <button onClick={loadHot} disabled={hotBusy}>{hotBusy ? '刷新中…' : '刷新'}</button>
+            : null}
+          {tab === 'live'
+            ? <button onClick={loadLive} disabled={liveBusy}>{liveBusy ? '拉取中… (约30-60s)' : '刷新'}</button>
             : null}
           {tab === 'fansclub'
             ? <button onClick={loadFansClub} disabled={fcBusy}>{fcBusy ? '拉取中… (约15s)' : '刷新'}</button>
@@ -1788,18 +1779,6 @@ function BoardsPanel() {
 
       {tab === 'live' && (
         <>
-          <div className="live-analysis-form">
-            <input
-              value={ridInput}
-              onChange={(e) => setRidInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') loadLive(); }}
-              placeholder="可选：直播间链接/房间号 — 额外多看该房间在线观众榜；小时榜/人气榜/新人榜无需地址"
-              disabled={liveBusy}
-            />
-            <button onClick={() => loadLive()} disabled={liveBusy}>
-              {liveBusy ? '拉取中… (约30-60s)' : (ridInput.trim() ? '拉取榜单' : '刷新榜单')}
-            </button>
-          </div>
           {liveErr && <div className="notice">{liveErr}</div>}
           {live && (
             <>
@@ -1820,14 +1799,9 @@ function BoardsPanel() {
                     <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
                       <div className="t6-board-title">
                         <span>
-                          {currentBoard.key === 'audience'
-                            ? (liveRid ? `在线观众榜 · 房间 ${liveRid}` : '在线观众榜')
-                            : `全抖音 · ${currentBoard.title}`}
-                          {live.period_remain_seconds != null && currentBoard.key !== 'audience'
+                          {`全抖音 · ${currentBoard.title}`}
+                          {live.period_remain_seconds != null
                             ? ` · 本期剩余 ${Math.floor(live.period_remain_seconds / 60)} 分钟`
-                            : ''}
-                          {currentBoard.key === 'audience' && liveRid
-                            ? <a href={`https://live.douyin.com/${liveRid}`} target="_blank" rel="noreferrer" style={{ marginLeft: 8 }}>直播间 ↗</a>
                             : ''}
                         </span>
                       </div>
@@ -1836,7 +1810,7 @@ function BoardsPanel() {
                           <div key={`${row.sec_uid || row.rank}-${i}`} className="t6-row">
                             <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{row.rank ?? i + 1}</span>
                             <span className="t6-name">{row.nickname}</span>
-                            <span className="t6-value">{boardValue(row, currentBoard.noScore)}</span>
+                            <span className="t6-value">{boardValue(row)}</span>
                           </div>
                         ))}
                       </div>
@@ -1888,9 +1862,22 @@ function BoardsPanel() {
               disabled={cityBusy}
             >
               {cities.length
-                ? cities.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)
+                ? (() => {
+                    const q = cityQuery.trim();
+                    const shown = q ? cities.filter((c) => c.name.includes(q)) : cities;
+                    return (shown.some((c) => c.code === cityCode) || shown.length === cities.length
+                      ? shown
+                      : [cities.find((c) => c.code === cityCode), ...shown].filter(Boolean)
+                    ).map((c) => <option key={c.code} value={c.code}>{c.name}</option>);
+                  })()
                 : <option value={cityCode}>城市列表加载中…</option>}
             </select>
+            <input
+              value={cityQuery}
+              onChange={(e) => setCityQuery(e.target.value)}
+              placeholder="搜索城市名…"
+              style={{ maxWidth: 140 }}
+            />
             <button onClick={() => loadCity(cityCode)} disabled={cityBusy || !cityCode}>
               {cityBusy ? '拉取中… (约15s)' : '刷新'}
             </button>
