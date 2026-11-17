@@ -911,6 +911,14 @@ function LiveMonitorPanel({ embedded }) {
     finally { setBusy(false); }
   };
 
+  // 清空事件日志 (2026-11-17: 失败日志刷屏且无法清除, 用户反馈)
+  const clearEvents = async () => {
+    try {
+      await fetch(`${API_BASE}/api/live-monitor/clear-events`, { method: 'POST' });
+      await loadStatus();
+    } catch (e) { setErr(e.message); }
+  };
+
   // 行内移除 (2026-11-08 用户诉求: 不必开主播库就能摘单个目标)
   const removeRoom = async (room) => {
     if (!room.sec_uid) return;
@@ -940,6 +948,9 @@ function LiveMonitorPanel({ embedded }) {
             : '空闲 · 从主播库加入主播后自动开始轮询（零浏览器直连）'}
         </span>
         <span className="lm-spacer" />
+        {events.length > 0 && (
+          <button className="secondary" onClick={clearEvents} title="清空事件日志">清空日志</button>
+        )}
         {running && (
           <button onClick={stopMonitor} disabled={busy}>全部停止</button>
         )}
@@ -3107,7 +3118,7 @@ function LikedVideosPanel() {
           setItems(d.items || []); setTotal(d.total || 0);
           loadAuthors(kind);
           if (s.error) setError(s.error);
-          else flashNotice(`拉取完成, 共 ${s.count} 个${s.mode === '定向' ? ` (匹配 ${s.matched})` : ''}`);
+          else flashNotice(`拉取完成, 共 ${s.count} 个${s.mode === '定向' ? ` (匹配 ${s.matched})` : ''}${s.pruned ? `, 校对清除 ${s.pruned} 个已取消项` : ''}`);
         }
       } catch (e) { /* 轮询失败忽略 */ }
     }, 2500);
@@ -3117,10 +3128,11 @@ function LikedVideosPanel() {
 
   // 拉取内核 (滚动到底自动触发; 「刷新」按钮也走这里)
   // force=1: 刷新按钮专用 — 跳过后端"已缓存足够"短路 (否则新点的赞永远补不进来)
-  const doFetch = async (target, force) => {
+  // prune=1: 全量校对 — 扫到底并清除已取消点赞的项 (target 需配大值)
+  const doFetch = async (target, force, prune) => {
     setError('');
     try {
-      const p = new URLSearchParams({ kind, target: target || 0, force: force ? 1 : 0 });
+      const p = new URLSearchParams({ kind, target: target || 0, force: force ? 1 : 0, prune: prune ? 1 : 0 });
       const r = await fetch(`${API_BASE}/api/liked/fetch?${p}`, { method: 'POST' });
       const d = await r.json();
       if (!d.ok) { flashNotice(d.reason || '无法开始'); return; }
@@ -3169,8 +3181,20 @@ function LikedVideosPanel() {
 
   // 「刷新」(六轮: 原「拉取」更名): 重新滚抖音列表补增量 (合并仍以本轮序优先)
   // force: 即使本地缓存达标也真拉取 — 用户新点的赞只有重新滚列表才能扫到
+  // 2026-11-17: 刷新条数可配置 (localStorage 记忆); 设为 0 或空 = 全量校对
+  // (扫到底 + 清除已取消点赞的项, 解决"固定条数刷新永远检测不到旧项被取消"问题)
+  const REFRESH_KEY = 'liked_refresh_count';
+  const [refreshN, setRefreshN] = React.useState(() => {
+    try { const v = parseInt(localStorage.getItem(REFRESH_KEY) || '0', 10); return v > 0 ? String(v) : ''; } catch { return ''; }
+  });
+  const refreshCount = () => {
+    const v = parseInt(refreshN, 10);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  };
   const doRefresh = async () => {
-    await doFetch(0, true);
+    const n = refreshCount();
+    if (n > 0) await doFetch(n, true);
+    else await doFetch(5000, true, true);   // 全量校对: 扫到底 + prune
   };
 
   // 列表界内滚动容器 onScroll: 距底 <120px 触发加载
@@ -3330,7 +3354,17 @@ function LikedVideosPanel() {
               {`终止 (${fs.count}/${fs.target})`}
             </button>
           ) : (
-            <button onClick={() => doRefresh()} title="重新滚一遍抖音列表 (数据已缓存的滚轮会自动补, 平时不用点)">刷新</button>
+            <>
+              <input className="liked-refresh-count" type="number" min="0" max="5000"
+                     placeholder="全量"
+                     value={refreshN}
+                     onChange={(e) => {
+                       setRefreshN(e.target.value);
+                       try { localStorage.setItem(REFRESH_KEY, String(parseInt(e.target.value, 10) || 0)); } catch {}
+                     }}
+                     title="刷新条数: 只滚最新 N 个 (快); 清空 = 全量校对 (扫到底并清除已取消点赞的项)" />
+              <button onClick={() => doRefresh()} title="重新滚一遍抖音列表 (数据已缓存的滚轮会自动补, 平时不用点)">刷新</button>
+            </>
           )}
           {selCount > 0 && (
             <button className="liked-sel-clear" onClick={clearSel} title="清空全部选中标记">清空选中({selCount})</button>

@@ -1404,6 +1404,14 @@ button:disabled {
   border: 1px solid var(--border, #e3e5e8);
 }
 .liked-sel-clear:hover { color: #ef4444; border-color: #ef4444; }
+/* 刷新条数输入 (2026-11-17): 窄数字框, 空 = 全量校对 */
+.liked-refresh-count {
+  width: 64px; padding: 4px 8px; font-size: 12.5px;
+  border: 1px solid var(--border, #e3e5e8);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--text, #1f2328);
+}
 /* 未选中的卡: ✓圈更淡 (半透明圈), 提示可点选 */
 .liked-card .liked-check { opacity: .55; }
 .liked-card.selected .liked-check { opacity: 1; }

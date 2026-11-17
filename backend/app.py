@@ -522,17 +522,19 @@ def _liked_cached_items(kind: str) -> list:
 
 
 def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "",
-                    gen: int = 0) -> None:
+                    gen: int = 0, prune: bool = False) -> None:
     """后台拉取到 target; 带 query/author 时为定向模式 (边滚边匹配, 凑够即停)。
 
     gen: 本次拉取的代数 — 终止请求只对当前代生效。
+    prune: 全量校对 — 扫到底后清除缓存中已不在抖音列表的项 (取消点赞检测)。
     """
     slot = _lp.active_slot()
     try:
         with _liked_lock:
             _liked_fetch.update({"running": True, "kind": kind, "count": 0,
                                  "target": target, "matched": 0, "error": "",
-                                 "slot": slot, "mode": "定向" if (query or author) else "全量",
+                                 "slot": slot,
+                                 "mode": "定向" if (query or author) else ("校对" if prune else "全量"),
                                  "query": query or author, "cancel_requested": False,
                                  "generation": gen})
             base = list(_liked_cache[kind]["items"])   # 合并基线
@@ -555,6 +557,15 @@ def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "",
         new_items = data.get("items") or []
         cancelled = bool(data.get("cancelled"))
         merged = _ls.merge(base, new_items, cap=_LIKED_STORE_CAP)
+        # 全量校对 (prune): 扫到底且未定向未终止时, 缓存里"本轮没扫到"的项
+        # = 已在抖音取消点赞 → 清除。判定依据 = 本轮扫描确实到底 (stall 退出
+        # 且 target 足够大), 否则只合并不清 (部分扫描无法判定旧项去留)。
+        pruned_n = 0
+        if prune and not (query or author) and not cancelled and len(new_items) >= target:
+            kept_ids = {it.get("aweme_id") or it.get("url") for it in new_items}
+            before = len(merged)
+            merged = [it for it in merged if (it.get("aweme_id") or it.get("url")) in kept_ids]
+            pruned_n = before - len(merged)
         complete = bool(data.get("ok")) and not (query or author) and not cancelled
         _ls.save(slot, kind, merged, complete=complete)
         with _liked_lock:
@@ -563,6 +574,7 @@ def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "",
                                   "slot": slot, "complete": complete}
             _liked_fetch.update({"running": False, "count": len(new_items),
                                  "matched": len(merged) if (query or author) else len(merged),
+                                 "pruned": pruned_n,
                                  "error": "已终止 (已扫到的保留)" if cancelled else ("" if data.get("ok") else (data.get("error") or "")),
                                  "ts": _time_lv.time(),
                                  "cancel_requested": False})
@@ -572,7 +584,8 @@ def _liked_do_fetch(kind: str, target: int, query: str = "", author: str = "",
                                  "ts": _time_lv.time()})
 
 
-def _liked_start(kind: str, target: int, query: str = "", author: str = "") -> bool:
+def _liked_start(kind: str, target: int, query: str = "", author: str = "",
+                 prune: bool = False) -> bool:
     """起一个后台拉取线程 (已在跑则拒绝)。"""
     with _liked_lock:
         if _liked_fetch["running"]:
@@ -580,10 +593,11 @@ def _liked_start(kind: str, target: int, query: str = "", author: str = "") -> b
         gen = int(_liked_fetch.get("generation", 0)) + 1
         _liked_fetch.update({"running": True, "kind": kind, "count": 0,
                              "target": target, "matched": 0, "error": "",
+                             "pruned": 0,
                              "ts": _time_lv.time(), "query": query or author,
                              "cancel_requested": False, "generation": gen})
     t = _threading_lv.Thread(target=_liked_do_fetch,
-                             args=(kind, target, query, author, gen),
+                             args=(kind, target, query, author, gen, prune),
                              daemon=True)
     t.start()
     return True
@@ -725,7 +739,8 @@ def liked_videos(kind: str = "like", offset: int = 0, limit: int = 16,
 
 
 @app.post("/api/liked/fetch")
-def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = "", force: int = 0) -> dict:
+def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = "", force: int = 0,
+                prune: int = 0) -> dict:
     """全局拉取 / 继续加载 / 定向拉取。
 
     - q/author 非空 → 定向模式: 边滚边按关键词/作者匹配, 凑够 target 即停
@@ -733,6 +748,8 @@ def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = 
     - target=0 → 默认补到 max(已缓存, 40)。
     - force=1 → 跳过"已缓存足够"短路 (刷新按钮用: 用户新点了赞, 必须
       重新滚列表补增量, 缓存条数达标不代表没有新内容)。
+    - prune=1 → 扫到底后清除缓存中已不在抖音喜欢列表的项 (取消点赞检测)。
+      只在全量扫完时生效 (定向/终止不 prune)。target 通常配 5000 (全量)。
     """
     kind = "collect" if kind == "collect" else "like"
     have = len(_liked_cached_items(kind))
@@ -743,10 +760,13 @@ def liked_fetch(kind: str = "like", target: int = 0, q: str = "", author: str = 
         want = max(_LIKED_BG_TARGET, have) if not targeted else 60
     if not targeted and have >= want and not force:
         return {"ok": True, "reason": "已缓存足够, 无需再拉", "total": have, "target": want}
-    if not _liked_start(kind, want, query=q.strip(), author=author.strip()):
+    if not _liked_start(kind, want, query=q.strip(), author=author.strip(),
+                        prune=bool(prune)):
         return {"ok": False, "reason": "已有拉取在进行中", "target": want}
     if targeted:
         return {"ok": True, "reason": f"定向拉取中 (目标 {want} 个, 含匹配)", "target": want}
+    if prune:
+        return {"ok": True, "reason": f"全量校对中 (目标 {want} 个, 扫完清除已取消项)", "target": want}
     return {"ok": True, "reason": f"已开始拉取 (目标 {want} 个)", "target": want}
 
 
@@ -907,6 +927,12 @@ def live_monitor_stop() -> dict:
 @app.get("/api/live-monitor/status")
 def live_monitor_status() -> dict:
     return _live_monitor.status()
+
+
+@app.post("/api/live-monitor/clear-events")
+def live_monitor_clear_events() -> dict:
+    """清空监控事件日志 (2026-11-17: 失败日志刷屏且无法清除, 用户反馈)。"""
+    return _live_monitor.clear_events()
 
 
 # /api/live-monitor/candidates 已删 (2026-11-05): 候选 chip 选主播形态废弃,

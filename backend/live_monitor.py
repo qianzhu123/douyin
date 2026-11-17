@@ -41,6 +41,8 @@ STALE_EVENT_GAP_S = 600
 # web_rid 2026-11-15: 界面要展示直播间地址 (live.douyin.com/<web_rid>), 解析时顺手存
 _CDP_RESOLVE_TTL_S = 600
 _cdp_live_cache: dict = {}
+# CDP 解析失败事件限频状态 (全体目标共享一条计时器)
+_cdp_err_state: dict = {"ts": 0.0}
 
 
 def cached_web_rid(sec_uid: str) -> str:
@@ -96,10 +98,16 @@ def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
         finally:
             loop.close()
     except Exception as exc:
-        # CDP 没起/页超时 → 与登录态失效同判: 不清目标, 只报一条错误
-        add_event("error", f"{label} 房间解析失败 (CDP): {str(exc)[:60]}",
-                  sec_uid[:12])
-        return ""
+        # CDP 没起/页超时 → 返回 None (区别于 ""=确认未开播):
+        # 绝不当未开播处理, 也不触发"下播自动关闭"误清目标。
+        # 错误事件限频 (2026-11-17 用户反馈: 30s 一条失败日志刷屏且清不掉):
+        # CDP 挂着时所有目标共用一条计时器, 每 10 分钟最多报一条。
+        now_ts = time.time()
+        if now_ts - _cdp_err_state["ts"] > STALE_EVENT_GAP_S:
+            _cdp_err_state["ts"] = now_ts
+            add_event("error", f"{label} 房间解析失败 (CDP): {str(exc)[:60]}",
+                      sec_uid[:12])
+        return None
 
     m = re.search(r"live\.douyin\.com/(\d+)", live_url or "")
     if not m:
@@ -214,6 +222,12 @@ class LiveMonitor:
                 self._state["ended_at"] = time.time()
                 self._add_event("info", "监控已停止")
             return {"running": False}
+
+    def clear_events(self) -> dict:
+        """清空事件日志 (2026-11-17 用户反馈: 失败日志刷屏且无法清除)。"""
+        with self._lock:
+            self._events.clear()
+            return {"ok": True}
 
     def add_target(self, sec_uid: str, label: str = "") -> dict:
         """主播库动态加入 (2026-11-07): 监控运行中也可直接加目标, 立即生效。
@@ -447,13 +461,16 @@ class LiveMonitor:
             return True
         st["last_tick"] = now  # 解析也算一次探测, 钳制频率
         rid = _resolve_room_via_cdp(st["sec_uid"], st["label"], self._add_event)
+        if rid is None:
+            # CDP 不可用/页超时: 与"未开播"严格区分 — 跳过本轮, 绝不误判下播
+            # (否则 Chrome 一挂就把整库监控目标误清, 2026-11-17 用户实测踩中)
+            return False
         if not rid:
-            # 未开播/解析失败: 下播后该监控目标直接关闭 (2026-11-07 用户定论)
+            # 确认主页无直播入口 = 真未开播: 下播后该监控目标直接关闭 (2026-11-07 用户定论)
             if st["was_live"]:
                 self._add_event("offline", f"{st['label']} 已下播 (监控自动结束)", st["sec_uid"][:12])
                 st["was_live"] = False
                 self._remove_locked(st["sec_uid"], f"{st['label']} 下播自动关闭")
-            return False
             return False
         if rid != st["resolved_rid"] and st["resolved_rid"]:
             # 换了场次 (重新开播), 换房不重复报开播 (was_live 仍 True 时)
