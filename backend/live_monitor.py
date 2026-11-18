@@ -45,6 +45,65 @@ _cdp_live_cache: dict = {}
 _cdp_err_state: dict = {"ts": 0.0}
 
 
+def _cdp_sweep_wedged_pages(max_probe_s: float = 3.0) -> int:
+    """探测并关闭共享 CDP Chrome (9222) 里僵死的 page target。
+
+    playwright connect_over_cdp 要等 auto-attach 在**所有** page target 上
+    完成初始化: 只要有一个渲染进程挂死 (如遗留的 live.douyin.com 页签),
+    整个 connect 就 Timeout, 尽管 HTTP /json/version 依然秒回。
+    2026-11-18 实测: 3 个遗留 live 页把所有解析拖死 (Timeout 5000ms)。
+
+    对每个 page target 用裸 WebSocket 发 Runtime.evaluate('1+1'),
+    超时/答非 '2' 判僵死, 经 /json/close/{id} 关闭。返回关闭数。
+    """
+    import httpx
+    from websocket import create_connection  # websocket-client
+
+    # trust_env=False: 环境代理 (Clash 7897) 会劫持 127.0.0.1 请求致超时
+    try:
+        targets = httpx.get("http://127.0.0.1:9222/json/list", timeout=3,
+                            trust_env=False).json()
+    except Exception:
+        return 0
+    closed = 0
+    for t in targets:
+        if t.get("type") != "page":
+            continue
+        ws_url = t.get("webSocketDebuggerUrl") or ""
+        tid = t.get("id") or ""
+        if not ws_url or not tid:
+            continue
+        ok = False
+        try:
+            ws = create_connection(ws_url, timeout=max_probe_s)
+            try:
+                ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                                    "params": {"expression": "1+1",
+                                               "returnByValue": True}}))
+                deadline = time.time() + max_probe_s
+                while time.time() < deadline:
+                    msg = json.loads(ws.recv())
+                    if msg.get("id") == 1:
+                        val = (msg.get("result", {}).get("result", {}) or {}).get("value")
+                        ok = (val == 2)
+                        break
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                httpx.get(f"http://127.0.0.1:9222/json/close/{tid}", timeout=3,
+                          trust_env=False)
+                closed += 1
+            except Exception:
+                pass
+    return closed
+
+
 def cached_web_rid(sec_uid: str) -> str:
     """最近一次 CDP 解析得到的 web_rid (无则空串; 供监控界面拼直播间链接)。"""
     cached = _cdp_live_cache.get(sec_uid)
@@ -73,7 +132,7 @@ def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
         from playwright.async_api import async_playwright
         async with async_playwright() as pw:
             browser = await pw.chromium.connect_over_cdp(
-                "http://127.0.0.1:9222", timeout=5000)
+                "http://127.0.0.1:9222", timeout=15000)
             ctx = browser.contexts[0]
             page = await ctx.new_page()
             try:
@@ -91,12 +150,23 @@ def _resolve_room_via_cdp(sec_uid: str, label: str, add_event) -> str:
                 except Exception:
                     pass
 
-    try:
+    def _attempt() -> str:
         loop = asyncio.new_event_loop()
         try:
-            live_url = loop.run_until_complete(_run())
+            return loop.run_until_complete(_run())
         finally:
             loop.close()
+
+    try:
+        try:
+            live_url = _attempt()
+        except Exception as first_exc:
+            # connect Timeout 多半是僵死 page target 卡住 auto-attach:
+            # 清扫一轮再试一次; 仍失败才按 CDP 故障上报 (限频)。
+            if "Timeout" in str(first_exc) and _cdp_sweep_wedged_pages() > 0:
+                live_url = _attempt()
+            else:
+                raise
     except Exception as exc:
         # CDP 没起/页超时 → 返回 None (区别于 ""=确认未开播):
         # 绝不当未开播处理, 也不触发"下播自动关闭"误清目标。
