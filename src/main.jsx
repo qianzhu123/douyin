@@ -1617,8 +1617,9 @@ function T6RankBoardPanel() {
 // 顶栏三类: 抖音热榜 (直连) / 直播榜 (CDP 进房拦响应+rt 重放, 全站无需任何地址,
 // 链接输入 2026-11-16 用户指定移除) / 地区直播榜 (城市在播房间按在看人数降序)。
 // 粉丝团人气榜 2026-11-16 用户指定舍弃 (后端 fetch_fans_club_board 保留但前端无入口)。
-// 2026-11-15 实测定论: 榜行名次在 index 字段; 三榜 score_str 服务端对 web 端不下发
-// (页面 Lynx 浮层内部渲染), 数值列显示 "-"。
+// 2026-11-15 实测定论: 榜行名次在 index 字段。2026-11-18/19: 抖音服务端把小时榜
+// 绝对分数全链路撤掉 (web 无数值字段, app score 恒 1 占位); 后端用 app 链路的
+// delta (相邻分差) 逆向还原相对分写进 score_str, 前端展示链不变 (score_str 优先)。
 function BoardsPanel() {
   const [tab, setTab] = React.useState('hot'); // hot | live | city (fansclub 2026-11-16 用户指定移除)
   // 热榜
