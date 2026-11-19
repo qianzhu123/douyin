@@ -992,13 +992,9 @@ button:disabled {
   color: #5a7488; cursor: pointer;
 }
 .side-nav-toggle:hover { background: #eef6ff; color: #1d5fa8; }
-/* 收起: 滑出屏幕只留箭头把手可见 (把手在列表右侧, 故整体左移到箭头外缘) */
+/* 收起: 滑出屏幕只留右缘的箭头把手 (26px: 把手 18 宽 + 边框 2 + 缓冲 6) */
 .side-nav.collapsed {
-  transform: translateY(-50%) translateX(calc(-100% + 26px));
-}
-/* 桌面端 hover 短暂探出方便瞥一眼 (MDN: 仅在真支持 hover 的设备启用, 触屏走点击) */
-@media (hover: hover) {
-  .side-nav.collapsed:hover { transform: translateY(-50%) translateX(0); }
+  transform: translateY(-50%) translateX(calc(-100% + 30px));
 }
 
 /* 作品数量自定义输入 */

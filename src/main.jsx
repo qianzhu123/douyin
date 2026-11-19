@@ -108,16 +108,6 @@ function SideNav({ active, onActive }) {
   };
   return (
     <nav className={`side-nav${collapsed ? ' collapsed' : ''}`}>
-      <button
-        type="button"
-        className="side-nav-toggle"
-        aria-expanded={!collapsed}
-        aria-label={collapsed ? '展开导航' : '收起导航'}
-        title={collapsed ? '展开导航' : '收起导航'}
-        onClick={toggleCollapsed}
-      >
-        {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-      </button>
       <div className="side-nav-list">
         {NAV_ITEMS.map((item) => (
           <button
@@ -129,6 +119,17 @@ function SideNav({ active, onActive }) {
           </button>
         ))}
       </div>
+      {/* 把手必须在抽屉右缘: 收起时整体左移只保留最右一段可见, 右缘把手才会留在屏幕边 */}
+      <button
+        type="button"
+        className="side-nav-toggle"
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? '展开导航' : '收起导航'}
+        title={collapsed ? '展开导航' : '收起导航'}
+        onClick={toggleCollapsed}
+      >
+        {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+      </button>
     </nav>
   );
 }
