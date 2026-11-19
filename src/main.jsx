@@ -79,15 +79,31 @@ const NAV_ITEMS = [
 ];
 
 function SideNav({ active, onActive }) {
-  // 折叠抽屉 (2026-11-19 用户要求: 不用时收进侧边只留箭头, 常见抽屉模式):
-  // 状态记忆在 localStorage, 刷新保持; hover 短暂探出方便瞥一眼 (CSS @media hover 限定)
-  const [collapsed, setCollapsed] = React.useState(() => {
-    try { return localStorage.getItem('sidenav_collapsed') === '1'; } catch { return false; }
-  });
-  const toggleCollapsed = () => setCollapsed((c) => {
-    try { localStorage.setItem('sidenav_collapsed', c ? '0' : '1'); } catch { /* ignore */ }
-    return !c;
-  });
+  // 折叠抽屉 (2026-11-19 用户要求: 不用时收进侧边只留箭头; 2026-11-20 补充:
+  // 默认收起, 展开后一段时间无点击自动收回 — 抽屉只在用的时候出现)
+  const NAV_AUTO_COLLAPSE_MS = 8000;
+  const [collapsed, setCollapsed] = React.useState(true);
+  const collapseTimer = React.useRef(null);
+  const clearCollapseTimer = () => {
+    if (collapseTimer.current) { clearTimeout(collapseTimer.current); collapseTimer.current = null; }
+  };
+  // 展开态下每次点击(跳转/把手)都重置计时, 静默 NAV_AUTO_COLLAPSE_MS 后收回
+  const bumpCollapseTimer = () => {
+    clearCollapseTimer();
+    collapseTimer.current = setTimeout(() => setCollapsed(true), NAV_AUTO_COLLAPSE_MS);
+  };
+  React.useEffect(() => () => clearCollapseTimer(), []);
+  const toggleCollapsed = () => {
+    setCollapsed((c) => {
+      if (c) { bumpCollapseTimer(); return false; }
+      clearCollapseTimer();
+      return true;
+    });
+  };
+  const jumpAndStay = (id) => {
+    jump(id);
+    if (!collapsed) bumpCollapseTimer();
+  };
   React.useEffect(() => {
     const onScroll = () => {
       // 以"最后一个滚过视口上沿 1/3 的 section"为当前项
@@ -113,7 +129,7 @@ function SideNav({ active, onActive }) {
           <button
             key={item.id}
             className={`side-nav-item${active === item.id ? ' active' : ''}`}
-            onClick={() => jump(item.id)}
+            onClick={() => jumpAndStay(item.id)}
           >
             {item.label}
           </button>
