@@ -5,7 +5,8 @@
 2. 直播间榜单: CDP Chrome 进直播间页拦响应 —
    - audience (在线观众榜): 进房自动发, 零点击;
    - hour_entrance: 进房自动发, 给 exist_tabs (tab 名 + ranklist_type);
-   - hour_detail: 点榜 tab 才发, ranklist_type 切换 (0=小时榜/全站百强, 3=人气榜, 6=新人)。
+   - hour_detail: 点榜 tab 才发, ranklist_type 切换 (0=小时榜/全站百强, 3=人气榜;
+     rt=6 新人榜已舍弃 — 2026-11-19 用户定调)。
    所有 webcast/* 带签名, 必须靠页面自己签好请求后拦响应 (a_bogus 绑参数,
    换 room_id 重放同 URL → 10011, 已实测)。
 
@@ -93,11 +94,11 @@ _LIVE_TABS: tuple[tuple[str, str], ...] = (
 
 # ranklist_type 重放表 (2026-11-15 实测定论: 换 captured URL 里的 ranklist_type
 # 在页内 fetch 重放有效 — 服务端只校验 a_bogus 与其余参数, rt 可换):
-#   0=小时榜(tab_info.Y), 3=人气榜(tab_info.N, score "100万+"), 6=新人榜(tab_info.Y)
+#   0=小时榜(tab_info.Y), 3=人气榜(tab_info.N, score "100万+")
+#   (rt=6 新人榜 2026-11-19 用户定调舍弃, 不再拉取)
 _RT_BOARDS: tuple[tuple[str, str], ...] = (
     ("hour", "0"),
     ("pop", "3"),
-    ("new", "6"),
 )
 
 
@@ -128,101 +129,16 @@ def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-# ---- app 域小时榜 delta 合并 (2026-11-18 实测定论) ----
-# web hour_detail rt=0/6 分数被服务端整体撤掉后, 数值列唯一存活来源是 app 域
-# GET webcast.amemv.com/webcast/ranklist/hour/ (rank_type=12, 需 room_id +
-# sec_anchor_id 房间身份, unidbg 签名)。该链路 rank 行 score 恒 1 (占位),
-# 但 delta = 与上一名的分差 为真实数值 (rank1 恒 0, 平名连续 0), rank 顺序与
-# web 榜一致。按 nickname 对齐把 delta 写进 hour_board 行的 score 字段, 前端
-# boardValue 已有 score 回退显示链, 无需改前端。仅小时榜合并 (人气榜 web 端
-# rt=3 的 score_str 仍正常下发)。
+# ---- 小时榜数值列现状 (2026-11-19 定论) ----
+# web hour_detail rt=0 与 app 域 ranklist/hour rt=12 的绝对分数均已确认被服务端
+# 撤掉 (web 行无数值字段; app 行 score 恒 1 占位)。app 链路唯一真实数值是
+# delta (与紧邻上一名的分差), 曾据此还原相对累计分展示 — 2026-11-19 用户否决:
+# 相对值无意义, 官方 UI 本来就显示"差N"。数值列不再造假数据, 老实留空; delta
+# 探测链路已从主流程移除 (历史实现见 git f53a12f)。
 
-# 房间身份提取 (probe20 配方): 房间页 HTML 的 ROUTER/RENDER 数据 blob 里
+# ---- 小时榜/人气榜探测备注 ----
+# 房间身份提取 (probe20 配方, 探测脚本用): 房间页 HTML 数据 blob 里
 # "roomId":"<15+位>" 与主播 "sec_uid":"MS4wLjABAAAA..."
-_RE_ROOM_ID = re.compile(r'"roomId\\?":\s*\\?"(\d{15,})')
-_RE_SEC_UID = re.compile(r'"sec_uid\\?":\s*\\?"(MS4wLjABAAAA[^"\\]{20,})')
-
-
-def _extract_room_identity(html: str) -> tuple[str, str]:
-    m = _RE_ROOM_ID.search(html)
-    room_id = m.group(1) if m else ""
-    m = _RE_SEC_UID.search(html)
-    sec_uid = m.group(1) if m else ""
-    return room_id, sec_uid
-
-
-def _fmt_gap(n: int) -> str:
-    """分差显示: 1.2万 / 3456 格式 (与抖音 UI 惯例一致)。"""
-    if n >= 10000:
-        return f"{n / 10000:.1f}万".replace(".0万", "万")
-    return str(n)
-
-
-async def _fetch_app_hour_delta(page, web_rid: str) -> dict[str, dict[str, int]]:
-    """从已打开的房间页取身份 → app 域 rt=12 拿小时榜 delta。
-    返回 {nickname: {delta, rank}} 映射 (按名对齐用); 任何一步失败返回 {}。"""
-    if _asp is None:
-        return {}
-    try:
-        html = await page.content()
-        room_id, sec_uid = _extract_room_identity(html)
-        if not room_id or not sec_uid:
-            return {}
-        q = _asp._common_q(offset=0, count=BOARD_LIMIT)
-        q.update({"hour_info": 0, "room_id": room_id, "rank_type": 12,
-                  "sec_anchor_id": sec_uid})
-        url = ("https://webcast.amemv.com/webcast/ranklist/hour/?"
-               + urllib.parse.urlencode(q))
-        body = await asyncio.to_thread(_app_request, url, _min_jar())
-        if body.get("status_code") != 0:
-            return {}
-        ranks = (body.get("data") or {}).get("ranks") or []
-        out: dict[str, dict[str, int]] = {}
-        for r in ranks[:BOARD_LIMIT]:
-            nick = ((r.get("user") or {}).get("nickname") or "")
-            if nick:
-                out[nick] = {
-                    "delta": int(r.get("delta") or 0),
-                    "rank": int(r.get("rank") or 0),
-                }
-        return out
-    except Exception:
-        return {}
-
-
-def _fill_hour_gaps(hour_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """app rt=12 delta = 与紧邻上一名的分差 (probe28/29/30 三轮实测: 非累计非单调,
-    平名连续 0, rank1 恒 0) → score[n] = score[n-1] - delta[n] 可逐行还原相对分。
-    绝对分 (score[1] 本体) 服务端已不下发; 以 rank1=0 基准展示各行的相对分:
-    rank1 显示 0 没有意义, 改显示 rank2 的 delta (第一名领先第二名的分差),
-    其余行显示自己与 rank1 的累计差。delta=0 (平名) 沿用上一行分数。"""
-    if not hour_rows:
-        return hour_rows
-    # rank1 的展示值 = rank2 的 delta (第一名领先第二名的分差); 主循环会弹掉
-    # 各行 _delta, 先取好
-    first_gap = 0
-    for r2 in hour_rows[1:]:
-        d2 = r2.get("_delta")
-        if d2 is not None:
-            first_gap = d2
-            break
-    total = 0
-    for i, row in enumerate(hour_rows):
-        delta = row.get("_delta")
-        if delta is None:
-            # app 链路只覆盖部分行 → 数据不完整, 还原该行起的空态
-            for r2 in hour_rows[i:]:
-                r2.pop("_delta", None)
-                r2["score_str"] = ""
-            break
-        if i > 0:
-            total += delta
-            row["score_str"] = _fmt_gap(total) if delta or total else ""
-        else:
-            # rank1: delta 恒 0 无意义; 显示第一名领先第二名的分差 (平名留空)
-            row["score_str"] = _fmt_gap(first_gap) if first_gap else ""
-        row.pop("_delta", None)
-    return hour_rows
 
 
 async def _tab_cap(response, sink: list) -> None:
@@ -370,16 +286,11 @@ async def _fetch_live_boards_async(web_rid: str, timeout_ms: int) -> dict[str, A
                         # tab_info 有 exist_tabs = 小时榜; null = 人气榜
                         replayed["hour" if d.get("tab_info") is not None else "pop"] = rows
 
-            # ---- app 域 delta 合并 (2026-11-18): 小时榜数值列回补 ----
-            # 页面还开着 (身份在 HTML 里), rt=12 链路 delta=与上一名分差。
-            # 失败静默降级: 面板照常出榜, 仅数值列空。
-            app_deltas = await _fetch_app_hour_delta(page, web_rid)
-
             try:
                 await page.close()
             except Exception:
                 pass
-            return _summarize_live(captured, replayed, web_rid, app_deltas)
+            return _summarize_live(captured, replayed, web_rid)
         finally:
             try:
                 await page.close()
@@ -476,22 +387,13 @@ async def _acquire_page(p, timeout_ms: int):
 
 
 def _summarize_live(captured: dict[str, Any], replayed: dict[str, list],
-                    web_rid: str, app_deltas: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
+                    web_rid: str) -> dict[str, Any]:
     if "audience" not in captured and "entrance" not in captured and not replayed:
         return {"ok": False, "reason": "未拦到榜单请求 (房间不存在/未开播/风控)"}
 
     aud_data = (captured.get("audience") or {}).get("data") or {}
     ent_data = (captured.get("entrance") or {}).get("data") or {}
 
-    hour_rows = _board_rows(replayed.get("hour") or [])
-    # 2026-11-19 用户定调: 要具体数值, 不是"差N"。delta 是相邻分差 → 逆向
-    # 还原每行的相对分 (rank1 = rank2 分差), 平名 (delta=0) 沿用上一名。
-    if app_deltas and hour_rows:
-        for row in hour_rows:
-            info = app_deltas.get(row.get("nickname") or "")
-            if info:
-                row["_delta"] = info["delta"]
-        _fill_hour_gaps(hour_rows)
     return {
         "ok": True,
         "web_rid": web_rid,
@@ -503,9 +405,8 @@ def _summarize_live(captured: dict[str, Any], replayed: dict[str, list],
             "has_more": aud_data.get("has_more"),
         },
         "period_remain_seconds": ent_data.get("period_remain_seconds"),
-        "hour_board": hour_rows,
+        "hour_board": _board_rows(replayed.get("hour") or []),
         "popularity_board": _board_rows(replayed.get("pop") or []),
-        "newbie_board": _board_rows(replayed.get("new") or []),
     }
 
 

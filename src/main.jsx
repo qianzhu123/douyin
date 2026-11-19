@@ -1735,13 +1735,11 @@ function BoardsPanel() {
     }
   }, [tab]); // eslint-disable-line
 
-  // 全站三榜 (audience 是房间私有榜, 链接入口移除后不再展示)
-  // 2026-11-16 晚: 行新增 tags (人气榜 "粉丝团：xxx"/"N人助力", 小时榜 "省份") —
-  // 服务端对 web 端不下发分数, 数值列用 tags 兜底, 避免整列 "-"
+  // 全站双榜 (audience 是房间私有榜, 链接入口移除后不再展示; 新人榜已舍弃)
+  // 数值列: score_str 为空时老实显示 "-", 不造假数据 (2026-11-19 用户定调)
   const liveBoards = live ? [
     { key: 'hour', title: '小时榜', rows: live.hour_board },
     { key: 'pop', title: '人气榜', rows: live.popularity_board },
-    { key: 'new', title: '新人榜', rows: live.newbie_board },
   ].filter((b) => b.rows?.length) : [];
   const currentBoard = liveBoards.find((b) => b.key === liveTab) || liveBoards[0];
   const boardValue = (row) => {
@@ -1854,7 +1852,7 @@ function BoardsPanel() {
             </>
           )}
           {!live && !liveErr && !liveBusy && (
-            <div className="empty">正在拉取全抖音小时榜 / 人气榜 / 新人榜…</div>
+            <div className="empty">正在拉取全抖音小时榜 / 人气榜…</div>
           )}
         </>
       )}
