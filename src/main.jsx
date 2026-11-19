@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Download, ExternalLink, FileSearch, FileUp, Loader2, Plus, RefreshCcw, RotateCw, Search, Square, Trash2 } from 'lucide-react';
+import { Activity, ChevronLeft, ChevronRight, Download, ExternalLink, FileSearch, FileUp, Loader2, Plus, RefreshCcw, RotateCw, Search, Square, Trash2 } from 'lucide-react';
 import { formatDuration } from './duration.js';
 import { buildDownloadInputText, mergeDownloadPreviews, removeDownloadPreviewItem } from './downloadPreviewState.js';
 import './styles.css';
@@ -79,6 +79,15 @@ const NAV_ITEMS = [
 ];
 
 function SideNav({ active, onActive }) {
+  // 折叠抽屉 (2026-11-19 用户要求: 不用时收进侧边只留箭头, 常见抽屉模式):
+  // 状态记忆在 localStorage, 刷新保持; hover 短暂探出方便瞥一眼 (CSS @media hover 限定)
+  const [collapsed, setCollapsed] = React.useState(() => {
+    try { return localStorage.getItem('sidenav_collapsed') === '1'; } catch { return false; }
+  });
+  const toggleCollapsed = () => setCollapsed((c) => {
+    try { localStorage.setItem('sidenav_collapsed', c ? '0' : '1'); } catch { /* ignore */ }
+    return !c;
+  });
   React.useEffect(() => {
     const onScroll = () => {
       // 以"最后一个滚过视口上沿 1/3 的 section"为当前项
@@ -98,16 +107,28 @@ function SideNav({ active, onActive }) {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
   return (
-    <nav className="side-nav">
-      {NAV_ITEMS.map((item) => (
-        <button
-          key={item.id}
-          className={`side-nav-item${active === item.id ? ' active' : ''}`}
-          onClick={() => jump(item.id)}
-        >
-          {item.label}
-        </button>
-      ))}
+    <nav className={`side-nav${collapsed ? ' collapsed' : ''}`}>
+      <button
+        type="button"
+        className="side-nav-toggle"
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? '展开导航' : '收起导航'}
+        title={collapsed ? '展开导航' : '收起导航'}
+        onClick={toggleCollapsed}
+      >
+        {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+      </button>
+      <div className="side-nav-list">
+        {NAV_ITEMS.map((item) => (
+          <button
+            key={item.id}
+            className={`side-nav-item${active === item.id ? ' active' : ''}`}
+            onClick={() => jump(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
     </nav>
   );
 }

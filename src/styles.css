@@ -963,14 +963,20 @@ button:disabled {
 .comment-text { font-size: 13px; color: #223a52; }
 .comment-meta { font-size: 11.5px; color: #8a97a5; margin-top: 3px; }
 
-/* 左侧快速导航 (2026-11-04) */
+/* 左侧快速导航 (2026-11-04; 2026-11-19 改可折叠抽屉: 不用时收进侧边只留箭头) */
 .side-nav {
   position: fixed; left: 0; top: 50%; transform: translateY(-50%);
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 6px 4px; z-index: 50;
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 6px; z-index: 50;
   background: rgba(248, 251, 255, 0.92);
   border: 1px solid #e2ecf7; border-radius: 0 8px 8px 0;
   box-shadow: 0 1px 4px rgba(30, 60, 90, 0.08);
+  /* transform 动画 (MDN: 避免改 left/width 触发重排); 收起时滑出屏幕只留 4px 探头 */
+  transition: transform 0.25s ease;
+}
+.side-nav-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 70vh; overflow-y: auto;
 }
 .side-nav-item {
   padding: 5px 10px; font-size: 12px; text-align: left;
@@ -979,6 +985,21 @@ button:disabled {
 }
 .side-nav-item:hover { background: #eef6ff; color: #1d5fa8; }
 .side-nav-item.active { background: #dcecfb; color: #1d5fa8; font-weight: 600; }
+.side-nav-toggle {
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  width: 18px; height: 34px; padding: 0;
+  border: 1px solid #d5e2f0; border-radius: 5px; background: #fff;
+  color: #5a7488; cursor: pointer;
+}
+.side-nav-toggle:hover { background: #eef6ff; color: #1d5fa8; }
+/* 收起: 滑出屏幕只留箭头把手可见 (把手在列表右侧, 故整体左移到箭头外缘) */
+.side-nav.collapsed {
+  transform: translateY(-50%) translateX(calc(-100% + 26px));
+}
+/* 桌面端 hover 短暂探出方便瞥一眼 (MDN: 仅在真支持 hover 的设备启用, 触屏走点击) */
+@media (hover: hover) {
+  .side-nav.collapsed:hover { transform: translateY(-50%) translateX(0); }
+}
 
 /* 作品数量自定义输入 */
 .posts-count-input {
