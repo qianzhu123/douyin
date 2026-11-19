@@ -1081,14 +1081,25 @@ def boards_hot() -> dict:
 
 @app.get("/api/boards/live")
 def boards_live(web_rid: str = "") -> dict:
-    """直播间榜单: 在线观众榜 + 小时榜/人气榜/新人榜 (CDP 进房拦响应+页内重放)。
-    web_rid 空则自动抓一个在播房间 (小时榜/人气榜是全站榜, 房间只是签名载体)。"""
+    """直播间榜单: 在线观众榜 + 小时榜/人气榜 (CDP 进房拦响应+页内重放)。
+    web_rid 空则自动抓一个在播房间 (小时榜/人气榜是全站榜, 房间只是签名载体)。
+    人气榜再并行打 app 域 ranklist/popularity (probe52 通): 行带官方人气值
+    gap_description (具体数值) — app 成功则覆盖 web 版 (web 版数值列恒空)。"""
     if not web_rid.strip():
         found = _boards.find_live_room()
         if not found.get("ok"):
             return {"ok": False, "reason": f"自动找房间失败: {found.get('reason', '')}"}
         web_rid = found["web_rid"]
-    return _boards.fetch_live_boards(web_rid, timeout_ms=40000)
+    import concurrent.futures as _fut
+    with _fut.ThreadPoolExecutor(max_workers=2) as pool:
+        fut_web = pool.submit(_boards.fetch_live_boards, web_rid, timeout_ms=40000)
+        fut_pop = pool.submit(_boards.fetch_popularity_board, 100)
+        result = fut_web.result()
+        app_pop = fut_pop.result()
+    if result.get("ok") and app_pop.get("ok") and app_pop.get("rows"):
+        result["popularity_board"] = app_pop["rows"]
+        result["popularity_source"] = "app"
+    return result
 
 
 @app.get("/api/boards/fans-club")

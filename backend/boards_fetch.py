@@ -136,6 +136,69 @@ def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # 相对值无意义, 官方 UI 本来就显示"差N"。数值列不再造假数据, 老实留空; delta
 # 探测链路已从主流程移除 (历史实现见 git f53a12f)。
 
+# ---- 全站人气榜 (app 域, 2026-11-19 probe52 打通) ----
+# GET webcast.amemv.com/webcast/ranklist/popularity/ ranklist_type=3, 需完整身份
+# {anchor_id, room_id, sec_anchor_id} — 从 app /webcast/feed/ 在播房间取 (身份不全
+# → sc=10011, probe45/47 教训)。行 gap_description = 官方人气值具体数值 ("100万+"
+# /"74.8万", 逐名递减), contributor_text = "N人助力" — 数值列用 gap_description,
+# 助力人数进 tags, 这是 web 链路拿不到、超出官方 UI 直观展示的数据。
+
+def fetch_popularity_board(count: int = 100) -> dict[str, Any]:
+    """全抖音人气榜 (app 域 unidbg 签名, probe52 实测 sc=0 100 行)。"""
+    if _asp is None:
+        return {"ok": False, "reason": "app 签名链不可用"}
+    try:
+        q_feed = _asp._common_q(count=20)
+        feed_url = ("https://webcast.amemv.com/webcast/feed/?" + urllib.parse.urlencode(q_feed))
+        feed = _app_request(feed_url, _min_jar())
+        rid = aid = sec = ""
+        for item in (feed.get("data") or []):
+            if not isinstance(item, dict):
+                continue
+            d = item.get("data") or {}
+            owner = d.get("owner") or {}
+            rid = d.get("id_str") or ""
+            aid = owner.get("id_str") or str(owner.get("id") or "")
+            sec = owner.get("sec_uid") or ""
+            if rid and aid and sec and (d.get("status") in (0, 2)):
+                break
+        if not (rid and aid and sec):
+            return {"ok": False, "reason": "feed 未取到在播房间身份"}
+        q = _asp._common_q()
+        q.update({"anchor_id": aid, "room_id": rid, "sec_anchor_id": sec,
+                  "sec_user_id": sec, "ranklist_type": "3"})
+        url = ("https://webcast.amemv.com/webcast/ranklist/popularity/?"
+               + urllib.parse.urlencode(q))
+        body = _app_request(url, _min_jar())
+        if body.get("status_code") != 0:
+            return {"ok": False, "reason": f"sc={body.get('status_code')}"}
+        data = body.get("data") or {}
+        rows = []
+        for r in (data.get("ranks") or [])[:count]:
+            u = None
+            users = r.get("users")
+            if isinstance(users, list) and users:
+                u = users[0] or {}
+            if not u:
+                u = r.get("user") or {}
+            tags = [str(t) for t in (r.get("tags") or []) if t]
+            helper = r.get("contributor_text") or ""
+            if helper:
+                tags.append(helper)
+            rows.append({
+                "rank": r.get("rank") if r.get("rank") is not None else r.get("index"),
+                "nickname": u.get("nickname") or "",
+                "sec_uid": u.get("sec_uid") or "",
+                "score": r.get("score") or 0,
+                # 官方人气值具体数值 ("100万+"/"74.8万"), 数值列主信号
+                "score_str": r.get("gap_description") or "",
+                "tags": tags,
+            })
+        return {"ok": True, "rows": rows}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
 # ---- 小时榜/人气榜探测备注 ----
 # 房间身份提取 (probe20 配方, 探测脚本用): 房间页 HTML 数据 blob 里
 # "roomId":"<15+位>" 与主播 "sec_uid":"MS4wLjABAAAA..."
