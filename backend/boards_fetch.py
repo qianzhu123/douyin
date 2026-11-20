@@ -123,6 +123,9 @@ def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "sec_uid": u.get("sec_uid") or "",
             "score": r.get("score") or 0,
             "score_str": r.get("score_str") or "",
+            # 2026-11-20: delta = 与上一名的分差 (app 链行有, web 链行无),
+            # 小时榜数值列用它显示 "与上一名差 N" (官方 App 同款语义)
+            "delta": r.get("delta") or 0,
             # 2026-11-16 晚: 行新增 tags (人气榜 "粉丝团：xxx"/"N人助力", 小时榜 "省份")
             "tags": [str(t) for t in (r.get("tags") or []) if t],
         })
@@ -142,6 +145,85 @@ def _board_rows(ranks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # → sc=10011, probe45/47 教训)。行 gap_description = 官方人气值具体数值 ("100万+"
 # /"74.8万", 逐名递减), contributor_text = "N人助力" — 数值列用 gap_description,
 # 助力人数进 tags, 这是 web 链路拿不到、超出官方 UI 直观展示的数据。
+
+_CN_NUM_UNIT = {"万": 10_000, "亿": 100_000_000}
+
+
+def _parse_gap_value(s: str):
+    """官方格式化人气值串 -> (数值, 是否封顶)。"100万+" -> (1_000_000, True);
+    "74.8万" -> (748_000, False); 无数字/解析失败 -> None。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    capped = s.endswith("+") or "以上" in s
+    s2 = s.rstrip("+").replace("以上", "").strip()
+    m = re.match(r"^([\d.]+)([万亿]?)$", s2)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    unit = m.group(2)
+    if unit in _CN_NUM_UNIT:
+        val *= _CN_NUM_UNIT[unit]
+    return int(round(val)), capped
+
+
+def _resolve_popularity_scores(rows: list[dict[str, Any]]) -> None:
+    """人气值标注 (2026-11-20 probe73/74 定论): rt=3 行无 delta 字段 (分差链
+    只在小时榜 rt=12), 无锚可回推。官方 gap_description 本身分两档:
+    - 非封顶精确串 ("88.3万"/"8900") → 解析成数值写 score, exact=True;
+    - 封顶串 ("100万+") → 保留官方串, exact=False (官方 App 也只显示到这)。"""
+    for row in rows:
+        p = _parse_gap_value(row.get("score_str") or "")
+        if p and not p[1]:
+            row["score"] = p[0]
+            row["exact"] = True
+        else:
+            row["exact"] = False
+
+
+def fetch_hour_deltas(count: int = 100) -> dict[str, Any]:
+    """app 域小时榜 delta (与上一名分差, 第一名恒 0) — probe72 实测。
+    绝对分无锚无解 (probe53-58 三链定论), 但 delta 是官方同款展示原料。"""
+    if _asp is None:
+        return {"ok": False, "reason": "app 签名链不可用"}
+    try:
+        q_feed = _asp._common_q(count=20)
+        feed_url = ("https://webcast.amemv.com/webcast/feed/?" + urllib.parse.urlencode(q_feed))
+        feed = _app_request(feed_url, _min_jar())
+        rid = aid = sec = ""
+        for item in (feed.get("data") or []):
+            if not isinstance(item, dict):
+                continue
+            d = item.get("data") or {}
+            owner = d.get("owner") or {}
+            rid = d.get("id_str") or ""
+            aid = owner.get("id_str") or str(owner.get("id") or "")
+            sec = owner.get("sec_uid") or ""
+            if rid and aid and sec and (d.get("status") in (0, 2)):
+                break
+        if not (rid and aid and sec):
+            return {"ok": False, "reason": "feed 未取到在播房间身份"}
+        q = _asp._common_q(offset=0, count=count)
+        q.update({"room_id": rid, "rank_type": "12", "sec_anchor_id": sec,
+                  "hour_info": "0"})
+        url = ("https://webcast.amemv.com/webcast/ranklist/hour/?"
+               + urllib.parse.urlencode(q))
+        body = _app_request(url, _min_jar())
+        if body.get("status_code") != 0:
+            return {"ok": False, "reason": f"sc={body.get('status_code')}"}
+        deltas = []
+        for r in (body.get("data") or {}).get("ranks") or []:
+            deltas.append({
+                "rank": r.get("rank") if r.get("rank") is not None else r.get("index"),
+                "delta": r.get("delta") or 0,
+            })
+        return {"ok": True, "deltas": deltas}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
 
 def fetch_popularity_board(count: int = 100) -> dict[str, Any]:
     """全抖音人气榜 (app 域 unidbg 签名, probe52 实测 sc=0 100 行)。"""
@@ -190,10 +272,11 @@ def fetch_popularity_board(count: int = 100) -> dict[str, Any]:
                 "nickname": u.get("nickname") or "",
                 "sec_uid": u.get("sec_uid") or "",
                 "score": r.get("score") or 0,
-                # 官方人气值具体数值 ("100万+"/"74.8万"), 数值列主信号
+                # 官方人气值串 ("100万+" 封顶 / "88.3万" 精确), exact 由解析标定
                 "score_str": r.get("gap_description") or "",
                 "tags": tags,
             })
+        _resolve_popularity_scores(rows)
         return {"ok": True, "rows": rows}
     except Exception as exc:
         return {"ok": False, "reason": str(exc)[:120]}
@@ -470,6 +553,8 @@ def _summarize_live(captured: dict[str, Any], replayed: dict[str, list],
         "period_remain_seconds": ent_data.get("period_remain_seconds"),
         "hour_board": _board_rows(replayed.get("hour") or []),
         "popularity_board": _board_rows(replayed.get("pop") or []),
+        # web 链行无有效数值 (probe73/74: 全零占位); 真值由 app.py 用 app 链
+        # rt=12 delta 覆盖 (hour_deltas + hour_board delta 合并)
     }
 
 

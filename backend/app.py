@@ -1083,22 +1083,35 @@ def boards_hot() -> dict:
 def boards_live(web_rid: str = "") -> dict:
     """直播间榜单: 在线观众榜 + 小时榜/人气榜 (CDP 进房拦响应+页内重放)。
     web_rid 空则自动抓一个在播房间 (小时榜/人气榜是全站榜, 房间只是签名载体)。
-    人气榜再并行打 app 域 ranklist/popularity (probe52 通): 行带官方人气值
-    gap_description (具体数值) — app 成功则覆盖 web 版 (web 版数值列恒空)。"""
+    app 域并行拉两条链 (probe52/73/74): 人气榜 gap_description 官方精确串
+    (封顶行 "100万+" 保留官方串, exact=False); 小时榜 rt=12 delta 显示与
+    上一名差值 (probe74: 人气榜 rt=3 无 delta 字段, 无链可回推)。"""
     if not web_rid.strip():
         found = _boards.find_live_room()
         if not found.get("ok"):
             return {"ok": False, "reason": f"自动找房间失败: {found.get('reason', '')}"}
         web_rid = found["web_rid"]
     import concurrent.futures as _fut
-    with _fut.ThreadPoolExecutor(max_workers=2) as pool:
+    with _fut.ThreadPoolExecutor(max_workers=3) as pool:
         fut_web = pool.submit(_boards.fetch_live_boards, web_rid, timeout_ms=40000)
         fut_pop = pool.submit(_boards.fetch_popularity_board, 100)
+        fut_hour = pool.submit(_boards.fetch_hour_deltas, 100)
         result = fut_web.result()
         app_pop = fut_pop.result()
+        app_hour = fut_hour.result()
     if result.get("ok") and app_pop.get("ok") and app_pop.get("rows"):
         result["popularity_board"] = app_pop["rows"]
         result["popularity_source"] = "app"
+    if result.get("ok") and app_hour.get("ok"):
+        # app rt=12 delta merge into hour_board rows by rank + expose real
+        # deltas at top level (web chain rows carry all-zero placeholders)
+        deltas = app_hour.get("deltas") or []
+        dmap = {d.get("rank"): d.get("delta") for d in deltas}
+        for row in result.get("hour_board") or []:
+            rk = row.get("rank")
+            if rk in dmap and dmap[rk]:
+                row["delta"] = dmap[rk]
+        result["hour_deltas"] = deltas
     return result
 
 
