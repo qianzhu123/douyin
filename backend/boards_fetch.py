@@ -174,13 +174,16 @@ def _resolve_popularity_scores(rows: list[dict[str, Any]]) -> None:
     """人气值标注 (2026-11-20 probe73/74 定论): rt=3 行无 delta 字段 (分差链
     只在小时榜 rt=12), 无锚可回推。官方 gap_description 本身分两档:
     - 非封顶精确串 ("88.3万"/"8900") → 解析成数值写 score, exact=True;
-    - 封顶串 ("100万+") → 保留官方串, exact=False (官方 App 也只显示到这)。"""
+    - 封顶串 ("100万+") → exact=False, score_str 清空 (2026-11-20 用户定调:
+      相对值/占位/封顶串都不算真数值, 不展示; 官方 App 也只显示到这)。"""
     for row in rows:
         p = _parse_gap_value(row.get("score_str") or "")
         if p and not p[1]:
             row["score"] = p[0]
             row["exact"] = True
         else:
+            row["score"] = 0
+            row["score_str"] = ""
             row["exact"] = False
 
 

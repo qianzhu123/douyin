@@ -1753,22 +1753,16 @@ function BoardsPanel() {
   }, [tab]); // eslint-disable-line
 
   // 全站双榜 (audience 是房间私有榜, 链接入口移除后不再展示; 新人榜已舍弃)
-  // 数值列: 人气榜 = 官方精确串解析值 ("88.3万"→880000, 封顶行保留"100万+");
-  // 小时榜 = "与上一名差 N" (delta, 官方 App 同款语义, 绝对分协议不下发)
+  // 数值列只显示真数值 (2026-11-20 用户定调: 相对值/占位分无意义):
+  // 人气榜 = 官方精确串解析值 ("88.3万"→880000); 封顶/无值行不显示占位"1"
   const liveBoards = live ? [
     { key: 'hour', title: '小时榜', rows: live.hour_board },
     { key: 'pop', title: '人气榜', rows: live.popularity_board },
   ].filter((b) => b.rows?.length) : [];
   const currentBoard = liveBoards.find((b) => b.key === liveTab) || liveBoards[0];
   const boardValue = (row) => {
-    if (liveTab === 'hour') {
-      if (Number(row.delta) > 0) return `与上一名差 ${formatNumber(row.delta)}`;
-      if (row.rank === 1) return '榜内基准';
-      const tags = row.tags || [];
-      return tags.length ? tags.join(' · ') : '-';
-    }
-    if (row.score) return formatNumber(row.score);
-    if (row.score_str) return row.score_str;
+    // score=1 是服务端占位分 (probe73), 排除; 只认 exact 解析出的真值
+    if (row.exact && row.score && row.score > 1) return formatNumber(row.score);
     const tags = row.tags || [];
     return tags.length ? tags.join(' · ') : '-';
   };
