@@ -1676,6 +1676,21 @@ function BoardsPanel() {
   const [cityQuery, setCityQuery] = React.useState(''); // 城市搜索 (下拉 370 项, 输入过滤)
   const [city, setCity] = React.useState(null);
   const [cityBusy, setCityBusy] = React.useState(false);
+  // 游戏分区榜 (gamecp, 2026-11-21 tpl 枚举新数据源)
+  const [game, setGame] = React.useState(null);
+  const [gameBusy, setGameBusy] = React.useState(false);
+
+  const loadGame = React.useCallback(async () => {
+    setGameBusy(true);
+    try {
+      const d = await fetch(`${API_BASE}/api/boards/game`).then((r) => r.json());
+      setGame(d.ok ? d : { ok: false, reason: d.reason || '失败' });
+    } catch (e) {
+      setGame({ ok: false, reason: String(e.message || e) });
+    } finally {
+      setGameBusy(false);
+    }
+  }, []);
 
   const loadHot = React.useCallback(async () => {
     setHotBusy(true);
@@ -1751,6 +1766,10 @@ function BoardsPanel() {
       if (!city && !cityBusy && cityCode) loadCity(cityCode);
     }
   }, [tab]); // eslint-disable-line
+  // 切到游戏榜自动拉一次 (unidbg 签名单轮 ~12s)
+  React.useEffect(() => {
+    if (tab === 'game' && !game && !gameBusy) loadGame();
+  }, [tab]); // eslint-disable-line
 
   // 全站双榜 (audience 是房间私有榜, 链接入口移除后不再展示; 新人榜已舍弃)
   // 数值列只显示真数值 (2026-11-20 用户定调: 相对值/占位分无意义):
@@ -1781,6 +1800,9 @@ function BoardsPanel() {
           {tab === 'live'
             ? <button onClick={loadLive} disabled={liveBusy}>{liveBusy ? '拉取中… (约30-60s)' : '刷新'}</button>
             : null}
+          {tab === 'game'
+            ? <button onClick={loadGame} disabled={gameBusy}>{gameBusy ? '拉取中… (约15s)' : '刷新'}</button>
+            : null}
           {tab === 'city'
             ? <button onClick={() => loadCity(cityCode)} disabled={cityBusy}>{cityBusy ? '拉取中… (约15s)' : '刷新'}</button>
             : null}
@@ -1788,7 +1810,7 @@ function BoardsPanel() {
       </div>
 
       <div className="fansclub-toolbar">
-        {[['hot', '抖音热榜'], ['live', '直播榜'], ['city', '地区直播榜']].map(([k, label]) => (
+        {[['hot', '抖音热榜'], ['live', '直播榜'], ['game', '游戏榜'], ['city', '地区直播榜']].map(([k, label]) => (
           <button key={k} className={`fansclub-tab${tab === k ? ' active' : ''}`} onClick={() => setTab(k)}>
             {label}
           </button>
@@ -1872,6 +1894,34 @@ function BoardsPanel() {
             <div className="empty">正在拉取全抖音小时榜 / 人气榜…</div>
           )}
         </>
+      )}
+
+      {tab === 'game' && (
+        game?.ok ? (
+          <div className="board-scroll">
+            <div className="t6-boards">
+              <div className="t6-board" style={{ gridColumn: '1 / -1' }}>
+                <div className="t6-board-title"><span>全抖音 · 游戏主播榜</span></div>
+                <div className="t6-board-rows">
+                  {game.rows.map((row, i) => (
+                    <div key={`${row.sec_uid || row.rank}-${i}`} className="t6-row">
+                      <span className={`t6-rank${i < 3 ? ' top' : ''}`}>#{row.rank ?? i + 1}</span>
+                      <span className="t6-name" title={row.sub_title || row.nickname}>
+                        {row.nickname}
+                        {row.game && <span className="board-tag">{row.game}</span>}
+                      </span>
+                      <span className="t6-value">
+                        {row.exact && row.score ? formatNumber(row.score) : (row.sub_title || '-')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="empty">{game ? `游戏榜拉取失败: ${game.reason}` : (gameBusy ? '加载中…' : '')}</div>
+        )
       )}
 
       {tab === 'city' && (

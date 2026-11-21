@@ -620,6 +620,57 @@ def fetch_fans_club_board(count: int = 50) -> dict[str, Any]:
         return {"ok": False, "reason": str(exc)[:120]}
 
 
+def fetch_game_board(count: int = 100) -> dict[str, Any]:
+    """游戏分区主播榜: GET webcast.amemv.com/webcast/gamecp/ranklist/anchor/
+    (tpl_824896 枚举新测, 2026-11-21 sc=0)。行: rank/score("100万+"首名封顶,
+    其余精确 "80.1万")/promoted_game/sub_title("N人在看")。offset 不翻页。"""
+    if _asp is None:
+        return {"ok": False, "reason": "app 签名链不可用"}
+    try:
+        q_feed = _asp._common_q(count=20)
+        feed_url = ("https://webcast.amemv.com/webcast/feed/?" + urllib.parse.urlencode(q_feed))
+        feed = _app_request(feed_url, _min_jar())
+        rid = aid = sec = ""
+        for item in (feed.get("data") or []):
+            if not isinstance(item, dict):
+                continue
+            d = item.get("data") or {}
+            owner = d.get("owner") or {}
+            rid = d.get("id_str") or ""
+            aid = owner.get("id_str") or str(owner.get("id") or "")
+            sec = owner.get("sec_uid") or ""
+            if rid and aid and sec and (d.get("status") in (0, 2)):
+                break
+        if not (rid and aid and sec):
+            return {"ok": False, "reason": "feed 未取到在播房间身份"}
+        q = _asp._common_q()
+        q.update({"anchor_id": aid, "room_id": rid, "sec_anchor_id": sec})
+        url = ("https://webcast.amemv.com/webcast/gamecp/ranklist/anchor/?"
+               + urllib.parse.urlencode(q))
+        body = _app_request(url, _min_jar())
+        if body.get("status_code") != 0:
+            return {"ok": False, "reason": f"sc={body.get('status_code')}"}
+        data = body.get("data") or {}
+        rows = []
+        for r in (data.get("ranks") or [])[:count]:
+            u = r.get("user") or {}
+            score_str = r.get("score") or ""
+            p = _parse_gap_value(score_str)
+            rows.append({
+                "rank": r.get("rank"),
+                "nickname": u.get("nickname") or "",
+                "sec_uid": u.get("sec_uid") or "",
+                "score": p[0] if (p and not p[1]) else 0,
+                "score_str": score_str if (p and not p[1]) else "",
+                "exact": bool(p and not p[1]),
+                "game": r.get("promoted_game") or "",
+                "sub_title": r.get("sub_title") or "",
+            })
+        return {"ok": True, "rows": rows}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
 def fetch_city_rooms(city_code: str, count: int = 20) -> dict[str, Any]:
     """地区直播榜: GET webcast.amemv.com/webcast/feed/ 带 city_code
     (城市级, 如郑州 410100 / 广州 440100; 2026-11-15 实测两城列表完全不同,

@@ -1124,6 +1124,15 @@ def boards_fans_club() -> dict:
         return {"ok": False, "reason": str(exc)[:120]}
 
 
+@app.get("/api/boards/game")
+def boards_game() -> dict:
+    """游戏分区主播榜 (gamecp/ranklist/anchor, tpl_824896 枚举 2026-11-21)。"""
+    try:
+        return _boards.fetch_game_board(100)
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
 @app.get("/api/boards/cities")
 def boards_cities() -> dict:
     """地级市 code+name 列表 (地区榜城市下拉, 24h 缓存)。"""
