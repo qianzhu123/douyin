@@ -72,6 +72,7 @@ const NAV_ITEMS = [
   { id: 'sec-t6', label: '主播榜单' },
   { id: 'sec-boards', label: '榜单' },
   { id: 'sec-fansclub', label: '粉丝团' },
+  { id: 'sec-user-query', label: '用户查询' },
   { id: 'sec-posts', label: '作品/评论' },
   { id: 'sec-liked', label: '我的喜欢' },
   { id: 'sec-download', label: '视频下载' },
@@ -899,6 +900,99 @@ function FansClubPanel({ apiRef }) {
           上次检测：{fmtDayTime(checkedAt)}
           {checking && ' · 本次检测中…'}
         </div>
+      )}
+    </section>
+  );
+}
+
+// ---- 任意用户查询 (消费等级 + 粉丝团; 后端 backend/user_query.py 只读三段链) ----
+function UserQueryPanel() {
+  const [input, setInput] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [error, setError] = React.useState('');
+
+  const run = async () => {
+    const q = input.trim();
+    if (!q || busy) return;
+    setBusy(true);
+    setError('');
+    setResult(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/user-query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setResult(d);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const u = result?.user;
+  const clubs = (result?.clubs || []).filter((c) => c.user_join_status === 2);
+
+  return (
+    <section className="panel" id="sec-user-query">
+      <div className="panel-head">
+        <div>
+          <h2>用户查询</h2>
+          <p>任意用户的消费等级与粉丝团（输入数字 uid / sec_uid / 主页链接）</p>
+        </div>
+      </div>
+      <div className="user-query-bar">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && run()}
+          placeholder="例: 63871524957 或 MS4wLjAB... 或 https://www.douyin.com/user/MS4wLjAB..."
+          disabled={busy}
+        />
+        <button onClick={run} disabled={busy || !input.trim()}>
+          {busy ? '查询中…' : '查询'}
+        </button>
+      </div>
+      {busy && <div className="notice">查询中（webcast 段需离线签名，约 15-30 秒）…</div>}
+      {error && <div className="notice">查询失败：{error}</div>}
+      {result && !result.ok && <div className="notice">无法解析输入：{result.reason}</div>}
+      {u && (
+        <div className="user-query-head">
+          <div className="uq-nick">{u.nickname || u.uid}</div>
+          <div className="uq-pay">
+            消费等级 {u.pay_level != null ? `Lv.${u.pay_level}` : '未公开'}
+            {u.pay_level != null && u.grade_min != null && (
+              <span className="uq-diamond">
+                {' '}（💎 {(u.grade_min / 10000).toFixed(0)}k
+                {u.grade_max ? ` - ${(u.grade_max / 10000).toFixed(0)}k` : '+'}）
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+      {clubs.length > 0 && (
+        <div className="user-query-clubs">
+          <div className="uq-clubs-title">粉丝团（加入 {clubs.length} 个）</div>
+          {clubs.map((c) => (
+            <div key={c.fandom_id} className="uq-club-row">
+              <span className="uq-club-title">{c.title}</span>
+              <span className="uq-club-meta">
+                灯牌等级 {c.level != null ? `Lv.${c.level}` : '未公开'}
+                {c.joined_days != null && ` · 入团 ${c.joined_days} 天`}
+                {c.continues_sign_days != null && ` · 连签 ${c.continues_sign_days} 天`}
+                {c.fans_count != null && ` · 团 ${formatNumber(c.fans_count)} 人`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {u && clubs.length === 0 && !busy && <div className="notice">该用户未加入任何粉丝团（或粉丝团数据不可见）</div>}
+      {result?.errors?.length > 0 && (
+        <div className="notice">部分数据缺失：{result.errors.join('；')}</div>
       )}
     </section>
   );
@@ -2806,6 +2900,8 @@ function App() {
 
         <FansClubPanel apiRef={fansclubApi} />
         {/* 直播间分析面板暂缓接入: 直播数据面分析仍在逆向 lab 进行, 完成后再接 (git 历史 8d79d39) */}
+
+        <UserQueryPanel />
 
         <PostsPanel accounts={accounts} />
 

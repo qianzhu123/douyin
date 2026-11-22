@@ -1560,3 +1560,38 @@ select.liked-filter-input { min-width: 200px; }
   background: var(--surface, #fff);
 }
 .board-scroll .t6-boards { margin-top: 0; }
+
+/* ---- 用户查询面板 (任意用户消费等级 + 粉丝团) ---- */
+.user-query-bar {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+.user-query-bar input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid #dde5ee;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.user-query-head {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin: 10px 0 6px;
+}
+.uq-nick { font-size: 16px; font-weight: 700; }
+.uq-pay { font-size: 14px; color: #c47f17; font-weight: 600; }
+.uq-diamond { font-size: 12px; color: #8a94a6; font-weight: 400; }
+.uq-clubs-title { font-size: 13px; font-weight: 600; color: #5a6572; margin: 8px 0 4px; }
+.uq-club-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 4px;
+  border-bottom: 1px solid #f0f2f5;
+  font-size: 13px;
+}
+.uq-club-row:last-child { border-bottom: none; }
+.uq-club-title { font-weight: 600; }
+.uq-club-meta { color: #7a8494; font-size: 12px; white-space: nowrap; }

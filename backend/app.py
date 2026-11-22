@@ -438,6 +438,24 @@ def fansclub_check_status() -> dict:
     return _fc.check_all_status()
 
 
+# ---- 任意用户查询 (消费等级 + 粉丝团, 只读; 见 backend/user_query.py) ----
+from .schemas import UserQueryRequest
+
+
+@app.post("/api/user-query")
+def user_query(payload: UserQueryRequest) -> dict:
+    """查询任意用户: 消费等级 + 各粉丝团 (uid/sec_uid/主页链接)。
+
+    只读三段链 (webcast/user/ + fandoms + personal/meta); webcast 段走 unidbg
+    离线签名 (~12s/签), fandom 段 X-Tt-Token 直连。单段失败不整体失败。
+    """
+    from . import user_query as _uq
+    try:
+        return _uq.query_user(payload.query)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+
+
 # ---- 用户作品列表 (两头配方直连, 只读, 见 backend/aweme_read.py) ----
 from . import aweme_read as _ar
 from .schemas import PostListRequest

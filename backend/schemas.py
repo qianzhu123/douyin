@@ -119,6 +119,10 @@ class PaygradeRequest(BaseModel):
     sec_uid: str
 
 
+class UserQueryRequest(BaseModel):
+    query: str  # 数字 uid / sec_uid / 抖音主页链接
+
+
 class SearchCandidate(BaseModel):
     nickname: str = ""
     unique_id: str = ""
