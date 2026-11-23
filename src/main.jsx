@@ -906,6 +906,17 @@ function FansClubPanel({ apiRef }) {
 }
 
 // ---- 任意用户查询 (消费等级 + 粉丝团; 后端 backend/user_query.py 只读三段链) ----
+// 展示样式对齐第三方查询 App (用户 2026-11-23 指定): 头像 + 昵称 + 消费等级
+// + 大概花费 (现金元; pay_grade 单位是钻, 1元=10钻, 区间÷10)。
+function formatCash(diamond) {
+  if (diamond == null) return null;
+  const yuan = diamond / 10;
+  if (yuan >= 100000000) return `${(yuan / 100000000).toFixed(1)}亿`;
+  if (yuan >= 10000) return `${Math.round(yuan / 10000)}万`;
+  if (yuan >= 1000) return `${(yuan / 1000).toFixed(1)}k`;
+  return `${Math.round(yuan)}`;
+}
+
 function UserQueryPanel() {
   const [input, setInput] = React.useState('');
   const [busy, setBusy] = React.useState(false);
@@ -942,7 +953,7 @@ function UserQueryPanel() {
       <div className="panel-head">
         <div>
           <h2>用户查询</h2>
-          <p>任意用户的消费等级与粉丝团（输入数字 uid / sec_uid / 主页链接）</p>
+          <p>任意用户的消费等级与粉丝团（抖音号 / uid / 分享链接均可）</p>
         </div>
       </div>
       <div className="user-query-bar">
@@ -950,27 +961,34 @@ function UserQueryPanel() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && run()}
-          placeholder="例: 63871524957 或 MS4wLjAB... 或 https://www.douyin.com/user/MS4wLjAB..."
+          placeholder="抖音号 / uid / sec_uid / 分享链接（整段口令可直接粘贴）"
           disabled={busy}
         />
         <button onClick={run} disabled={busy || !input.trim()}>
           {busy ? '查询中…' : '查询'}
         </button>
       </div>
-      {busy && <div className="notice">查询中（webcast 段需离线签名，约 15-30 秒）…</div>}
+      {busy && <div className="notice">查询中（需离线签名，约 15-45 秒）…</div>}
       {error && <div className="notice">查询失败：{error}</div>}
       {result && !result.ok && <div className="notice">无法解析输入：{result.reason}</div>}
       {u && (
-        <div className="user-query-head">
-          <div className="uq-nick">{u.nickname || u.uid}</div>
-          <div className="uq-pay">
-            消费等级 {u.pay_level != null ? `Lv.${u.pay_level}` : '未公开'}
-            {u.pay_level != null && u.grade_min != null && (
-              <span className="uq-diamond">
-                {' '}（💎 {(u.grade_min / 10000).toFixed(0)}k
-                {u.grade_max ? ` - ${(u.grade_max / 10000).toFixed(0)}k` : '+'}）
-              </span>
-            )}
+        <div className="uq-head">
+          {u.avatar ? (
+            <img className="uq-avatar" src={u.avatar} alt="" referrerPolicy="no-referrer" />
+          ) : (
+            <div className="uq-avatar uq-avatar-blank">{(u.nickname || '?').slice(0, 1)}</div>
+          )}
+          <div className="uq-head-info">
+            <div className="uq-nick">{u.nickname || u.uid}</div>
+            <div className="uq-pay">
+              {u.pay_level != null ? `当前消费等级 Lv.${u.pay_level}` : '消费等级 未公开'}
+              {u.pay_level != null && u.grade_min != null && (
+                <span className="uq-cash">
+                  {' '}（约 {formatCash(u.grade_min)}
+                  {u.grade_max ? ` - ${formatCash(u.grade_max)}` : ' 以上'} 元）
+                </span>
+              )}
+            </div>
           </div>
         </div>
       )}

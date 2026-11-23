@@ -125,13 +125,53 @@ def _token_get(url: str, token: str) -> dict:
 # ---- 输入解析 ----
 
 _SEC_RE = re.compile(r"MS4wLjABAAAA[0-9A-Za-z_-]{38,}")
+_SHORT_LINK_RE = re.compile(r"https?://v\.douyin\.com/[A-Za-z0-9_.\-]+/?", re.I)
+
+
+def resolve_short_link(url: str) -> str | None:
+    """v.douyin.com 短链 → 302 Location 提取 sec_uid (app.py resolve-link 同配方).
+
+    分享口令里的完整文本可直接传入 — 先正则抠出短链再解。
+    """
+    m = _SHORT_LINK_RE.search(url or "")
+    if not m:
+        return None
+    import httpx
+    try:
+        r = httpx.get(m.group(0), follow_redirects=False, timeout=8)
+        loc = r.headers.get("location", "") or ""
+    except Exception:
+        return None
+    m2 = _SEC_RE.search(loc)
+    return m2.group(0) if m2 else None
+
+
+# 抖音号 (unique_id): 字母数字 1-30 位, 可含 . _ (纯数字除外 — 纯数字优先按 uid)
+_DOUYIN_ID_RE = re.compile(r"^[A-Za-z0-9._\-]{4,30}$")
+
+
+def resolve_douyin_id(douyin_id: str) -> str | None:
+    """抖音号 → sec_uid (aweme/v1/search/sug/ 联想卡; unidbg 签名).
+
+    sug 的联想词 extra_info 对精确抖音号命中会带账号卡 sec_uid
+    (陈泽 9896719. 实测; 非抖音号无结果, 精确度可靠, 覆盖 best-effort)。
+    """
+    q = _common_q(keyword=douyin_id, source="search_sug_app")
+    url = "https://aweme.snssdk.com/aweme/v1/search/sug/?" + urlencode(q)
+    try:
+        d = _signed_get(url)
+    except Exception:
+        return None
+    s = json.dumps(d, ensure_ascii=False) if isinstance(d, dict) else ""
+    m = _SEC_RE.search(s)
+    return m.group(0) if m else None
 
 
 def parse_query(text: str) -> dict:
-    """识别输入形态: {'kind': 'uid'|'sec_uid', 'value': str}.
+    """识别输入形态: {'kind': 'uid'|'sec_uid'|'douyin_id', 'value': str}.
 
-    支持: 纯数字 uid / sec_uid 原文 / 任何含 sec_uid 或 /user/<sec_uid>/ 的链接.
-    短链 (v.douyin.com) 不在此解析 — 前端提示改用主页长链或 sec_uid.
+    支持: 纯数字 uid / sec_uid 原文 / 含 sec_uid 的主页链接 / v.douyin.com 短链
+    (含整段分享口令文本 — 302 Location 解析) / 抖音号 (字母数字, sug 联想解析)。
     """
     text = (text or "").strip()
     if not text:
@@ -141,10 +181,15 @@ def parse_query(text: str) -> dict:
     m = _SEC_RE.search(text)
     if m:
         return {"kind": "sec_uid", "value": m.group(0)}
-    if "v.douyin.com" in text:
+    if _SHORT_LINK_RE.search(text):
+        sec = resolve_short_link(text)
+        if sec:
+            return {"kind": "sec_uid", "value": sec}
         return {"kind": "invalid", "value": text,
-                "reason": "短链请先在浏览器打开取主页长链, 或直接粘贴 sec_uid/uid"}
-    return {"kind": "invalid", "value": text, "reason": "无法识别: 需数字 uid 或 sec_uid"}
+                "reason": "短链解析失败 (网络/链接失效), 请改粘主页长链或 sec_uid"}
+    if _DOUYIN_ID_RE.match(text) and not text.isdigit():
+        return {"kind": "douyin_id", "value": text}
+    return {"kind": "invalid", "value": text, "reason": "无法识别: 需 uid / sec_uid / 抖音号 / 主页链接"}
 
 
 # ---- sec_uid → uid ----
@@ -179,9 +224,12 @@ def pay_grade_of(uid: str) -> dict | None:
     data = d.get("data") if isinstance(d.get("data"), dict) else d
     u = data.get("user") or data
     pg = u.get("pay_grade") or {}
+    av = (u.get("avatar_medium") or u.get("avatar_thumb") or {})
+    av_urls = av.get("url_list") or []
     return {
         "uid": str(u.get("id_str") or u.get("id") or uid),
         "nickname": u.get("nickname"),
+        "avatar": av_urls[0] if av_urls else (av.get("uri") or ""),
         "pay_level": pg.get("level"),
         "total_diamond": pg.get("total_diamond_count"),
         "grade_min": pg.get("this_grade_min_diamond"),
@@ -238,9 +286,20 @@ def query_user(raw_text: str) -> dict:
     token = _pick_token()
     errors: list[str] = []
 
-    # 1. uid
+    # 1. uid (sec_uid 需解析; 抖音号需先 sug 联想出 sec_uid)
     if parsed["kind"] == "sec_uid":
         uid = resolve_uid(parsed["value"], token)
+        if not uid:
+            return {"ok": False, "input": raw_text,
+                    "reason": "sec_uid 解析 uid 失败 (签名/网络)", "user": None,
+                    "clubs": [], "errors": []}
+    elif parsed["kind"] == "douyin_id":
+        sec = resolve_douyin_id(parsed["value"])
+        if not sec:
+            return {"ok": False, "input": raw_text,
+                    "reason": "抖音号未匹配到用户 — 确认号码无误, 或改用「分享链接」粘贴",
+                    "user": None, "clubs": [], "errors": []}
+        uid = resolve_uid(sec, token)
         if not uid:
             return {"ok": False, "input": raw_text,
                     "reason": "sec_uid 解析 uid 失败 (签名/网络)", "user": None,

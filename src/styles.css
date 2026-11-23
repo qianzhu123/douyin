@@ -1595,3 +1595,35 @@ select.liked-filter-input { min-width: 200px; }
 .uq-club-row:last-child { border-bottom: none; }
 .uq-club-title { font-weight: 600; }
 .uq-club-meta { color: #7a8494; font-size: 12px; white-space: nowrap; }
+
+/* 用户查询: 头像头部 (对齐第三方查询 App 样式, 2026-11-23) */
+.uq-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 8px;
+  padding: 10px 12px;
+  border: 1px solid #eef1f5;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+.uq-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.uq-avatar-blank {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e3eaf3;
+  color: #6b7a8d;
+  font-size: 22px;
+  font-weight: 700;
+}
+.uq-head-info { min-width: 0; }
+.uq-head-info .uq-nick { font-size: 16px; font-weight: 700; }
+.uq-pay { font-size: 14px; color: #c47f17; font-weight: 600; margin-top: 2px; }
+.uq-cash { font-size: 12px; color: #8a94a6; font-weight: 400; }
