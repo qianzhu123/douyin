@@ -18,9 +18,11 @@ All tool locations are hard-coded relative to the project root in `backend/confi
 ## Run
 
 ```powershell
-python -m uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000
+# 2026-11-23: bare "python" hits the MS Store stub; the launcher (scripts/start-douyin.ps1)
+# pins the tools uv venv. Manual run:
+D:\tools\Dev\Runtime\uvenvs\tools\Scripts\python.exe -X utf8 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
 npm install
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5175 --strictPort
 ```
 
 Open `http://127.0.0.1:5175`.
