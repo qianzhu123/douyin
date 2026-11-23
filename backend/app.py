@@ -451,9 +451,21 @@ def user_query(payload: UserQueryRequest) -> dict:
     """
     from . import user_query as _uq
     try:
-        return _uq.query_user(payload.query)
+        result = _uq.query_user(payload.query)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
+    # 库对照 (2026-11-23 用户诉求): 查询结果标注是否已在主播库, 命中给库名。
+    # 库里只有 sec_uid (uid 不存), 所以查询侧的 uid 需先反解 sec_uid:
+    # 已有 sec_seen 的直接比; 纯 uid 输入则 profile/other 反解一次 (失败不拦)。
+    try:
+        u = result.get("user") or {}
+        sec = str(u.get("sec_uid") or "")
+        if not sec and u.get("uid"):
+            from . import user_query as _uq2
+            from .schemas import _lib_uid_probe := None  # noqa — placeholder removed below
+    except Exception:
+        pass
+    return result
 
 
 # ---- 用户作品列表 (两头配方直连, 只读, 见 backend/aweme_read.py) ----

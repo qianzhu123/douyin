@@ -296,7 +296,9 @@ def query_user(raw_text: str) -> dict:
     errors: list[str] = []
 
     # 1. uid (sec_uid 需解析; 抖音号需先 sug 联想出 sec_uid)
+    sec_seen: str | None = None  # 途中拿到的 sec_uid (库对照用)
     if parsed["kind"] == "sec_uid":
+        sec_seen = parsed["value"]
         uid = resolve_uid(parsed["value"], token)
         if not uid:
             return {"ok": False, "input": raw_text,
@@ -308,6 +310,7 @@ def query_user(raw_text: str) -> dict:
             return {"ok": False, "input": raw_text,
                     "reason": "抖音号未匹配到用户 — 确认号码无误, 或改用「分享链接」粘贴",
                     "user": None, "clubs": [], "errors": []}
+        sec_seen = sec
         uid = resolve_uid(sec, token)
         if not uid:
             return {"ok": False, "input": raw_text,
@@ -318,6 +321,8 @@ def query_user(raw_text: str) -> dict:
 
     # 2. 消费等级
     user: dict = {"uid": uid}
+    if sec_seen:
+        user["sec_uid"] = sec_seen
     try:
         pg = pay_grade_of(uid)
         if pg:

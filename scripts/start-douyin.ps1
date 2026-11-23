@@ -191,9 +191,13 @@ if ($backendAlready) {
             try { Set-Content -LiteralPath $logFile -Value "" -Encoding UTF8 -ErrorAction Stop } catch {}
         }
     }
+    # 2026-11-23: bare "python" hits the Microsoft Store stub (WindowsApps alias),
+    # backend never binds port 8000 -> "backend not ready in 30s" popup.
+    # Use the tools uv venv absolute path (has fastapi/uvicorn/playwright/httpx).
+    $BackendPython = "D:\tools\Dev\Runtime\uvenvs\tools\Scripts\python.exe"
     Start-HiddenProcess `
-        -FilePath "python" `
-        -ArgumentList @("-m", "uvicorn", "backend.app:app", "--host", "127.0.0.1", "--port", "8000") `
+        -FilePath $BackendPython `
+        -ArgumentList @("-X", "utf8", "-m", "uvicorn", "backend.app:app", "--host", "127.0.0.1", "--port", "8000") `
         -WorkingDirectory $ProjectRoot `
         -StdOut $BackendLog `
         -StdErr $BackendErr

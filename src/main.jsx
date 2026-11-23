@@ -979,7 +979,14 @@ function UserQueryPanel() {
             <div className="uq-avatar uq-avatar-blank">{(u.nickname || '?').slice(0, 1)}</div>
           )}
           <div className="uq-head-info">
-            <div className="uq-nick">{u.nickname || u.uid}</div>
+            <div className="uq-nick">
+              {u.nickname || u.uid}
+              {result?.in_library ? (
+                <span className="uq-lib-badge" title={`已在主播库：${result.in_library.label}`}>· 已在主播库</span>
+              ) : (
+                <span className="uq-lib-badge uq-lib-badge-out">· 不在主播库</span>
+              )}
+            </div>
             <div className="uq-pay">
               {u.pay_level != null ? `当前消费等级 Lv.${u.pay_level}` : '消费等级 未公开'}
               {u.pay_level != null && u.grade_min != null && (
