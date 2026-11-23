@@ -237,6 +237,7 @@ def pay_grade_of(uid: str) -> dict | None:
     av_urls = av.get("url_list") or []
     return {
         "uid": str(u.get("id_str") or u.get("id") or uid),
+        "sec_uid": u.get("sec_uid") or (data.get("sec_uid") if isinstance(data, dict) else "") or "",
         "nickname": u.get("nickname"),
         "avatar": av_urls[0] if av_urls else (av.get("uri") or ""),
         "pay_level": pg.get("level"),

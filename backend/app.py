@@ -454,12 +454,24 @@ def user_query(payload: UserQueryRequest) -> dict:
         result = _uq.query_user(payload.query)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
-    # 查询专属库对照 (2026-11-24, 独立于直播监控 users.json)
+    # 查询专属库对照 (2026-11-24, 独立于直播监控 users.json)。
+    # 命中时顺带回填本次查询拿到的头像/消费等级 (库内数据保持新鲜)。
     try:
         sec = str((result.get("user") or {}).get("sec_uid") or "")
         lib = load_query_lib()
         hit = next((e for e in lib if e.sec_uid == sec), None)
         result["in_query_lib"] = hit.model_dump() if hit else None
+        if hit:
+            u = result.get("user") or {}
+            fresh = {k: getattr(hit, k) for k in
+                     ("avatar_url", "pay_level", "nickname")}
+            if u.get("avatar") and u["avatar"] != fresh["avatar_url"]:
+                hit.avatar_url = u["avatar"]
+            if u.get("pay_level") is not None:
+                hit.pay_level = u["pay_level"]
+            if u.get("nickname") and not fresh["nickname"]:
+                hit.nickname = u["nickname"]
+            save_query_lib([e if e.sec_uid != hit.sec_uid else hit for e in lib])
     except Exception:
         result["in_query_lib"] = None
     return result
