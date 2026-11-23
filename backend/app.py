@@ -454,26 +454,80 @@ def user_query(payload: UserQueryRequest) -> dict:
         result = _uq.query_user(payload.query)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)[:160]) from exc
-    # 库对照 (2026-11-23 用户诉求): 查询结果标注是否已在主播库, 命中给库名。
-    # 库里只有 sec_uid (uid 不存), 查询侧的 uid 需反解一次 sec_uid 才能比
-    # (失败不拦, 只影响"已在主播库"标注)。
+    # 查询专属库对照 (2026-11-24, 独立于直播监控 users.json)
     try:
-        u = result.get("user") or {}
-        sec = str(u.get("sec_uid") or "")
-        if not sec and u.get("uid"):
-            token = _uq._pick_token()
-            sec = _uq.resolve_uid(str(u["uid"]), token) or ""
-            if sec:
-                u["sec_uid"] = sec
-        if sec:
-            for entry in monitor_service.list_users():
-                if (entry.sec_uid or "") == sec:
-                    result["in_library"] = {"label": entry.label or entry.nickname or "",
-                                            "sec_uid": sec}
-                    break
+        sec = str((result.get("user") or {}).get("sec_uid") or "")
+        lib = load_query_lib()
+        hit = next((e for e in lib if e.sec_uid == sec), None)
+        result["in_query_lib"] = hit.model_dump() if hit else None
     except Exception:
-        pass  # 库对照失败不影响查询结果
+        result["in_query_lib"] = None
     return result
+
+
+# ---- 用户查询专属库 (独立 JSON, 与直播监控主播库零关联; 2026-11-24 用户定论) ----
+import json as _json_ql
+from datetime import datetime as _dt_ql
+
+from .config import QUERY_LIB_FILE
+from .schemas import QueryLibEntry, QueryLibToggleRequest, QueryLibReorderRequest
+
+
+def load_query_lib() -> list[QueryLibEntry]:
+    if not QUERY_LIB_FILE.exists():
+        return []
+    try:
+        raw = _json_ql.loads(QUERY_LIB_FILE.read_text(encoding="utf-8"))
+        return [QueryLibEntry(**e) for e in raw]
+    except Exception:
+        return []
+
+
+def save_query_lib(entries: list[QueryLibEntry]) -> None:
+    QUERY_LIB_FILE.write_text(
+        _json_ql.dumps([e.model_dump() for e in entries], ensure_ascii=False, indent=1),
+        encoding="utf-8")
+
+
+@app.get("/api/query-lib")
+def query_lib_list() -> dict:
+    return {"entries": [e.model_dump() for e in load_query_lib()]}
+
+
+@app.post("/api/query-lib/toggle")
+def query_lib_toggle(payload: QueryLibToggleRequest) -> dict:
+    """加/移出查询专属库: 在库即移出, 不在即加入 (需带 entry 全量字段)。"""
+    entries = load_query_lib()
+    kept = [e for e in entries if e.sec_uid != payload.sec_uid]
+    if len(kept) != len(entries):  # 命中 → 原本在库 → 移出
+        save_query_lib(kept)
+        return {"action": "removed", "entries": [e.model_dump() for e in kept]}
+    if payload.entry is None:
+        raise HTTPException(status_code=400, detail="加入查询库需要 entry 字段")
+    if not payload.entry.sec_uid:
+        raise HTTPException(status_code=400, detail="entry.sec_uid is required.")
+    if not payload.entry.added_at:
+        payload.entry.added_at = _dt_ql.now().isoformat(timespec="seconds")
+    entries.append(payload.entry)
+    save_query_lib(entries)
+    return {"action": "added", "entries": [e.model_dump() for e in entries]}
+
+
+@app.delete("/api/query-lib/{sec_uid}")
+def query_lib_delete(sec_uid: str) -> dict:
+    entries = load_query_lib()
+    kept = [e for e in entries if e.sec_uid != sec_uid]
+    save_query_lib(kept)
+    return {"entries": [e.model_dump() for e in kept]}
+
+
+@app.post("/api/query-lib/reorder")
+def query_lib_reorder(payload: QueryLibReorderRequest) -> dict:
+    by_sec = {e.sec_uid: e for e in load_query_lib()}
+    ordered = [by_sec[s] for s in payload.sec_uids if s in by_sec]
+    ordered += [e for e in load_query_lib() if e.sec_uid not in set(payload.sec_uids)]
+    save_query_lib(ordered)
+    return {"entries": [e.model_dump() for e in ordered]}
 
 
 # ---- 用户作品列表 (两头配方直连, 只读, 见 backend/aweme_read.py) ----

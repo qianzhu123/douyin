@@ -922,6 +922,8 @@ function UserQueryPanel() {
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [error, setError] = React.useState('');
+  const [libBusy, setLibBusy] = React.useState(false);
+  const [libOpen, setLibOpen] = React.useState(false);
 
   const run = async () => {
     const q = input.trim();
@@ -945,6 +947,36 @@ function UserQueryPanel() {
     }
   };
 
+  // 查询专属库: 在库即移出, 不在即加入 (2026-11-24, 独立于直播监控主播库)
+  const toggleQueryLib = async () => {
+    const u = result?.user;
+    if (!u?.sec_uid || libBusy) return;
+    setLibBusy(true);
+    setError('');
+    try {
+      const inLib = !!result.in_query_lib;
+      const body = inLib ? { sec_uid: u.sec_uid } : {
+        sec_uid: u.sec_uid,
+        entry: {
+          sec_uid: u.sec_uid, label: u.nickname || u.uid, nickname: u.nickname || '',
+          unique_id: '', avatar_url: u.avatar || '',
+          follower_count: 0, pay_level: u.pay_level ?? null, added_at: '', note: '',
+        },
+      };
+      const r = await fetch(`${API_BASE}/api/query-lib/toggle`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setResult((prev) => ({ ...prev, in_query_lib: d.action === 'added' ? (d.entries || []).find((e) => e.sec_uid === u.sec_uid) || {} : null }));
+    } catch (e) {
+      setError(`查询库操作失败：${String(e.message || e)}`);
+    } finally {
+      setLibBusy(false);
+    }
+  };
+
   const u = result?.user;
   const clubs = (result?.clubs || []).filter((c) => c.user_join_status === 2);
 
@@ -953,8 +985,9 @@ function UserQueryPanel() {
       <div className="panel-head">
         <div>
           <h2>用户查询</h2>
-          <p>任意用户的消费等级与粉丝团（抖音号 / uid / 分享链接均可）</p>
+          <p>任意用户的消费等级与粉丝团（抖音号 / uid / 分享链接均可）· 可收藏进独立的查询库</p>
         </div>
+        <button className="secondary" onClick={() => setLibOpen(true)}>查询库</button>
       </div>
       <div className="user-query-bar">
         <input
@@ -981,10 +1014,10 @@ function UserQueryPanel() {
           <div className="uq-head-info">
             <div className="uq-nick">
               {u.nickname || u.uid}
-              {result?.in_library ? (
-                <span className="uq-lib-badge" title={`已在主播库：${result.in_library.label}`}>· 已在主播库</span>
+              {result?.in_query_lib ? (
+                <span className="uq-lib-badge" title="已在查询库">· 已在查询库</span>
               ) : (
-                <span className="uq-lib-badge uq-lib-badge-out">· 不在主播库</span>
+                <span className="uq-lib-badge uq-lib-badge-out">· 不在查询库</span>
               )}
             </div>
             <div className="uq-pay">
@@ -1018,7 +1051,90 @@ function UserQueryPanel() {
       {result?.errors?.length > 0 && (
         <div className="notice">部分数据缺失：{result.errors.join('；')}</div>
       )}
+      {u && (
+        <div className="uq-lib-actions">
+          <button
+            className={result?.in_query_lib ? 'danger' : 'secondary'}
+            onClick={() => toggleQueryLib()}
+            disabled={libBusy}
+          >
+            {libBusy ? '处理中…' : (result?.in_query_lib
+              ? '从查询库移出'
+              : (<><Plus size={16} /> 加入查询库</>))}
+          </button>
+        </div>
+      )}
+      {libOpen && <QueryLibModal onClose={() => setLibOpen(false)} />}
     </section>
+  );
+}
+
+// 用户查询专属库弹窗 (2026-11-24, 独立于直播监控主播库; data/user_query_lib.json)
+function QueryLibModal({ onClose }) {
+  const [entries, setEntries] = React.useState([]);
+  const [busySec, setBusySec] = React.useState('');
+  const [err, setErr] = React.useState('');
+
+  const load = React.useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/query-lib`);
+      const d = await r.json();
+      setEntries(d.entries || []);
+    } catch { /* 静默 */ }
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+
+  async function removeEntry(sec) {
+    setBusySec(sec); setErr('');
+    try {
+      const r = await fetch(`${API_BASE}/api/query-lib/${encodeURIComponent(sec)}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await load();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusySec(''); }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="modal streamer-search-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>查询库</h2>
+            <p>用户查询专属收藏 — 与直播监控的主播库互相独立</p>
+          </div>
+          <button className="secondary" onClick={onClose}>关闭</button>
+        </div>
+        {err && <div className="notice">{err}</div>}
+        {entries.length > 0 && (
+          <div className="lib-list">
+            {entries.map((e) => (
+              <div className="candidate-row" key={e.sec_uid}>
+                {e.avatar_url ? <img src={e.avatar_url} alt="" /> : (
+                  <div className="uq-avatar-blank" style={{ width: 40, height: 40 }}>
+                    {(e.nickname || e.label || '?').slice(0, 1)}
+                  </div>
+                )}
+                <div>
+                  <strong>{e.nickname || e.label || e.sec_uid.slice(0, 16)}</strong>
+                  <small>
+                    {e.unique_id ? `抖音号：${e.unique_id}` : e.sec_uid.slice(0, 24) + '…'}
+                    {e.pay_level != null && ` · Lv.${e.pay_level}`}
+                    {e.follower_count ? ` · 粉丝 ${formatNumber(e.follower_count)}` : ''}
+                  </small>
+                </div>
+                <button className="danger icon-button" disabled={busySec === e.sec_uid}
+                  onClick={() => removeEntry(e.sec_uid)} title="从查询库删除">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {entries.length === 0 && (
+          <div className="empty">查询库为空 — 在「用户查询」查到人后点「加入查询库」</div>
+        )}
+      </div>
+    </div>
   );
 }
 

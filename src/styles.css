@@ -1631,3 +1631,6 @@ select.liked-filter-input { min-width: 200px; }
 /* 用户查询: 库内/库外标注 (2026-11-23) */
 .uq-lib-badge { font-size: 12px; font-weight: 500; color: var(--ok, #2e9e5b); margin-left: 8px; }
 .uq-lib-badge-out { color: var(--text-dim, #98a0ab); }
+
+/* 用户查询库操作行 */
+.uq-lib-actions { margin-top: 10px; display: flex; gap: 8px; }

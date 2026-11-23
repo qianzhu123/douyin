@@ -10,6 +10,7 @@ SEARCH_HEADLESS = True
 DOWNLOAD_OUTPUT_DIR = Path.home() / "Downloads"
 DATA_DIR = PROJECT_ROOT / "data"
 USERS_FILE = DATA_DIR / "users.json"
+QUERY_LIB_FILE = DATA_DIR / "user_query_lib.json"  # 用户查询专属库 (独立于 users.json)
 PROFILE_CACHE_FILE = DATA_DIR / "profile_cache.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 

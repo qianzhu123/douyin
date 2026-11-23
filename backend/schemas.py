@@ -123,6 +123,28 @@ class UserQueryRequest(BaseModel):
     query: str  # 数字 uid / sec_uid / 抖音主页链接
 
 
+# 用户查询专属库 (2026-11-23 用户定论: 与直播监控主播库分开, 不复用 users.json)
+class QueryLibEntry(BaseModel):
+    sec_uid: str
+    label: str = ""
+    nickname: str = ""
+    unique_id: str = ""
+    avatar_url: str = ""
+    follower_count: int = 0
+    pay_level: int | None = None   # 最近一次查询的消费等级
+    added_at: str = ""
+    note: str = ""
+
+
+class QueryLibToggleRequest(BaseModel):
+    sec_uid: str
+    entry: QueryLibEntry | None = None  # 不在库时需带全量字段
+
+
+class QueryLibReorderRequest(BaseModel):
+    sec_uids: list[str]
+
+
 class SearchCandidate(BaseModel):
     nickname: str = ""
     unique_id: str = ""
