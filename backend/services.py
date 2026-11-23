@@ -244,9 +244,13 @@ class MonitorService:
         except Exception as exc:
             # 手搓浏览器链任何异常 (输入框超时/页面导航失败) → 可读错误,
             # 不让裸 playwright TimeoutError 冒泡成前端 "Failed to fetch"
+            # 2026-11-23: CDP chrome 打 douyin.com 实测落"验证码中间页", 搜索框
+            # 根本不渲染 → Locator.fill 必超时。报错要直接指路替代输入。
             if isinstance(exc, RuntimeError):
                 raise
-            raise RuntimeError(f"浏览器搜索失败: {type(exc).__name__}: {str(exc)[:120]}") from exc
+            raise RuntimeError(
+                "浏览器搜索失败 (douyin.com 当前对浏览器弹验证码/登录墙, 搜索框不渲染)。"
+                "改用: 粘贴主页链接 / 分享短链 / 抖音号 / sec_uid — 都能直接解析") from exc
 
         if not payload:
             # 全链失败给可读错误 (2026-11-09): 协议通道离线+浏览器链被风控时,

@@ -214,11 +214,20 @@ def resolve_uid(sec_uid: str, token: str) -> str | None:
 # ---- 三段查询 ----
 
 def pay_grade_of(uid: str) -> dict | None:
-    """消费等级 (webcast/user/?target_uid=; 任意用户; 需签名)."""
+    """消费等级 (webcast/user/?target_uid=; 任意用户; 需签名).
+
+    20001 为偶发限频/瞬时错误 (2026-11-23 用户实测): 失败重试 1 次, 间隔 1.5s。
+    """
     from urllib.parse import urlencode
-    q = _common_q(target_uid=uid, user_open_id=uid, packed_level=2, with_host_info=0)
-    url = BASE_WEBCAST + "/webcast/user/?" + urlencode(q)
-    d = _signed_get(url)
+    d = None
+    for attempt in range(2):
+        q = _common_q(target_uid=uid, user_open_id=uid, packed_level=2, with_host_info=0)
+        url = BASE_WEBCAST + "/webcast/user/?" + urlencode(q)
+        d = _signed_get(url)
+        if isinstance(d, dict) and d.get("status_code") in (0, None):
+            break
+        if attempt == 0:
+            time.sleep(1.5)
     if not isinstance(d, dict) or d.get("status_code") not in (0, None):
         raise RuntimeError(f"webcast/user status={d.get('status_code') if isinstance(d, dict) else '?'}")
     data = d.get("data") if isinstance(d.get("data"), dict) else d

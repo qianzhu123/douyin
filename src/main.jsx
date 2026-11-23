@@ -1002,7 +1002,6 @@ function UserQueryPanel() {
                 灯牌等级 {c.level != null ? `Lv.${c.level}` : c.badge_absent ? '未点亮' : '未公开'}
                 {c.joined_days != null && ` · 入团 ${c.joined_days} 天`}
                 {c.continues_sign_days != null && ` · 连签 ${c.continues_sign_days} 天`}
-                {c.fans_count != null && ` · 团 ${formatNumber(c.fans_count)} 人`}
               </span>
             </div>
           ))}
