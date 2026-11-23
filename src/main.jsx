@@ -1298,9 +1298,23 @@ function StreamerSearchModal({ onClose, onChanged }) {
 
   async function searchCandidates() {
     const kw = keyword.trim();
-    if (!kw) { setErr('请输入主播名称'); return; }
+    if (!kw) { setErr('请输入主播名称 / 主页链接 / 短链 / 抖音号'); return; }
     setSearchBusy(true); setErr('');
     try {
+      // 链接/短链/sec_uid 先走 resolve-link (e124): 命中即得到唯一候选, 不必进搜索链路
+      const looksLikeLink = /MS4w[A-Za-z0-9_-]{20,}|v\.douyin\.com|(?:www\.)?(?:douyin|iesdouyin)\.com\//i.test(kw);
+      if (looksLikeLink) {
+        const rr = await fetch(`${API_BASE}/api/users/resolve-link`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keyword: kw }),
+        });
+        const rd = await rr.json();
+        if (rr.ok && rd.kind === 'sec_uid') {
+          setCandidates([{ sec_uid: rd.sec_uid, nickname: '', unique_id: '', follower_count: 0, avatar_url: '' }]);
+          return;
+        }
+        // resolve-link 失败/未命中 → 落回名称搜索链路
+      }
       const r = await fetch(`${API_BASE}/api/users/search`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyword: kw }),
@@ -1343,7 +1357,7 @@ function StreamerSearchModal({ onClose, onChanged }) {
         <div className="modal-head">
           <div>
             <h2>搜索主播</h2>
-            <p>输入名称搜索，结果中「添加到主播库」— 只入库，监控去主播库开</p>
+            <p>支持：主播名称 / 主页链接 / 分享短链（整段口令可直贴）/ 抖音号 / sec_uid — 添加到主播库后监控去主播库开</p>
           </div>
           <button className="secondary" onClick={onClose}>关闭</button>
         </div>
@@ -1365,7 +1379,7 @@ function StreamerSearchModal({ onClose, onChanged }) {
           <input className="lm-add-input" value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') searchCandidates(); }}
-            placeholder="搜索主播名称，从结果中选添加"
+            placeholder="名称 / 主页链接 / 短链 / 抖音号 / sec_uid"
             autoFocus
           />
           <button className="secondary" onClick={searchCandidates} disabled={searchBusy}>
@@ -1381,8 +1395,8 @@ function StreamerSearchModal({ onClose, onChanged }) {
                 <article className="candidate-row" key={candidate.sec_uid}>
                   <img src={candidate.avatar_url || ''} alt="" />
                   <div>
-                    <strong>{candidate.nickname || '未命名用户'}</strong>
-                    <small>{candidate.unique_id ? `抖音号：${candidate.unique_id}` : candidate.sec_uid.slice(0, 18)}</small>
+                    <strong>{candidate.nickname || '链接解析成功 — 入库后自动补全资料'}</strong>
+                    <small>{candidate.unique_id ? `抖音号：${candidate.unique_id}` : candidate.sec_uid.slice(0, 30) + '…'}</small>
                     <span>
                       粉丝 {formatNumber(candidate.follower_count)}
                       {candidate.ip_location ? ` · ${candidate.ip_location}` : ''}
