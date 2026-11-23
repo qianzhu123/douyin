@@ -285,12 +285,20 @@ def query_user(raw_text: str) -> dict:
                            "target_user_id": uid})
             try:
                 m = _token_get(f"{BASE_FANDOM}/ent/fandom/personal/meta/?{q}", token)
-                meta = (m.get("personal_fandom_meta") or {}) if m.get("status_code") == 0 else {}
-                if meta:
+                if m.get("status_code") == 0:
+                    meta = m.get("personal_fandom_meta") or {}
+                    # 灯牌等级在响应顶层的 live_fans_club_badge (不在 meta 子对象;
+                    # e122 首版漏提导致前端显示"未公开", 2026-11-23 修正)。
+                    # badge 对象缺席 = 该团灯牌从未点亮 (sc=0 已入团), 不是未公开。
+                    badge = m.get("live_fans_club_badge")
                     c.update({
                         "joined_days": meta.get("joined_days"),
                         "continues_sign_days": meta.get("continues_sign_days"),
                         "light_medal_cnt": meta.get("light_medal_cnt"),
+                        "level": (badge or {}).get("level"),
+                        "club_name": (badge or {}).get("club_name") or "",
+                        "fans_badge_status": (badge or {}).get("fans_badge_status"),
+                        "badge_absent": badge is None,
                         "_meta_done": True,
                     })
             except Exception as exc:
