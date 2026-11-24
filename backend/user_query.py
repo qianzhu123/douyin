@@ -365,30 +365,23 @@ def query_user(raw_text: str) -> dict:
         # short_id 返回 20001。先按 uid 查消费等级, 20001 时用 sug 卡兜底换真 uid。
         try:
             pg0 = pay_grade_of(uid)
-            if pg0:
-                user.update(pg0)
-                if pg0.get("sec_uid"):
-                    sec_seen = pg0["sec_uid"]
+            if pg0 and pg0.get("sec_uid"):
+                sec_seen = pg0["sec_uid"]
         except Exception as exc:
             if "20001" in str(exc):
+                # 20001 = 按 uid 查无此人 → 多半是 short_id, 用 sug 卡兜底换真 uid
                 sec_fb = resolve_douyin_id(uid)
                 if sec_fb:
                     sec_seen = sec_fb
                     real_uid = resolve_uid(sec_fb, token)
                     if real_uid:
                         uid = real_uid
-                        try:
-                            pg0 = pay_grade_of(uid)
-                            if pg0:
-                                user.update(pg0)
-                        except Exception as exc2:
-                            errors.append(f"消费等级: {str(exc2)[:120]}")
                     else:
                         errors.append("消费等级: short_id 兜底解析 uid 失败")
             else:
                 errors.append(f"消费等级: {str(exc)[:120]}")
 
-    # 2. 消费等级
+    # 2. 消费等级 (无论上面哪条路径, 此处按最终 uid 统一查一次)
     user: dict = {"uid": uid}
     if sec_seen:
         user["sec_uid"] = sec_seen
@@ -406,6 +399,8 @@ def query_user(raw_text: str) -> dict:
 #   - 目标是 token 本人 → 仍走本人团列表 (信息最全: has_signed 等)
 #   - 目标是他人 → 用本人团列表里的 anchor→fandom_id 映射逐团探 target,
 #     joined_days>0 / light_medal_cnt>0 即为已入团; 未探测到 = 未加这些团。
+#     (2026-11-25: 主播本人是例外 — 对自家团 joined_days=0, 按 anchor_uid==uid
+#     判定"主播本人"命中; fandom_type_name 是团类型不可用作判定。)
 #     覆盖面 = token 所在的团 (查询库大主播基本都在内), 无法枚举他人全部团。
     clubs: list[dict] = []
     try:
@@ -452,6 +447,10 @@ def query_user(raw_text: str) -> dict:
                 time.sleep(0.3)
         else:
             # 他人查询: 逐团探 target (上限 30 团防刷)
+            # 2026-11-25 补: 主播本人对其自家团 joined_days=0 (陈泽实测,
+            # fandom_type_name="主播" + live_fans_club_info.anchor_uid=本人uid),
+            # 但响应仍回个人 meta (含灯牌/签名数据) → is_member 需并上
+            # "该团 anchor 就是本人" 这一真命中, 否则大主播恒判"未加入任何团"。
             for c in clubs[:30]:
                 q = urlencode({**DEV, "fandom_id": c["fandom_id"],
                                "target_user_id": uid})
@@ -461,11 +460,15 @@ def query_user(raw_text: str) -> dict:
                         meta = m.get("personal_fandom_meta") or {}
                         jd = meta.get("joined_days") or 0
                         lm = meta.get("light_medal_cnt") or 0
+                        # 注意: fandom_type_name="主播" 是"主播的团"这一团类型,
+                        # 所有团都有, 不能作为判定条件 (首版误判, 2026-11-25)。
+                        is_anchor = (c.get("anchor_uid") or "") == str(uid)
                         c.update({
                             "joined_days": jd if jd > 0 else None,
                             "continues_sign_days": meta.get("continues_sign_days"),
                             "light_medal_cnt": lm if lm > 0 else None,
-                            "is_member": jd > 0,
+                            "is_member": jd > 0 or is_anchor,
+                            "is_anchor": is_anchor,
                             "_meta_done": True,
                         })
                 except Exception as exc:
