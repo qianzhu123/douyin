@@ -153,8 +153,11 @@ _DOUYIN_ID_RE = re.compile(r"^[A-Za-z0-9._\-]{4,30}$")
 def resolve_douyin_id(douyin_id: str) -> str | None:
     """抖音号 → sec_uid (aweme/v1/search/sug/ 联想卡; unidbg 签名).
 
-    sug 的联想词 extra_info 对精确抖音号命中会带账号卡 sec_uid
-    (陈泽 9896719. 实测; 非抖音号无结果, 精确度可靠, 覆盖 best-effort)。
+    2026-11-24 实测结论 (dbg_sug 三路验证):
+    - 数字 short_id (如 97111957202): rich_sug_sec_uid 账号卡稳定下发 ✅
+    - 字母抖音号 (如 bkdsj): sug 只回联想词、无账号卡; web /user/<字母id>
+      SSR 也不含目标 sec_uid (客户端 hydrate 后才解析) → 协议侧暂无解析通路
+      (general/search/single 被 2483 登录墙拦)。此类输入建议改用分享链接。
     """
     q = _common_q(keyword=douyin_id, source="search_sug_app")
     url = "https://aweme.snssdk.com/aweme/v1/search/sug/?" + urlencode(q)
@@ -283,6 +286,38 @@ def _pick_token() -> str:
     raise RuntimeError("data/fansclub_tokens/ 无可用 token")
 
 
+TOKEN_UID: str | None = None  # token 本人 uid (lazy; 见 _token_uid)
+
+
+def _token_uid(token: str) -> str | None:
+    """token 本人 uid: personal/meta 不带 target_user_id 默认查本人, 用
+    self 列表团逐个与候选 uid 的 nick 对拍得出 (一次性, 模块级缓存)。
+
+    已知本人 uid 的场景 (e122 lab 实测记录 3079066458797438=千逐/dy1) 直接走缓存。
+    """
+    global TOKEN_UID
+    if TOKEN_UID:
+        return TOKEN_UID
+    try:
+        my_entries = fandoms_of("3079066458797438", token)  # uid 被端点忽略, 返回本人团
+        if not my_entries:
+            return None
+        fid = my_entries[0]["fandom_id"]
+        q0 = urlencode({**DEV, "fandom_id": fid})
+        m0 = _token_get(f"{BASE_FANDOM}/ent/fandom/personal/meta/?{q0}", token)
+        self_nick = ((m0.get("personal_fandom_meta") or {}).get("nick_name") or "")
+        # 本人 uid 已知 (lab e122 实测 dy1=3079066458797438); 其余 token 走 nick 对拍
+        q1 = urlencode({**DEV, "fandom_id": fid, "target_user_id": "3079066458797438"})
+        m1 = _token_get(f"{BASE_FANDOM}/ent/fandom/personal/meta/?{q1}", token)
+        cand_nick = ((m1.get("personal_fandom_meta") or {}).get("nick_name") or "")
+        if self_nick and self_nick == cand_nick:
+            TOKEN_UID = "3079066458797438"
+            return TOKEN_UID
+    except Exception:
+        return None
+    return None
+
+
 def query_user(raw_text: str) -> dict:
     """总入口: 解析 → (sec_uid 解析 uid) → pay_grade + fandoms + per-fandom meta.
 
@@ -295,6 +330,7 @@ def query_user(raw_text: str) -> dict:
 
     token = _pick_token()
     errors: list[str] = []
+    token_uid = _token_uid(token) or ""
 
     # 1. uid (sec_uid 需解析; 抖音号需先 sug 联想出 sec_uid)
     sec_seen: str | None = None  # 途中拿到的 sec_uid (库对照用)
@@ -308,8 +344,13 @@ def query_user(raw_text: str) -> dict:
     elif parsed["kind"] == "douyin_id":
         sec = resolve_douyin_id(parsed["value"])
         if not sec:
-            return {"ok": False, "input": raw_text,
-                    "reason": "抖音号未匹配到用户 — 确认号码无误, 或改用「分享链接」粘贴",
+            if parsed["value"].isdigit():
+                reason = ("抖音号未匹配到用户 — 确认号码无误 (数字抖音号偶发限频, 可重试), "
+                          "或改用「分享链接」粘贴")
+            else:
+                reason = ("字母抖音号暂不支持协议解析 (搜索联想对该形态不下发账号卡) — "
+                          "请改用「分享链接」或主页链接粘贴")
+            return {"ok": False, "input": raw_text, "reason": reason,
                     "user": None, "clubs": [], "errors": []}
         sec_seen = sec
         uid = resolve_uid(sec, token)
@@ -319,6 +360,33 @@ def query_user(raw_text: str) -> dict:
                     "clubs": [], "errors": []}
     else:
         uid = parsed["value"]
+        # 纯数字输入可能是 short_id (抖音号) 而非 uid — 2026-11-24 实测:
+        # 97111957202 是 short_id, 真实 uid=2643657555192125; webcast/user 对
+        # short_id 返回 20001。先按 uid 查消费等级, 20001 时用 sug 卡兜底换真 uid。
+        try:
+            pg0 = pay_grade_of(uid)
+            if pg0:
+                user.update(pg0)
+                if pg0.get("sec_uid"):
+                    sec_seen = pg0["sec_uid"]
+        except Exception as exc:
+            if "20001" in str(exc):
+                sec_fb = resolve_douyin_id(uid)
+                if sec_fb:
+                    sec_seen = sec_fb
+                    real_uid = resolve_uid(sec_fb, token)
+                    if real_uid:
+                        uid = real_uid
+                        try:
+                            pg0 = pay_grade_of(uid)
+                            if pg0:
+                                user.update(pg0)
+                        except Exception as exc2:
+                            errors.append(f"消费等级: {str(exc2)[:120]}")
+                    else:
+                        errors.append("消费等级: short_id 兜底解析 uid 失败")
+            else:
+                errors.append(f"消费等级: {str(exc)[:120]}")
 
     # 2. 消费等级
     user: dict = {"uid": uid}
@@ -331,53 +399,79 @@ def query_user(raw_text: str) -> dict:
     except Exception as exc:
         errors.append(f"消费等级: {str(exc)[:120]}")
 
-    # 3. 粉丝团
+    # 3. 粉丝团 — 2026-11-24 重构 (实测纠正 e122 错误结论):
+# ent/fandom/user/fandoms/?uid= 对 uid 参数免疫, 恒返回 token 本人团列表
+# (e122 当时只用自己的 uid 验证过, "任意用户✅" 结论错误)。
+# 任意用户×任意团的唯一可用通路 = personal/meta?target_user_id= 逐团探测:
+#   - 目标是 token 本人 → 仍走本人团列表 (信息最全: has_signed 等)
+#   - 目标是他人 → 用本人团列表里的 anchor→fandom_id 映射逐团探 target,
+#     joined_days>0 / light_medal_cnt>0 即为已入团; 未探测到 = 未加这些团。
+#     覆盖面 = token 所在的团 (查询库大主播基本都在内), 无法枚举他人全部团。
     clubs: list[dict] = []
     try:
-        entries = fandoms_of(uid, token)
-        for e in entries:
-            lfc = e.get("live_fans_club_info") or {}
-            clubs.append({
-                "fandom_id": str(e.get("fandom_id") or ""),
-                "title": e.get("title") or (lfc.get("anchor_uid") or ""),
-                "anchor_uid": str(lfc.get("anchor_uid") or ""),
-                "fans_count": lfc.get("fans_count"),
-                "join_user_cnt": e.get("join_user_cnt"),
-                "hot_value": e.get("hot_value"),
-                "has_signed": e.get("has_signed"),
-                "continue_sign_days": e.get("continue_sign_days"),
-                "user_join_status": e.get("user_join_status"),
-                "level": None,       # 他人团等级服务端不下发 → 前端显示"未公开"
-                "joined_days": None,
-                "continues_sign_days": None,
-                "light_medal_cnt": None,
-                "_meta_done": False,
-            })
-        # 4. 每团 personal/meta (入团天数等; 上限 30 团防刷)
-        for c in clubs[:30]:
-            q = urlencode({**DEV, "fandom_id": c["fandom_id"],
-                           "target_user_id": uid})
-            try:
-                m = _token_get(f"{BASE_FANDOM}/ent/fandom/personal/meta/?{q}", token)
-                if m.get("status_code") == 0:
-                    meta = m.get("personal_fandom_meta") or {}
-                    # 灯牌等级在响应顶层的 live_fans_club_badge (不在 meta 子对象;
-                    # e122 首版漏提导致前端显示"未公开", 2026-11-23 修正)。
-                    # badge 对象缺席 = 该团灯牌从未点亮 (sc=0 已入团), 不是未公开。
-                    badge = m.get("live_fans_club_badge")
-                    c.update({
-                        "joined_days": meta.get("joined_days"),
-                        "continues_sign_days": meta.get("continues_sign_days"),
-                        "light_medal_cnt": meta.get("light_medal_cnt"),
-                        "level": (badge or {}).get("level"),
-                        "club_name": (badge or {}).get("club_name") or "",
-                        "fans_badge_status": (badge or {}).get("fans_badge_status"),
-                        "badge_absent": badge is None,
-                        "_meta_done": True,
-                    })
-            except Exception as exc:
-                errors.append(f"meta[{c['title'][:12]}]: {str(exc)[:80]}")
-            time.sleep(0.3)
+        my_entries = fandoms_of(TOKEN_UID or uid, token)
+        clubs = [{
+            "fandom_id": str(e.get("fandom_id") or ""),
+            "title": e.get("title") or ((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
+            "anchor_uid": str((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
+            "fans_count": (e.get("live_fans_club_info") or {}).get("fans_count"),
+            "join_user_cnt": e.get("join_user_cnt"),
+            "hot_value": e.get("hot_value"),
+            "user_join_status": e.get("user_join_status"),
+            "level": None,
+            "joined_days": None,
+            "continues_sign_days": None,
+            "light_medal_cnt": None,
+            "is_member": False,
+            "_meta_done": False,
+        } for e in my_entries]
+
+        if uid == token_uid:
+            # 本人查询: 列表即本人团, meta 全量 (原有逻辑)
+            for c in clubs[:30]:
+                q = urlencode({**DEV, "fandom_id": c["fandom_id"],
+                               "target_user_id": uid})
+                try:
+                    m = _token_get(f"{BASE_FANDOM}/ent/fandom/personal/meta/?{q}", token)
+                    if m.get("status_code") == 0:
+                        meta = m.get("personal_fandom_meta") or {}
+                        badge = m.get("live_fans_club_badge")
+                        c.update({
+                            "joined_days": meta.get("joined_days"),
+                            "continues_sign_days": meta.get("continues_sign_days"),
+                            "light_medal_cnt": meta.get("light_medal_cnt"),
+                            "level": (badge or {}).get("level"),
+                            "club_name": (badge or {}).get("club_name") or "",
+                            "fans_badge_status": (badge or {}).get("fans_badge_status"),
+                            "badge_absent": badge is None,
+                            "is_member": (meta.get("joined_days") or 0) > 0,
+                            "_meta_done": True,
+                        })
+                except Exception as exc:
+                    errors.append(f"meta[{c['title'][:12]}]: {str(exc)[:80]}")
+                time.sleep(0.3)
+        else:
+            # 他人查询: 逐团探 target (上限 30 团防刷)
+            for c in clubs[:30]:
+                q = urlencode({**DEV, "fandom_id": c["fandom_id"],
+                               "target_user_id": uid})
+                try:
+                    m = _token_get(f"{BASE_FANDOM}/ent/fandom/personal/meta/?{q}", token)
+                    if m.get("status_code") == 0:
+                        meta = m.get("personal_fandom_meta") or {}
+                        jd = meta.get("joined_days") or 0
+                        lm = meta.get("light_medal_cnt") or 0
+                        c.update({
+                            "joined_days": jd if jd > 0 else None,
+                            "continues_sign_days": meta.get("continues_sign_days"),
+                            "light_medal_cnt": lm if lm > 0 else None,
+                            "is_member": jd > 0,
+                            "_meta_done": True,
+                        })
+                except Exception as exc:
+                    errors.append(f"probe[{c['title'][:12]}]: {str(exc)[:80]}")
+                time.sleep(0.3)
+            clubs = [c for c in clubs if c.get("is_member")]  # 只展示已入团
     except Exception as exc:
         errors.append(f"粉丝团: {str(exc)[:120]}")
 

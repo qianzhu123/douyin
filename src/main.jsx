@@ -978,7 +978,8 @@ function UserQueryPanel() {
   };
 
   const u = result?.user;
-  const clubs = (result?.clubs || []).filter((c) => c.user_join_status === 2);
+  // 后端已按 is_member 过滤 (本人查询=全量本人团; 他人查询=逐团探测命中), 前端不再二次过滤
+  const clubs = result?.clubs || [];
 
   return (
     <section className="panel" id="sec-user-query">
