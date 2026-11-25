@@ -110,6 +110,23 @@ class MonitorService:
         # 协议通道首选 (2026-11-08): App 域 oracle 签名直发, 不依赖浏览器/登录态。
         # 不可达 (真机不在/签名失败/antispam 壳) 静默回落浏览器三级链, 行为不变。
         try:
+            # v2 搜索通道最优先 (2026-11-26 打通, t10: e125 新鲜 ticket 头组 + unidbg 七头;
+            # 旧 v1 通道 2483 登录墙期间此路是唯一活协议通道)
+            from . import name_search_v2 as ns2
+            if ns2.headers_fresh():
+                v2_users = await asyncio.to_thread(ns2.search_user, keyword)
+                if v2_users:
+                    return [SearchCandidate(
+                        nickname=u.get("nickname", ""), unique_id=u.get("unique_id", "") or "",
+                        signature="", avatar_url="",
+                        follower_count=int(u.get("follower_count") or 0),
+                        following_count=0,
+                        total_favorited=0,
+                        ip_location="", sec_uid=u["sec_uid"],
+                        homepage_url=f"https://www.douyin.com/user/{u['sec_uid']}",
+                        live_status=0,
+                        room_id="",
+                    ) for u in v2_users if u.get("sec_uid")][:12]
             from . import aweme_search_protocol as proto
             users, note = await asyncio.to_thread(proto.search, keyword)
             candidates = [SearchCandidate(

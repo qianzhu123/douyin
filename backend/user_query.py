@@ -170,6 +170,29 @@ def resolve_douyin_id(douyin_id: str) -> str | None:
     return m.group(0) if m else None
 
 
+def _resolve_via_name_search(text: str) -> str | None:
+    """抖音号/名称 → sec_uid (v2 general/single 搜索通道, 2026-11-26 打通).
+
+    配方: lab t10 (e125 新鲜 bd-ticket-guard 头组 + unidbg 七头). 头组失效
+    (2483 回归) 时静默返 None, 调用方回落 sug 联想。
+    """
+    try:
+        from . import name_search_v2
+        users = name_search_v2.search_user(text, count=10)
+    except Exception:
+        return None
+    if not users:
+        return None
+    want = text.strip().lower()
+    # 精确匹配 unique_id / nickname 优先, 否则取首卡
+    for u in users:
+        for k in ("unique_id", "nickname"):
+            v = (u.get(k) or "").strip().lower()
+            if v and v == want:
+                return u.get("sec_uid") or None
+    return users[0].get("sec_uid") or None
+
+
 def parse_query(text: str) -> dict:
     """识别输入形态: {'kind': 'uid'|'sec_uid'|'douyin_id', 'value': str}.
 
@@ -342,14 +365,18 @@ def query_user(raw_text: str) -> dict:
                     "reason": "sec_uid 解析 uid 失败 (签名/网络)", "user": None,
                     "clubs": [], "errors": []}
     elif parsed["kind"] == "douyin_id":
-        sec = resolve_douyin_id(parsed["value"])
+        # 2026-11-26: v2 搜索通道打通 (t10, e125 新鲜 ticket 头组) — 名称/字母号首选,
+        # sug 联想降级为第二路 (sug 对字母号不下发账号卡的老结论仍对 sug 本身成立)
+        sec = _resolve_via_name_search(parsed["value"])
+        if not sec:
+            sec = resolve_douyin_id(parsed["value"])
         if not sec:
             if parsed["value"].isdigit():
                 reason = ("抖音号未匹配到用户 — 确认号码无误 (数字抖音号偶发限频, 可重试), "
                           "或改用「分享链接」粘贴")
             else:
-                reason = ("字母抖音号暂不支持协议解析 (搜索联想对该形态不下发账号卡) — "
-                          "请改用「分享链接」或主页链接粘贴")
+                reason = ("抖音号搜索未命中 — 确认号码/名称无误后重试, "
+                          "或改用「分享链接」/主页链接粘贴")
             return {"ok": False, "input": raw_text, "reason": reason,
                     "user": None, "clubs": [], "errors": []}
         sec_seen = sec
