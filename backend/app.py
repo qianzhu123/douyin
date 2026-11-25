@@ -1257,6 +1257,42 @@ def boards_city(city_code: str = "") -> dict:
         return {"ok": False, "reason": str(exc)[:120]}
 
 
+# ---- e155: PK 战况 / 红包·福袋 看板 (读 lab 仓 ws 捕获 JSONL, 零浏览器) ----
+
+from .pk_battle import read_pk_events, read_box_events, capture_status as pk_capture_status  # noqa: E402
+
+
+@app.get("/api/pk/status")
+def pk_status() -> dict:
+    """e155 ws 捕获器状态 (挂哪个房/最后事件时间)。"""
+    try:
+        return pk_capture_status()
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+@app.get("/api/pk/battle")
+def pk_battle(web_rid: str = "") -> dict:
+    """PK 战况: 双方精确分值/助力榜/finish 结算 (e155 JSONL)。"""
+    if not web_rid.strip():
+        return {"ok": False, "reason": "缺少 web_rid (须 lab 侧已挂房的 room_id)"}
+    try:
+        return read_pk_events(web_rid)
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+@app.get("/api/pk/boxes")
+def pk_boxes(web_rid: str = "") -> dict:
+    """红包/福袋事件: 个数/倒计时/类型 (e155 JSONL)。"""
+    if not web_rid.strip():
+        return {"ok": False, "reason": "缺少 web_rid"}
+    try:
+        return read_box_events(web_rid)
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
 @app.get("/api/fansclub/recapture-status")
 def fansclub_recapture_status() -> dict:
     return {**_recapture_state}
