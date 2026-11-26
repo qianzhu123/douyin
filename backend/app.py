@@ -1320,10 +1320,30 @@ def fansclub_recapture(body: dict) -> dict:
         import json as _json
         for lb in labels:
             try:
-                r = _sp.run(["python", "-X", "utf8", _RECAPTURE_SCRIPT, lb],
-                            capture_output=True, timeout=420)
-                out = (r.stdout or b"").decode("utf-8", "replace")
-                ok = r.returncode == 0
+                # 逐行流式: e120 的 log() 里程碑 (重抓开始/adb/切用户/拉起抖音/
+                # attach/校验/完成) 实时进 state log, 前端轮询即可见 (用户要求
+                # "抓取dy1/打开抖音/抓取成功"这类关键进度可见, 非黑盒等待)
+                _recapture_state["log"].append({"label": lb, "ok": None, "detail": "排队中…"})
+                p = _sp.Popen(["python", "-X", "utf8", _RECAPTURE_SCRIPT, lb],
+                              stdout=_sp.PIPE, stderr=_sp.STDOUT)
+                ok = False
+                detail = ""
+                try:
+                    for raw in iter(p.stdout.readline, b""):
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line:
+                            continue
+                        low = line.lower()
+                        if "fatal" in low or "traceback" in low:
+                            _recapture_state["log"].append({"label": lb, "ok": False, "detail": line[:200]})
+                        elif line.startswith("==") or "attached" in low or "validate" in low:
+                            _recapture_state["log"].append({"label": lb, "ok": None, "detail": line[:200]})
+                    p.wait(timeout=420)
+                except _sp.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+                    _recapture_state["log"].append({"label": lb, "ok": False, "detail": "exit=timeout(420s)"})
+                ok = p.returncode == 0
                 detail = ""
                 if ok:
                     # 抓取成功 → 自动部署 (读 lab 侧落盘的 token)
@@ -1333,7 +1353,7 @@ def fansclub_recapture(body: dict) -> dict:
                     ok = bool(d.get("ok"))
                     detail = d.get("reason", "已部署")
                 else:
-                    detail = f"exit={r.returncode}"
+                    detail = f"exit={p.returncode}"
                 _recapture_state["log"].append({"label": lb, "ok": ok, "detail": detail})
             except Exception as e:
                 _recapture_state["log"].append({"label": lb, "ok": False, "detail": str(e)[:120]})

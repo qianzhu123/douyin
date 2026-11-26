@@ -707,10 +707,14 @@ function FansClubPanel({ apiRef }) {
           {recapture?.running && <span className="tab-check-dot checking" title="真机重抓进行中" />}
         </div>
       )}
-      {/* 重抓完成结果一览 */}
-      {!recapture?.running && recapture?.log?.length > 0 && (
+      {/* 重抓进度/结果一览: 运行中也实时显示里程碑 (抓取dy1/打开抖音/抓取成功), ok=null=进行中 */}
+      {recapture?.log?.length > 0 && (
         <div className="notice multi">
-          {recapture.log.map((r) => `${r.ok ? '✓' : '✗'} ${r.label}: ${r.detail}`).join('\n')}
+          {recapture.log.map((r, i) =>
+            r.ok === null
+              ? `⏳ ${r.label}: ${r.detail}`
+              : `${r.ok ? '✓' : '✗'} ${r.label}: ${r.detail}`
+          ).join('\n')}
         </div>
       )}
       {/* 重抓确认弹窗 (用户指定: 弹窗提示确保当前真机状态然后开始抓) */}
