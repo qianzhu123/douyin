@@ -1334,9 +1334,13 @@ def fansclub_recapture(body: dict) -> dict:
                         if not line:
                             continue
                         low = line.lower()
-                        if "fatal" in low or "traceback" in low:
+                        # 里程碑 + 失败诊断都透传 (frida 报错/超时根因用户要看得见)
+                        if ("fatal" in low or "traceback" in low or "error" in low
+                                or "failed" in low or "frida" in low or "timeout" in low):
                             _recapture_state["log"].append({"label": lb, "ok": False, "detail": line[:200]})
-                        elif line.startswith("==") or "attached" in low or "validate" in low:
+                        elif (line.startswith("==") or line.startswith("[")
+                                or "attached" in low or "validate" in low
+                                or "awake" in low or "launched" in low or "switch" in low):
                             _recapture_state["log"].append({"label": lb, "ok": None, "detail": line[:200]})
                     p.wait(timeout=420)
                 except _sp.TimeoutExpired:
