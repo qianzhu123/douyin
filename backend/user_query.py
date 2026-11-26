@@ -175,22 +175,25 @@ def _resolve_via_name_search(text: str) -> str | None:
 
     配方: lab t10 (e125 新鲜 bd-ticket-guard 头组 + unidbg 七头). 头组失效
     (2483 回归) 时静默返 None, 调用方回落 sug 联想。
+
+    2026-11-26 二修: 只认**精确匹配** (unique_id / nickname 全等, 忽略大小写),
+    不再盲取首卡 — v2 用户卡语义下首卡未命中即说明搜索没认出目标 (a307 事故:
+    首卡是无关者, 盲取把陌生人当成了查询对象)。
     """
     try:
         from . import name_search_v2
         users = name_search_v2.search_user(text, count=10)
     except Exception:
         return None
-    if not users:
-        return None
     want = text.strip().lower()
-    # 精确匹配 unique_id / nickname 优先, 否则取首卡
+    if not want:
+        return None
     for u in users:
         for k in ("unique_id", "nickname"):
             v = (u.get(k) or "").strip().lower()
             if v and v == want:
                 return u.get("sec_uid") or None
-    return users[0].get("sec_uid") or None
+    return None
 
 
 def parse_query(text: str) -> dict:
@@ -213,9 +216,9 @@ def parse_query(text: str) -> dict:
             return {"kind": "sec_uid", "value": sec}
         return {"kind": "invalid", "value": text,
                 "reason": "短链解析失败 (网络/链接失效), 请改粘主页长链或 sec_uid"}
-    if _DOUYIN_ID_RE.match(text) and not text.isdigit():
-        return {"kind": "douyin_id", "value": text}
-    return {"kind": "invalid", "value": text, "reason": "无法识别: 需 uid / sec_uid / 抖音号 / 主页链接"}
+    # 名称 (含中文/emoji 等非 ID 字符) — 2026-11-26 v2 搜索通道打通后可直查:
+    # 精确匹配昵称的账号卡 → sec_uid (不含链接/sec_uid 特征才走此路)。
+    return {"kind": "douyin_id", "value": text}
 
 
 # ---- sec_uid → uid ----
@@ -396,15 +399,21 @@ def query_user(raw_text: str) -> dict:
                 sec_seen = pg0["sec_uid"]
         except Exception as exc:
             if "20001" in str(exc):
-                # 20001 = 按 uid 查无此人 → 多半是 short_id, 用 sug 卡兜底换真 uid
-                sec_fb = resolve_douyin_id(uid)
+                # 20001 = 按 uid 查无此人 → 输入多半是抖音号/short_id 而非 uid,
+                # 用 v2 搜索精确匹配换真 uid (2026-11-26: 98422505740 实证 =
+                # 纯数字抖音号「🌈随便」), v2 未命中再回落 sug 联想卡。
+                sec_fb = _resolve_via_name_search(uid)
+                if not sec_fb:
+                    sec_fb = resolve_douyin_id(uid)
                 if sec_fb:
                     sec_seen = sec_fb
                     real_uid = resolve_uid(sec_fb, token)
                     if real_uid:
                         uid = real_uid
                     else:
-                        errors.append("消费等级: short_id 兜底解析 uid 失败")
+                        errors.append("消费等级: 数字号兜底解析 uid 失败")
+                else:
+                    errors.append(f"消费等级: {str(exc)[:120]} (按 uid/抖音号均未命中)")
             else:
                 errors.append(f"消费等级: {str(exc)[:120]}")
 

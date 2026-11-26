@@ -77,33 +77,88 @@ def _common_q(**extra) -> dict:
 
 
 def _extract_users(d: dict) -> list[dict]:
-    """深扫 v2 响应收 (nickname+sec_uid|uid) 齐全的作者对象, 保序去重."""
+    """从 v2 响应提取**真用户卡** (2026-11-26 修正版).
+
+    卡片语义 (t10/t10c/t10d 实测):
+    - type=999 用户卡: data.raw_data 为转义 JSON 字符串, user_list[].user_info
+      即目标用户 (a3075588361 → 千逐 实证); 或 fp card_name=doctype_aweme_user,
+      fp.user_fp.user_ids 指认 uid, 作者对象在附带的 aweme_list[].author
+    - type=1 视频卡: author 只是蹭 #话题 的视频作者, **不是**搜索结果
+    - comment_list / relation_label 里的用户全是噪音, 绝不收
+
+    旧版深扫把评论区/关联推荐/蹭话题作者全混进来且无头像 — 已废。
+    头像取 avatar_larger.url_list[0]。
+    """
+    dec = json.JSONDecoder()
+    authors: dict[str, dict] = {}  # uid -> author object (for avatar/fans enrichment)
+
+    def collect_authors(o):
+        if isinstance(o, dict):
+            if o.get("nickname") and o.get("uid") and "avatar_thumb" in o:
+                authors.setdefault(str(o["uid"]), o)
+            for v in o.values():
+                collect_authors(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect_authors(v)
+
+    collect_authors(d)
+
+    def to_user(ui: dict) -> dict:
+        av = ""
+        al = ui.get("avatar_larger") or ui.get("avatar_300x300") \
+            or ui.get("avatar_168x168") or ui.get("avatar_medium") \
+            or ui.get("avatar_thumb") or {}
+        urls = al.get("url_list") if isinstance(al, dict) else None
+        if urls:
+            av = urls[0]
+        return {
+            "nickname": ui.get("nickname"),
+            "uid": str(ui.get("uid")) if ui.get("uid") else None,
+            "sec_uid": ui.get("sec_uid"),
+            "unique_id": ui.get("unique_id") or ui.get("short_id"),
+            "follower_count": ui.get("follower_count"),
+            "avatar_url": av,
+        }
+
     out: list[dict] = []
     seen: set[str] = set()
 
-    def walk(o):
-        if isinstance(o, dict):
-            nick = o.get("nickname")
-            sec = o.get("sec_uid")
-            uid = o.get("uid") or o.get("id_str") or o.get("id")
-            if nick and (sec or uid):
-                key = str(sec or uid)
-                if key not in seen:
-                    seen.add(key)
-                    out.append({
-                        "nickname": nick,
-                        "uid": str(uid) if uid else None,
-                        "sec_uid": sec,
-                        "unique_id": o.get("unique_id") or o.get("short_id"),
-                        "follower_count": o.get("follower_count"),
-                    })
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
+    def push(ui: dict):
+        if not (ui.get("nickname") and (ui.get("sec_uid") or ui.get("uid"))):
+            return
+        key = str(ui.get("sec_uid") or ui.get("uid"))
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(to_user(ui))
 
-    walk(d)
+    for card in d.get("business_data") or []:
+        data = card.get("data") or {}
+        # path 1: raw_data escaped JSON -> user_list[].user_info (type 999 user card)
+        rd = data.get("raw_data")
+        if isinstance(rd, str):
+            try:
+                inner = json.loads(rd)
+                for ul in inner.get("user_list") or []:
+                    ui = ul.get("user_info") or {}
+                    if ui:
+                        push(ui)
+            except Exception:
+                pass
+        # path 2: fp card_name=doctype_aweme_user -> user_ids resolved via authors map
+        fp = data.get("fp")
+        if isinstance(fp, str):
+            try:
+                f, _ = dec.raw_decode(fp)
+            except Exception:
+                f = None
+            if isinstance(f, dict):
+                uids = (f.get("user_fp") or {}).get("user_ids") or []
+                for u in uids:
+                    au = authors.get(str(u))
+                    if au:
+                        push(au)
     return out
 
 

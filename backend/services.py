@@ -118,7 +118,7 @@ class MonitorService:
                 if v2_users:
                     return [SearchCandidate(
                         nickname=u.get("nickname", ""), unique_id=u.get("unique_id", "") or "",
-                        signature="", avatar_url="",
+                        signature="", avatar_url=u.get("avatar_url", ""),
                         follower_count=int(u.get("follower_count") or 0),
                         following_count=0,
                         total_favorited=0,
