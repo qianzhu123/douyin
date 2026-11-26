@@ -1035,14 +1035,31 @@ function UserQueryPanel() {
       )}
       {clubs.length > 0 && (
         <div className="user-query-clubs">
-          <div className="uq-clubs-title">粉丝团（加入 {clubs.length} 个）</div>
+          <div className="uq-clubs-title">
+            {(() => {
+              const nMember = clubs.filter((c) => c.is_member).length
+              const nBadgeOnly = clubs.length - nMember
+              return nBadgeOnly > 0
+                ? `粉丝团（加入 ${nMember} 个 · 灯牌记录 ${nBadgeOnly} 个）`
+                : `粉丝团（加入 ${clubs.length} 个）`
+            })()}
+          </div>
           {clubs.map((c) => (
             <div key={c.fandom_id} className="uq-club-row">
               <span className="uq-club-title">{c.title}</span>
               <span className="uq-club-meta">
-                灯牌等级 {c.level != null ? `Lv.${c.level}` : c.badge_absent ? '未点亮' : '未公开'}
-                {c.joined_days != null && ` · 入团 ${c.joined_days} 天`}
-                {c.continues_sign_days != null && ` · 连签 ${c.continues_sign_days} 天`}
+                {c.badge_only
+                  ? '仅灯牌记录（未入圈）'
+                  : c.is_anchor && (c.joined_days == null || c.joined_days === 0)
+                    ? '主播本人'
+                    : '灯牌等级'}
+                {' '}
+                {c.badge_only || (c.is_anchor && c.joined_days === 0)
+                  ? null
+                  : null}
+                {!(c.badge_only) && ` ${c.level != null ? `Lv.${c.level}` : c.badge_absent ? '未点亮' : '未公开'}`}
+                {c.joined_days != null && c.joined_days > 0 && ` · 入团 ${c.joined_days} 天`}
+                {c.continues_sign_days != null && c.continues_sign_days > 0 && ` · 连签 ${c.continues_sign_days} 天`}
               </span>
             </div>
           ))}

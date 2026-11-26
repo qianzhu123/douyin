@@ -315,6 +315,21 @@ def _pick_token() -> str:
 TOKEN_UID: str | None = None  # token 本人 uid (lazy; 见 _token_uid)
 
 
+def _all_tokens() -> list[tuple[str, str]]:
+    """全部可用 token [(label, token)] — 逐团探测用全账户并集扩大覆盖面
+    (2026-11-26: 单 dy1 只有 18 团, 四账户并集 25 团; dy2=alloy 小号等)。"""
+    out: list[tuple[str, str]] = []
+    tokens_dir = DATA_DIR / "fansclub_tokens"
+    for p in sorted(tokens_dir.glob("*.json")):
+        try:
+            t = json.loads(p.read_text(encoding="utf-8")).get("x_tt_token")
+            if t:
+                out.append((p.stem, str(t)))
+        except Exception:
+            continue
+    return out
+
+
 def _token_uid(token: str) -> str | None:
     """token 本人 uid: personal/meta 不带 target_user_id 默认查本人, 用
     self 列表团逐个与候选 uid 的 nick 对拍得出 (一次性, 模块级缓存)。
@@ -441,25 +456,26 @@ def query_user(raw_text: str) -> dict:
 #     覆盖面 = token 所在的团 (查询库大主播基本都在内), 无法枚举他人全部团。
     clubs: list[dict] = []
     try:
-        my_entries = fandoms_of(TOKEN_UID or uid, token)
-        clubs = [{
-            "fandom_id": str(e.get("fandom_id") or ""),
-            "title": e.get("title") or ((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
-            "anchor_uid": str((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
-            "fans_count": (e.get("live_fans_club_info") or {}).get("fans_count"),
-            "join_user_cnt": e.get("join_user_cnt"),
-            "hot_value": e.get("hot_value"),
-            "user_join_status": e.get("user_join_status"),
-            "level": None,
-            "joined_days": None,
-            "continues_sign_days": None,
-            "light_medal_cnt": None,
-            "is_member": False,
-            "_meta_done": False,
-        } for e in my_entries]
-
+        # 2026-11-26: 全 token 并集 (dy1 18 团 + dy2/3/4 各自的团, 按 fandom_id 去重
+        # ≈25 团)。单 token 覆盖面太小 (alloy 小号的团只在其本人 token 列表里)。
         if uid == token_uid:
-            # 本人查询: 列表即本人团, meta 全量 (原有逻辑)
+            # 本人查询: 仍用首选 token 本人团 (信息最全: has_signed 等)
+            my_entries = fandoms_of(TOKEN_UID or uid, token)
+            clubs = [{
+                "fandom_id": str(e.get("fandom_id") or ""),
+                "title": e.get("title") or ((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
+                "anchor_uid": str((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
+                "fans_count": (e.get("live_fans_club_info") or {}).get("fans_count"),
+                "join_user_cnt": e.get("join_user_cnt"),
+                "hot_value": e.get("hot_value"),
+                "user_join_status": e.get("user_join_status"),
+                "level": None,
+                "joined_days": None,
+                "continues_sign_days": None,
+                "light_medal_cnt": None,
+                "is_member": False,
+                "_meta_done": False,
+            } for e in my_entries]
             for c in clubs[:30]:
                 q = urlencode({**DEV, "fandom_id": c["fandom_id"],
                                "target_user_id": uid})
@@ -483,12 +499,41 @@ def query_user(raw_text: str) -> dict:
                     errors.append(f"meta[{c['title'][:12]}]: {str(exc)[:80]}")
                 time.sleep(0.3)
         else:
-            # 他人查询: 逐团探 target (上限 30 团防刷)
-            # 2026-11-25 补: 主播本人对其自家团 joined_days=0 (陈泽实测),
-            # 但响应仍回 badge/meta → is_member 需并上 "该团 anchor 就是本人"
-            # 这一真命中, 否则大主播恒判"未加入任何团"; 同时补读顶层
-            # live_fans_club_badge (灯牌等级, e122 终版数据源)。
-            for c in clubs[:30]:
+            # 他人查询: 全 token 团列表并集后逐团探 target (去重, 上限 40 团防刷)
+            seen_fids: set[str] = set()
+            probe_clubs: list[dict] = []
+            for label, tk in _all_tokens():
+                try:
+                    my_entries = fandoms_of(TOKEN_UID or uid, tk)
+                except Exception as exc:
+                    errors.append(f"{label} 团列表: {str(exc)[:60]}")
+                    continue
+                for e in my_entries:
+                    fid = str(e.get("fandom_id") or "")
+                    if not fid or fid in seen_fids:
+                        continue
+                    seen_fids.add(fid)
+                    probe_clubs.append({
+                        "fandom_id": fid,
+                        "title": e.get("title") or ((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
+                        "anchor_uid": str((e.get("live_fans_club_info") or {}).get("anchor_uid") or ""),
+                        "fans_count": (e.get("live_fans_club_info") or {}).get("fans_count"),
+                        "join_user_cnt": e.get("join_user_cnt"),
+                        "hot_value": e.get("hot_value"),
+                        "user_join_status": e.get("user_join_status"),
+                        "level": None,
+                        "joined_days": None,
+                        "continues_sign_days": None,
+                        "light_medal_cnt": None,
+                        "is_member": False,
+                        "_meta_done": False,
+                    })
+                time.sleep(0.5)
+            # 2026-11-25: 主播本人对自家团 joined_days=0 (陈泽实测), is_member 需并上
+            # anchor_uid==uid; 灯牌等级读顶层 live_fans_club_badge (对他人也下发)。
+            # 2026-11-26: light_medal_cnt>0 但 joined_days=0 = "有灯牌记录未入圈"
+            # (alloy 小号在 安若/瑞安 两团实测) — 也保留展示, 不再静默过滤。
+            for c in probe_clubs[:40]:
                 q = urlencode({**DEV, "fandom_id": c["fandom_id"],
                                "target_user_id": uid})
                 try:
@@ -501,9 +546,6 @@ def query_user(raw_text: str) -> dict:
                         # 所有团都有, 不能作为判定条件 (首版误判, 2026-11-25)。
                         is_anchor = (c.get("anchor_uid") or "") == str(uid)
                         badge = m.get("live_fans_club_badge")
-                        # 灯牌等级: badge 顶层 live_fans_club_badge.level 对他人
-                        # 也下发 (e122 终版结论; 千雾 11/13/8 三团实测), 逐团探测
-                        # 分支此前漏读 → 前端恒"未公开"。
                         c.update({
                             "joined_days": jd if jd > 0 else None,
                             "continues_sign_days": meta.get("continues_sign_days"),
@@ -513,13 +555,16 @@ def query_user(raw_text: str) -> dict:
                             "fans_badge_status": (badge or {}).get("fans_badge_status"),
                             "badge_absent": badge is None,
                             "is_member": jd > 0 or is_anchor,
+                            "badge_only": (jd == 0 and lm > 0 and not is_anchor),
                             "is_anchor": is_anchor,
                             "_meta_done": True,
                         })
                 except Exception as exc:
                     errors.append(f"probe[{c['title'][:12]}]: {str(exc)[:80]}")
                 time.sleep(0.3)
-            clubs = [c for c in clubs if c.get("is_member")]  # 只展示已入团
+            # 已入团在前; 仅灯牌记录 (未入圈) 的随后; 都没有的丢弃
+            clubs = ([c for c in probe_clubs[:40] if c.get("is_member")]
+                     + [c for c in probe_clubs[:40] if c.get("badge_only")])
     except Exception as exc:
         errors.append(f"粉丝团: {str(exc)[:120]}")
 
